@@ -1,4 +1,6 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import { DetectionZoneDto } from './detection-zone.dto';
 
 const RECORDING_MODES = ['continuous', 'motion', 'schedule', 'manual'] as const;
 const VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
@@ -195,4 +197,12 @@ export class UpdateCameraDto {
   @IsString()
   @IsIn(['SYSTEM', 'CAMERA'])
   motionTrigger?: string;
+
+  /// Zonas de detecção: polígonos normalizados (0..1). Ver DetectionZoneDto.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => DetectionZoneDto)
+  detectionZones?: DetectionZoneDto[];
 }

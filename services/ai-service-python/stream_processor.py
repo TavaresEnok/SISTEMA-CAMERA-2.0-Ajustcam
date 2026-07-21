@@ -125,7 +125,11 @@ class StreamProcessor:
         self.last_capture_failure_at = 0.0
         self.consecutive_capture_failures = 0
         self.last_advanced_infer_at = 0
-        self.motion_detector = MotionDetector()
+        # Zonas de detecção vêm no source_info enviado pela API (polígonos
+        # normalizados). Sem zonas, o detector monitora a câmera inteira.
+        zones = (source_info or {}).get("detectionZones") if isinstance(source_info, dict) else None
+        self.detection_zones = zones if isinstance(zones, list) else []
+        self.motion_detector = MotionDetector(zones=self.detection_zones)
         self.last_error = None
         self._snapshot_lock = threading.Lock()
         self._latest_detections = []
@@ -152,6 +156,24 @@ class StreamProcessor:
         self._live_view_sessions: dict[str, dict[str, Any]] = {}
         self.force_awake_until = 0.0
         self._last_applied_qos_signature = None
+        # ── Confirmação semântica sob demanda ────────────────────────────────
+        # Quando o MOG2 acusa movimento, roda o detector de objetos APENAS no
+        # recorte da região que mudou (e só a cada N segundos). Isso rotula o
+        # evento ("pessoa", "carro") sem pagar IA contínua: o custo existe só no
+        # instante do movimento, e o recorte é ampliado para o tamanho de entrada
+        # do modelo — o que ajuda justamente os alvos pequenos/distantes.
+        # Por padrão o modo é 'enrich': NUNCA descarta movimento (a gravação
+        # continua garantida); apenas acrescenta o objeto reconhecido. O modo
+        # 'strict' (descartar movimento sem objeto) é opt-in consciente.
+        self.semantic_enabled = str(os.getenv("MOTION_SEMANTIC_CONFIRM", "true")).strip().lower() != "false"
+        self.semantic_strict = str(os.getenv("MOTION_SEMANTIC_STRICT", "false")).strip().lower() == "true"
+        self.semantic_min_interval = max(1.0, float(os.getenv("MOTION_SEMANTIC_MIN_INTERVAL_SECONDS", "3")))
+        self.semantic_input_size = int(os.getenv("MOTION_SEMANTIC_INPUT_SIZE", "320"))
+        self._last_semantic_at = 0.0
+        self.semantic_runs = 0
+        self.semantic_confirmations = 0
+        self.semantic_errors = 0
+        self.semantic_last_labels: list[str] = []
 
     @property
     def advanced_analysis_type(self):
@@ -877,6 +899,11 @@ class StreamProcessor:
                 self._frame_age_samples += 1
                 self.processed_frames += 1
                 detections = self.motion_detector.infer(frame)
+                # Movimento acusado → confirma semanticamente no recorte (só no
+                # modo 'motion'; nos modos general/face o detector já roda no
+                # frame inteiro e a confirmação seria trabalho duplicado).
+                if detections and self.semantic_enabled and not self.advanced_analysis_type:
+                    detections = self._confirm_motion_semantically(frame, detections, current_time)
                 advanced_detections = []
                 should_run_advanced = (
                     self.advanced_analysis_type
@@ -941,6 +968,100 @@ class StreamProcessor:
 
             # Pausa para aliviar CPU entre frames
             time.sleep(0.02)
+
+    def _confirm_motion_semantically(self, frame, motion_detections, current_time):
+        """Roda o detector de objetos SÓ no recorte do movimento.
+
+        Devolve a lista de detecções (possivelmente enriquecida com o objeto
+        reconhecido). Em modo 'strict', detecções sem objeto relevante são
+        removidas — em 'enrich' (padrão) nada é descartado.
+
+        Falha SEMPRE de forma segura: qualquer erro aqui devolve o movimento
+        original intacto, porque perder gravação é pior do que perder o rótulo.
+        """
+        if current_time - self._last_semantic_at < self.semantic_min_interval:
+            return motion_detections
+        self._last_semantic_at = current_time
+
+        try:
+            detector = registry.ensure_detector("general")
+        except Exception as exc:
+            self.semantic_errors += 1
+            self.last_error = f"semantic_load: {exc}"
+            return motion_detections
+
+        frame_height, frame_width = frame.shape[:2]
+        confirmed: list = []
+        labels: list[str] = []
+
+        for detection in motion_detections:
+            bbox = getattr(detection, "bbox", None)
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                confirmed.append(detection)
+                continue
+
+            # Margem de 25% em volta do objeto: o MOG2 marca só a parte que se
+            # MOVEU (ex.: pernas), e o detector precisa do corpo inteiro.
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            margin_x = int((x2 - x1) * 0.25) + 8
+            margin_y = int((y2 - y1) * 0.25) + 8
+            cx1 = max(0, x1 - margin_x)
+            cy1 = max(0, y1 - margin_y)
+            cx2 = min(frame_width, x2 + margin_x)
+            cy2 = min(frame_height, y2 + margin_y)
+            if cx2 - cx1 < 16 or cy2 - cy1 < 16:
+                confirmed.append(detection)
+                continue
+
+            try:
+                crop = frame[cy1:cy2, cx1:cx2]
+                self.semantic_runs += 1
+                # context_key=None: sem tracking (o recorte muda de origem a cada
+                # evento; rastrear aqui produziria IDs sem sentido).
+                objects = detector.infer(crop, context_key=None, input_size_hint=self.semantic_input_size)
+            except Exception as exc:
+                self.semantic_errors += 1
+                self.last_error = f"semantic_infer: {exc}"
+                confirmed.append(detection)
+                continue
+
+            if not objects:
+                # Nada reconhecido: em strict o movimento é descartado (galho,
+                # sombra, chuva); em enrich segue como movimento sem rótulo.
+                if not self.semantic_strict:
+                    confirmed.append(detection)
+                continue
+
+            best = max(objects, key=lambda o: float(getattr(o, "confidence", 0.0)))
+            label = str(getattr(best, "label", "") or "objeto")
+            labels.append(label)
+            self.semantic_confirmations += 1
+
+            # Reposiciona a caixa do objeto nas coordenadas do frame inteiro.
+            obj_bbox = getattr(best, "bbox", None)
+            if isinstance(obj_bbox, list) and len(obj_bbox) == 4:
+                ox1, oy1, ox2, oy2 = [int(v) for v in obj_bbox]
+                crop_h, crop_w = crop.shape[:2]
+                scale_x = (cx2 - cx1) / max(1, crop_w)
+                scale_y = (cy2 - cy1) / max(1, crop_h)
+                detection.bbox = [
+                    int(cx1 + ox1 * scale_x),
+                    int(cy1 + oy1 * scale_y),
+                    int(cx1 + ox2 * scale_x),
+                    int(cy1 + oy2 * scale_y),
+                ]
+
+            detection.label = label
+            detection.extra = {
+                **(getattr(detection, "extra", None) or {}),
+                "semanticLabel": label,
+                "semanticConfidence": round(float(getattr(best, "confidence", 0.0)), 4),
+                "semanticConfirmed": True,
+            }
+            confirmed.append(detection)
+
+        self.semantic_last_labels = labels
+        return confirmed
 
     def _store_live_detections(self, detections, timestamp):
         payload = []
@@ -1051,6 +1172,14 @@ class StreamProcessor:
             "overlay_payload_frames": self.overlay_payload_frames,
             "overlay_empty_frames": self.overlay_empty_frames,
             "overlay_payload_ratio": round(float(overlay_payload_ratio), 4),
+            "semantic": {
+                "enabled": self.semantic_enabled,
+                "strict": self.semantic_strict,
+                "runs": self.semantic_runs,
+                "confirmations": self.semantic_confirmations,
+                "errors": self.semantic_errors,
+                "last_labels": self.semantic_last_labels[-5:],
+            },
         }
 
     def _report_detections(self, detections):

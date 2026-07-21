@@ -103,6 +103,13 @@ model Camera {
   alarmsEnabled          Boolean      @default(true)
   hasEdgeAi              Boolean      @default(false)
   motionTrigger          String       @default("SYSTEM")
+  /// Zonas de detecção por câmera (polígonos em coordenadas NORMALIZADAS 0..1,
+  /// independentes da resolução de análise). Formato:
+  /// [{ id, name, kind: 'include'|'exclude', points: [[x,y], ...] }]
+  /// - 'exclude': movimento dentro do polígono é IGNORADO (árvore, rua, céu).
+  /// - 'include': se houver ao menos uma, só conta movimento DENTRO delas.
+  /// Vazio/null = câmera inteira monitorada (comportamento atual preservado).
+  detectionZones         Json?
   detectedVideoCodec     String?
   detectedWidth          Int?
   detectedHeight         Int?

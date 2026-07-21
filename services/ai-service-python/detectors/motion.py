@@ -25,9 +25,12 @@ class MotionDetector(Detector):
 
     event_type = "MOTION_DETECTED"
 
-    def __init__(self, cfg: dict | None = None):
+    def __init__(self, cfg: dict | None = None, zones: list | None = None):
         self.frame_width = int(MOTION_PROFILE["analysis_width"])
         self.frame_height = int(MOTION_PROFILE["analysis_height"])
+        # Máscara de zonas (0/255) na resolução de ANÁLISE. None = câmera inteira.
+        self._zones = zones or []
+        self._zone_mask = self._build_zone_mask(self._zones)
         frame_area = float(self.frame_width * self.frame_height)
         # Limiar por OBJETO (componente conectado), proporcional à área analisada.
         self.min_component_pixels = max(
@@ -59,6 +62,60 @@ class MotionDetector(Detector):
         # estacionado vira fundo aos poucos, como deve ser).
         self._motion_streak = 0
         self._freeze_learning_frames = int(MOTION_PROFILE.get("motion_freeze_learning_frames", 6))
+
+    def _build_zone_mask(self, zones: list | None):
+        """Converte polígonos normalizados (0..1) numa máscara binária.
+
+        - `exclude`: recortado da área monitorada.
+        - `include`: havendo ao menos um, só o interior deles é monitorado.
+        Retorna None quando não há zonas (câmera inteira — caminho mais rápido,
+        sem custo nenhum para quem não usa o recurso).
+        """
+        if not zones:
+            return None
+        try:
+            includes = [z for z in zones if str(z.get("kind", "exclude")) == "include"]
+            excludes = [z for z in zones if str(z.get("kind", "exclude")) == "exclude"]
+            if not includes and not excludes:
+                return None
+
+            def to_polygon(zone):
+                pts = zone.get("points") or []
+                arr = [
+                    [
+                        int(max(0.0, min(1.0, float(p[0]))) * (self.frame_width - 1)),
+                        int(max(0.0, min(1.0, float(p[1]))) * (self.frame_height - 1)),
+                    ]
+                    for p in pts
+                    if isinstance(p, (list, tuple)) and len(p) >= 2
+                ]
+                return np.array(arr, dtype=np.int32) if len(arr) >= 3 else None
+
+            # Base: tudo monitorado, salvo se houver zonas de inclusão.
+            mask = np.full((self.frame_height, self.frame_width), 0 if includes else 255, dtype=np.uint8)
+            for zone in includes:
+                poly = to_polygon(zone)
+                if poly is not None:
+                    cv2.fillPoly(mask, [poly], 255)
+            for zone in excludes:
+                poly = to_polygon(zone)
+                if poly is not None:
+                    cv2.fillPoly(mask, [poly], 0)
+            # Máscara totalmente vazia seria "câmera cega": trata como sem zonas.
+            return mask if int(np.count_nonzero(mask)) > 0 else None
+        except Exception:
+            return None  # zona malformada nunca pode cegar a câmera
+
+    def set_zones(self, zones: list | None) -> None:
+        self._zones = zones or []
+        self._zone_mask = self._build_zone_mask(self._zones)
+
+    def _effective_global_change_pixels(self) -> int:
+        if self._zone_mask is None:
+            return self.global_change_pixels
+        monitored = int(np.count_nonzero(self._zone_mask))
+        ratio = float(MOTION_PROFILE["motion_global_change_ratio"])
+        return max(self.min_component_pixels * 4, int(monitored * ratio))
 
     def load(self) -> None:
         if self.fgbg is None:
@@ -108,6 +165,12 @@ class MotionDetector(Detector):
         # Sombra (127) não é movimento; só primeiro plano pleno (255) conta.
         fgmask = np.where(fgmask == 255, np.uint8(255), np.uint8(0))
 
+        # Zonas: zera o que está fora da área monitorada ANTES de medir. Assim
+        # árvore/rua excluídas não contam para movimento nem para a rejeição
+        # global (senão vento numa árvore grande "apagaria" a cena inteira).
+        if self._zone_mask is not None:
+            fgmask = cv2.bitwise_and(fgmask, self._zone_mask)
+
         # Morfologia para eliminar ruído fino e unir fragmentos do mesmo objeto.
         kernel = np.ones((5, 5), np.uint8)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel)
@@ -120,7 +183,9 @@ class MotionDetector(Detector):
 
         # MUDANÇA GLOBAL (IR/exposição/relâmpago/câmera mexida): não é movimento.
         # Reaprende o fundo com warm-up curto para não disparar no reajuste.
-        if motion_pixels >= self.global_change_pixels:
+        # Com zonas, o limiar é proporcional à ÁREA MONITORADA (não à tela toda),
+        # senão uma zona pequena jamais atingiria a fração de mudança global.
+        if motion_pixels >= self._effective_global_change_pixels():
             self._create_background(self._rewarmup_total)
             return []
 

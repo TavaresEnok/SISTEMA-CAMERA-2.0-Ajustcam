@@ -246,10 +246,17 @@ export class CamerasService {
         alarmsEnabled: dto.alarmsEnabled !== undefined ? dto.alarmsEnabled : existing.alarmsEnabled,
         hasEdgeAi: dto.hasEdgeAi !== undefined ? dto.hasEdgeAi : existing.hasEdgeAi,
         motionTrigger: dto.motionTrigger ?? existing.motionTrigger,
+        // Zonas: `undefined` preserva o que existe; array vazio LIMPA (volta a
+        // monitorar a câmera inteira) — por isso a checagem explícita.
+        ...(dto.detectionZones !== undefined ? { detectionZones: dto.detectionZones as any } : {}),
       },
       include: { site: true, area: true, group: true },
     });
 
+    // NOTA: o reinício da análise (para recarregar as máscaras de zona) é feito
+    // pelo CONTROLLER, não aqui. Importar os serviços de IA neste arquivo cria o
+    // ciclo real de módulos Cameras→Ai→Cameras e o Nest não instancia
+    // (MediamtxProxyService fica sem CamerasService). Incidente 2026-07-21.
     return sanitizeCamera(camera);
   }
 

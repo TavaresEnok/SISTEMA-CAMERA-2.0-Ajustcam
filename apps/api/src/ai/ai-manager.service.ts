@@ -805,6 +805,9 @@ export class AiManagerService implements OnModuleInit {
       analyticsChannel: channel,
       configuredAnalyticsSubtype: cam.analyticsSubtype ?? null,
       configuredAnalyticsChannel: cam.analyticsChannel ?? null,
+      // Zonas de detecção (polígonos normalizados) seguem para o ai-service, que
+      // as converte em máscara na resolução de análise. Ver detectors/motion.py.
+      detectionZones: Array.isArray(cam.detectionZones) ? cam.detectionZones : [],
     };
 
     const rtspTransport = cam.preferredRtspTransport || process.env.FFMPEG_RTSP_TRANSPORT || 'tcp';

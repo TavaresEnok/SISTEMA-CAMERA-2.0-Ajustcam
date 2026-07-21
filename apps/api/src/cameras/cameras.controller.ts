@@ -19,6 +19,7 @@ import { RequirePermission } from '../role-permissions/require-permission.decora
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { AiManagerService } from '../ai/ai-manager.service';
+import { AiService } from '../ai/ai.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
 
 @Controller('cameras')
@@ -581,6 +582,20 @@ export class CamerasController {
     } else if (dto.enabled === true && !wasEnabled) {
       // Reativada: religa live/gravação/IA pelo mesmo fluxo do pós-criação.
       this.schedulePostCreateProvisioning(id);
+    } else if (dto.detectionZones !== undefined) {
+      // Zonas mudaram: a análise precisa recarregar as máscaras. Feito AQUI (e
+      // não em CamerasService) porque importar os serviços de IA lá fecha o
+      // ciclo de módulos Cameras→Ai→Cameras e o Nest não sobe.
+      void (async () => {
+        try {
+          const aiService = this.moduleRef.get(AiService, { strict: false });
+          await aiService.stopAnalysis(id).catch(() => undefined);
+          const aiManager = this.moduleRef.get(AiManagerService, { strict: false });
+          await aiManager.startCamera(id, { allowCameraTrigger: true }).catch(() => undefined);
+        } catch {
+          // IA indisponível: as zonas passam a valer no próximo start da análise.
+        }
+      })();
     }
     await this.auditService.log(
       user.id,
