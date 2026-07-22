@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { DetectionZonesEditor, type DetectionZone } from '../components/DetectionZonesEditor';
 import { cn } from '@/lib/utils';
 import { LiveStreamPlayer, type LivePlayerStatus } from '../components/LiveStreamPlayer';
 import { toast } from '../hooks/use-toast';
@@ -445,7 +446,7 @@ export default function CameraDetailPage() {
       return { main: 'playback' as const };
     }
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'events' || tab === 'settings') return { main: tab };
+    if (tab === 'events' || tab === 'settings' || tab === 'zones') return { main: tab };
     return { main: 'playback' as const };
   }, []);
 
@@ -1402,6 +1403,7 @@ export default function CameraDetailPage() {
             {[
               ['playback', 'Reprodução'],
               ['events', 'Eventos'],
+              ['zones', 'Zonas'],
               ['settings', 'Configurações'],
             ].map(([tab, label]) => (
               <TabsTrigger key={tab} value={tab} className="h-6 px-3 text-xs capitalize">
@@ -1459,6 +1461,27 @@ export default function CameraDetailPage() {
                     <span className="font-mono text-muted-foreground">{event.description}</span>
                   </div>
                 ))}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="zones" className="mt-4">
+            <div className="rounded-lg border border-border bg-card/60 p-5">
+              <div className="mb-3">
+                <h3 className="text-sm font-semibold">Zonas de detecção</h3>
+                <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">
+                  Desenhe sobre a imagem as áreas que devem ser ignoradas (rua, árvores, céu) ou as únicas
+                  que devem ser monitoradas. Reduz alarme falso sem perder o que importa.
+                </p>
+              </div>
+              {cam?.id ? (
+                <DetectionZonesEditor
+                  cameraId={cam.id}
+                  cameraName={cam.name}
+                  initialZones={(cameraMeta as { detectionZones?: DetectionZone[] } | null)?.detectionZones ?? null}
+                />
+              ) : (
+                <p className="text-xs text-[hsl(var(--muted-foreground))]">Carregando câmera…</p>
+              )}
             </div>
           </TabsContent>
 
