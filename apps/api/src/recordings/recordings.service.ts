@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { createReadStream, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { rename, rm, stat } from 'node:fs/promises';
@@ -30,11 +30,13 @@ type RecordingHealthCacheEntry = {
 };
 
 @Injectable()
-export class RecordingsService implements OnModuleInit {
+export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RecordingsService.name);
   private readonly thumbnailGenerationInFlight = new Map<string, Promise<void>>();
   private readonly thumbnailGenerationWaiters: Array<() => void> = [];
   private thumbnailGenerationActive = 0;
+  private integritySweepTimer: NodeJS.Timeout | null = null;
+  private integritySweepRunning = false;
   private readonly thumbnailGenerationConcurrency = Math.max(
     1,
     Math.min(4, Number(process.env.RECORDING_THUMBNAIL_CONCURRENCY ?? 2)),
@@ -48,6 +50,18 @@ export class RecordingsService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    // Varredura periódica de INTEGRIDADE: hoje só descobrimos que uma gravação
+    // está corrompida quando alguém tenta reproduzi-la — normalmente no pior
+    // momento possível (precisando da prova). Aqui uma amostra pequena é
+    // verificada de tempos em tempos e o problema vira evento na câmera.
+    if (String(process.env.RECORDING_INTEGRITY_SWEEP_ENABLED ?? 'true') !== 'false') {
+      const intervalMs = Math.max(15 * 60_000, Number(process.env.RECORDING_INTEGRITY_SWEEP_INTERVAL_MS ?? 60 * 60_000));
+      this.integritySweepTimer = setInterval(() => void this.runIntegritySweep(), intervalMs);
+      this.integritySweepTimer.unref?.();
+      const firstRun = setTimeout(() => void this.runIntegritySweep(), 5 * 60_000);
+      firstRun.unref();
+    }
+
     if (String(process.env.RECORDING_THUMBNAIL_BACKFILL_ENABLED ?? 'true') === 'false') return;
     const timer = setTimeout(() => {
       const limit = Math.max(1, Math.min(10_000, Number(process.env.RECORDING_THUMBNAIL_BACKFILL_LIMIT ?? 2_000)));
@@ -56,6 +70,75 @@ export class RecordingsService implements OnModuleInit {
       });
     }, 15_000);
     timer.unref();
+  }
+
+  onModuleDestroy() {
+    if (this.integritySweepTimer) {
+      clearInterval(this.integritySweepTimer);
+      this.integritySweepTimer = null;
+    }
+  }
+
+  /**
+   * Verifica a integridade de uma AMOSTRA pequena de gravações recentes.
+   *
+   * O teste (`getRecordingIntegrity`) decodifica o arquivo inteiro — é caro. Por
+   * isso a amostra é pequena, SERIALIZADA (um por vez, sem pico de CPU) e o
+   * resultado é cacheado, então cada gravação é conferida uma única vez por TTL.
+   * Corrupção vira `HEALTH_RECORDING_CORRUPT` na timeline da câmera.
+   */
+  private async runIntegritySweep() {
+    if (this.integritySweepRunning) return;
+    this.integritySweepRunning = true;
+    try {
+      const sampleSize = Math.max(1, Math.min(20, Number(process.env.RECORDING_INTEGRITY_SWEEP_SAMPLE ?? 3)));
+      // Gravações fechadas (endedAt != null) das últimas 24h: as recentes são as
+      // que ainda podem ser salvas/reprocessadas se algo estiver errado.
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const candidates = await this.prisma.recording.findMany({
+        where: { endedAt: { not: null }, startedAt: { gte: since } },
+        orderBy: { startedAt: 'desc' },
+        take: 200,
+        select: { id: true, cameraId: true, filePath: true },
+      });
+      if (!candidates.length) return;
+
+      const cache = this.readDiagnosticsCache();
+      const ttlMs = this.getCacheTtlMs();
+      const pending = candidates.filter((item) => {
+        const entry = cache[item.id];
+        const checkedAt = entry?.checkedAt ? new Date(entry.checkedAt).getTime() : 0;
+        return !entry?.integrity || Date.now() - checkedAt > ttlMs;
+      }).slice(0, sampleSize);
+      if (!pending.length) return;
+
+      let corrupt = 0;
+      for (const item of pending) {
+        try {
+          const integrity = await this.getRecordingIntegrity(item.id) as { integrityOk?: boolean; reason?: string | null };
+          if (integrity?.integrityOk) continue;
+          corrupt += 1;
+          this.logger.warn(`Gravação com integridade suspeita: ${item.id} (${integrity?.reason ?? 'motivo desconhecido'})`);
+          await this.prisma.cameraEvent.create({
+            data: {
+              cameraId: item.cameraId,
+              type: 'HEALTH_RECORDING_CORRUPT',
+              severity: 'ERROR',
+              message: 'Gravação com falha de integridade detectada na verificação periódica.',
+              metadata: { recordingId: item.id, reason: integrity?.reason ?? null, filePath: item.filePath },
+              occurredAt: new Date(),
+            },
+          }).catch(() => undefined);
+        } catch (error) {
+          this.logger.warn(`Falha ao verificar integridade de ${item.id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.logger.log(`Varredura de integridade: ${pending.length} verificada(s), ${corrupt} com problema.`);
+    } catch (error) {
+      this.logger.warn(`Varredura de integridade falhou: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.integritySweepRunning = false;
+    }
   }
 
   async ensureRecordingExists(recordingId: string) {
