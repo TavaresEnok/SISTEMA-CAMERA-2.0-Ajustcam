@@ -3,8 +3,9 @@
  */
 import { LinearGradient } from 'expo-linear-gradient';
 import Constants from 'expo-constants';
-import React from 'react';
+import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { AddCameraSheet } from '../components/AddCameraSheet';
 import { Icon, type IconName } from '../components/Icon';
 import { useTheme } from '../theme/ThemeProvider';
 import type { User } from '../types';
@@ -12,12 +13,15 @@ import type { User } from '../types';
 interface SettingsScreenProps {
   user: User | null;
   apiUrl: string;
+  token?: string | null;
   connected: boolean;
   biometricAvailable: boolean;
   biometricEnabled: boolean;
   biometricLabel: string;
   onBiometricChange: (enabled: boolean) => void;
   onLogout: () => void;
+  /** Recarrega a biblioteca de câmeras após cadastrar uma nova. */
+  onCamerasChanged?: () => void;
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -34,9 +38,10 @@ function initialsOf(name?: string): string {
 }
 
 export function SettingsScreen({
-  user, connected, biometricAvailable, biometricEnabled, biometricLabel, onBiometricChange, onLogout,
+  user, apiUrl, token, connected, biometricAvailable, biometricEnabled, biometricLabel, onBiometricChange, onLogout, onCamerasChanged,
 }: SettingsScreenProps) {
   const { theme, themeMode, setThemeMode } = useTheme();
+  const [addCameraOpen, setAddCameraOpen] = useState(false);
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -104,6 +109,24 @@ export function SettingsScreen({
         />
       </View>
 
+      {/* Minhas câmeras — cadastro de câmera privada do próprio cliente (LGPD). */}
+      <Text style={[styles.groupLabel, { color: theme.textMuted }]}>MINHAS CÂMERAS</Text>
+      <Pressable
+        onPress={() => setAddCameraOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel="Adicionar câmera"
+        style={[styles.addCamera, { backgroundColor: theme.surface, borderColor: theme.border }]}
+      >
+        <View style={[styles.addCameraIcon, { backgroundColor: theme.accentBg }]}>
+          <Icon name="plus" size={19} color={theme.accent} strokeWidth={2.6} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.rowTitle, { color: theme.text }]}>Adicionar câmera</Text>
+          <Text style={[styles.rowSubtitle, { color: theme.textSub }]} numberOfLines={1}>Câmera privada — só você vê as imagens</Text>
+        </View>
+        <Icon name="camera" size={18} color={theme.textMuted} />
+      </Pressable>
+
       {/* Conexão */}
       <Text style={[styles.groupLabel, { color: theme.textMuted }]}>CONEXÃO</Text>
       <View style={[styles.group, { backgroundColor: theme.surface, borderColor: theme.border }]}>
@@ -133,6 +156,14 @@ export function SettingsScreen({
         <Text style={[styles.logoutText, { color: theme.danger }]}>Sair da conta</Text>
       </Pressable>
       <Text style={[styles.version, { color: theme.textMuted }]}>DRAC VMS · versão {Constants.expoConfig?.version ?? '—'}</Text>
+
+      <AddCameraSheet
+        visible={addCameraOpen}
+        apiUrl={apiUrl}
+        token={token ?? null}
+        onClose={() => setAddCameraOpen(false)}
+        onCreated={onCamerasChanged}
+      />
     </ScrollView>
   );
 }
@@ -175,6 +206,8 @@ const styles = StyleSheet.create({
   rowIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   rowTitle: { fontSize: 13.5, fontWeight: '700' },
   rowSubtitle: { fontSize: 11.5, fontWeight: '600', marginTop: 1 },
+  addCamera: { flexDirection: 'row', alignItems: 'center', gap: 13, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, paddingVertical: 13, paddingHorizontal: 15, marginBottom: 18 },
+  addCameraIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   logout: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, paddingVertical: 15, marginBottom: 14 },
   logoutText: { fontSize: 14, fontWeight: '800' },
   version: { textAlign: 'center', fontSize: 11.5, fontWeight: '600' },

@@ -4,9 +4,11 @@
  * armazenamento, lista de ações, sair. Ligado ao usuário/tema reais.
  */
 import Constants from 'expo-constants';
+import { useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useTheme } from '../../theme/ThemeProvider';
 import { Icon, type IconName } from '../../components/Icon';
+import { AddCameraSheet } from '../../components/AddCameraSheet';
 
 const TITLE = 'Sora';
 const UI = 'InstrumentSans';
@@ -15,12 +17,14 @@ const MONO = 'JetBrainsMono';
 interface Props {
   user: { name?: string | null; email?: string } | null;
   apiUrl: string;
+  token?: string | null;
   connected: boolean;
   biometricAvailable: boolean;
   biometricEnabled: boolean;
   biometricLabel: string;
   onBiometricChange: (enabled: boolean) => void;
   onLogout: () => void;
+  onCamerasChanged?: () => void;
   facilityName?: string;
 }
 
@@ -30,8 +34,9 @@ function initials(name?: string | null): string {
 }
 
 export function SettingsRedesign(props: Props) {
-  const { user, connected, biometricAvailable, biometricEnabled, biometricLabel, onBiometricChange, onLogout, facilityName } = props;
+  const { user, apiUrl, token, connected, biometricAvailable, biometricEnabled, biometricLabel, onBiometricChange, onLogout, onCamerasChanged, facilityName } = props;
   const { theme, themeMode, setThemeMode } = useTheme();
+  const [addCameraOpen, setAddCameraOpen] = useState(false);
   const s = makeStyles(theme);
   const isDark = themeMode === 'dark' || (themeMode === 'system' && theme.mode === 'dark');
   const version = Constants.expoConfig?.version ?? '1.0';
@@ -72,6 +77,12 @@ export function SettingsRedesign(props: Props) {
           ) : null}
         </View>
 
+        {/* Minhas câmeras — cadastro de câmera privada do próprio cliente (LGPD). */}
+        <Text style={s.section}>Minhas câmeras</Text>
+        <View style={s.group}>
+          <Item theme={theme} s={s} icon="plus" label="Adicionar câmera" onPress={() => setAddCameraOpen(true)} />
+        </View>
+
         <TouchableOpacity style={s.logout} activeOpacity={0.85} onPress={onLogout}>
           <Icon name="logout" size={18} color={theme.danger} />
           <Text style={s.logoutText}>Sair da conta</Text>
@@ -82,6 +93,14 @@ export function SettingsRedesign(props: Props) {
           <Text style={s.footerText}>{connected ? 'servidor conectado' : 'sem conexão'} · v{version}</Text>
         </View>
       </ScrollView>
+
+      <AddCameraSheet
+        visible={addCameraOpen}
+        apiUrl={apiUrl}
+        token={token ?? null}
+        onClose={() => setAddCameraOpen(false)}
+        onCreated={onCamerasChanged}
+      />
     </View>
   );
 }

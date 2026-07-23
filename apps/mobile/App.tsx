@@ -1598,23 +1598,27 @@ function AppInner() {
             <SettingsRedesign
               user={session.user}
               apiUrl={session.apiUrl}
+              token={session.token}
               connected={!lastSyncError}
               biometricAvailable={biometricAvailable}
               biometricEnabled={biometricEnabled}
               biometricLabel={biometricLabel}
               onBiometricChange={(enabled) => { void changeBiometricPreference(enabled); }}
               onLogout={() => { void logout(); }}
+              onCamerasChanged={() => { void loadAll(true); }}
             />
           ) : (
           <SettingsScreen
             user={session.user}
             apiUrl={session.apiUrl}
+            token={session.token}
             connected={!lastSyncError}
             biometricAvailable={biometricAvailable}
             biometricEnabled={biometricEnabled}
             biometricLabel={biometricLabel}
             onBiometricChange={(enabled) => { void changeBiometricPreference(enabled); }}
             onLogout={() => { void logout(); }}
+            onCamerasChanged={() => { void loadAll(true); }}
           />
           )
         )}
