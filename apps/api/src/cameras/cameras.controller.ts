@@ -103,6 +103,14 @@ export class CamerasController {
    * é auto-vinculada ao grupo do responsável e recebe permissão de admin do dono.
    * O provedor/admin verá a câmera apenas para gerenciamento, nunca o conteúdo.
    */
+  /** Cota de câmeras privadas do cliente (usado/limite) — o app mostra "1 de 1". */
+  @Roles(UserRole.VIEWER)
+  @Get('mine/quota')
+  async myPrivateQuota(@CurrentUser() user: AuthUser) {
+    const quota = await this.camerasService.getPrivateCameraQuota(user);
+    return { ...quota, canAdd: quota.used < quota.limit };
+  }
+
   @Roles(UserRole.VIEWER)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('mine')

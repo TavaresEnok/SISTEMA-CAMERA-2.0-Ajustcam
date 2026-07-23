@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class UpdateCameraGroupDto {
   @IsOptional()
@@ -12,4 +12,11 @@ export class UpdateCameraGroupDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /// Cota de câmeras privadas do grupo (o "acordado" com o cliente). 0 = nenhuma.
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000)
+  maxPrivateCameras?: number;
 }

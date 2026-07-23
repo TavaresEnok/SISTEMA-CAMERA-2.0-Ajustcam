@@ -455,6 +455,10 @@ model CameraGroup {
   name        String
   description String?
   isActive    Boolean  @default(true)
+  /// Cota de câmeras PRIVADAS que os usuários deste grupo podem cadastrar pelo
+  /// app ("+ Adicionar câmera"). É o "acordado" com o cliente. 0 = não pode
+  /// cadastrar câmera privada (padrão seguro: liberado só quando o admin define).
+  maxPrivateCameras Int  @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

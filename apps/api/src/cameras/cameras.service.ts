@@ -196,6 +196,18 @@ export class CamerasService {
     });
     const groupId = ownerGroup?.groupId ?? dto.groupId ?? undefined;
 
+    // COTA (o "acordado"): quantas câmeras privadas o cliente pode ter. A cota
+    // vive no GRUPO do cliente; sem grupo (ou cota 0), não pode cadastrar. O
+    // padrão 0 é seguro — só libera quando o admin define no grupo.
+    const quota = await this.getPrivateCameraQuota(owner, groupId ?? null);
+    if (quota.used >= quota.limit) {
+      throw new BadRequestException(
+        quota.limit === 0
+          ? 'Seu plano não inclui câmeras privadas. Fale com o provedor para liberar.'
+          : `Limite de câmeras privadas atingido (${quota.used}/${quota.limit}). Fale com o provedor para ampliar.`,
+      );
+    }
+
     const created = await this.create({ ...dto, groupId }, { isPrivate: true, ownerUserId: owner.id });
 
     // Permissão direta de ADMIN para o dono: o gate de conteúdo (canViewCamera)
@@ -206,6 +218,30 @@ export class CamerasService {
     }).catch(() => undefined);
 
     return created;
+  }
+
+  /**
+   * Cota de câmeras privadas do cliente: quantas ele JÁ tem (`used`) e o teto
+   * (`limit`) definido no grupo dele. O app usa isso para mostrar "1 de 1" e
+   * desabilitar o "+" quando estourar. Sem grupo → limite 0 (padrão seguro).
+   */
+  async getPrivateCameraQuota(owner: AuthUser, groupIdHint?: string | null): Promise<{ used: number; limit: number }> {
+    let groupId = groupIdHint ?? null;
+    if (!groupId) {
+      const ownerGroup = await this.prisma.cameraPermission.findFirst({
+        where: { userId: owner.id, groupId: { not: null }, level: CameraPermissionLevel.ADMIN },
+        select: { groupId: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      groupId = ownerGroup?.groupId ?? null;
+    }
+    const [used, group] = await Promise.all([
+      this.prisma.camera.count({ where: { isPrivate: true, ownerUserId: owner.id } }),
+      groupId
+        ? this.prisma.cameraGroup.findUnique({ where: { id: groupId }, select: { maxPrivateCameras: true } })
+        : Promise.resolve(null),
+    ]);
+    return { used, limit: Math.max(0, group?.maxPrivateCameras ?? 0) };
   }
 
   async findAll(accessibleIds?: string[]) {

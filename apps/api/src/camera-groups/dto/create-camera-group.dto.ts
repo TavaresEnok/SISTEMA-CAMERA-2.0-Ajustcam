@@ -1,4 +1,4 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class CreateCameraGroupDto {
   @IsString()
@@ -7,4 +7,11 @@ export class CreateCameraGroupDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  /// Cota de câmeras privadas do grupo (o "acordado" com o cliente). 0 = nenhuma.
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000)
+  maxPrivateCameras?: number;
 }
