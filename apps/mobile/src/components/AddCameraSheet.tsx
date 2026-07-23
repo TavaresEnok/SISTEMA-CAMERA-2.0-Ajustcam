@@ -10,7 +10,7 @@
  */
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { request } from '../services/api';
 import { useTheme } from '../theme/ThemeProvider';
 import { Icon } from './Icon';
@@ -96,7 +96,10 @@ export function AddCameraSheet({ visible, apiUrl, token, onClose, onCreated }: A
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.root}>
+      <KeyboardAvoidingView
+        style={styles.root}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
         <Pressable style={styles.backdrop} onPress={onClose} />
         <View style={[styles.sheet, { backgroundColor: theme.bg, borderColor: theme.border }]}>
           <View style={[styles.grabber, { backgroundColor: theme.border }]} />
@@ -188,7 +191,7 @@ export function AddCameraSheet({ visible, apiUrl, token, onClose, onCreated }: A
             </LinearGradient>
           </Pressable>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
