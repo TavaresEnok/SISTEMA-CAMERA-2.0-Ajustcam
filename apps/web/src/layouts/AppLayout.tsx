@@ -14,6 +14,7 @@ import { useAuthStore } from '../store/authStore';
 const PAGE_TITLES: Record<string, string> = {
   '/live':          'Ao Vivo',
   '/playback':      'Reprodução',
+  '/review':        'Revisão',
   '/alarms':        'Alertas',
   '/cameras':       'Câmeras',
   '/map':           'Mapa / Planta',

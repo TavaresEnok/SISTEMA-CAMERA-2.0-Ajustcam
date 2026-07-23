@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'wouter';
 import { motion } from 'framer-motion';
 import {
-  Monitor, PlaySquare,
+  Monitor, PlaySquare, Sparkles,
   Camera, Settings,
   ChevronLeft, ChevronRight, LogOut, Keyboard, Shield,
   Server, Users, Radar, FolderKey, ShieldCheck, Search, Sun, Moon,
@@ -35,6 +35,7 @@ const NAV_SECTIONS: NavSection[] = [
     items: [
       { path: '/live',     label: 'Ao Vivo',       icon: Monitor },
       { path: '/playback', label: 'Reprodução',     icon: PlaySquare },
+      { path: '/review',   label: 'Revisão',        icon: Sparkles },
       // Alertas requerem operador ou superior (viewers não têm acesso)
       { path: '/alarms',   label: 'Alertas',        icon: Bell,     roles: ['admin', 'operator'] },
       { path: '/ptz',      label: 'Controle PTZ',   icon: Crosshair },

@@ -47,6 +47,7 @@ const LoginPage       = lazyWithReload(() => import('./pages/LoginPage'));
 const ResetPasswordPage = lazyWithReload(() => import('./pages/ResetPasswordPage'));
 const LiveViewPage    = lazyWithReload(() => import('./pages/LiveViewPage'));
 const PlaybackPage    = lazyWithReload(() => import('./pages/PlaybackPage'));
+const ReviewPage      = lazyWithReload(() => import('./pages/ReviewPage'));
 const AlarmsPage      = lazyWithReload(() => import('./pages/AlarmsPage'));
 const CamerasPage     = lazyWithReload(() => import('./pages/CamerasPage'));
 const MapPage         = lazyWithReload(() => import('./pages/MapPage'));
@@ -207,6 +208,9 @@ function AppRoutes() {
       </Route>
       <Route path="/playback">
         {() => <ProtectedRoute component={PlaybackPage} />}
+      </Route>
+      <Route path="/review">
+        {() => <ProtectedRoute component={ReviewPage} />}
       </Route>
       <Route path="/ptz">
         {() => <ProtectedRoute component={PTZPage} />}
