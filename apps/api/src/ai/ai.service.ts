@@ -87,6 +87,32 @@ export class AiService {
     }
   }
 
+  /**
+   * Confirma se um evento de movimento nativo (ONVIF) tem objeto real.
+   * Retorna: true (objeto), false (frame lido, sem objeto) ou null (não sei —
+   * IA fora/lenta/erro). O chamador trata null como "gravar mesmo assim".
+   */
+  async confirmMotion(cameraId: string, rtspUrl: string, acceptLabels?: string[]): Promise<{ confirmed: boolean | null; labels: string[]; confidence?: number; reason?: string | null }> {
+    if (this.isDisabled()) return { confirmed: null, labels: [], reason: 'ai_disabled' };
+    try {
+      const response: any = await firstValueFrom(this.httpService.post(
+        `${this.aiBaseUrl}/confirm-motion`,
+        { camera_id: cameraId, rtsp_url: rtspUrl, accept_labels: acceptLabels ?? null },
+        { headers: this.internalHeaders(), timeout: 8000 },
+      ));
+      const data = response?.data ?? {};
+      return {
+        confirmed: typeof data.confirmed === 'boolean' ? data.confirmed : null,
+        labels: Array.isArray(data.labels) ? data.labels : [],
+        confidence: typeof data.confidence === 'number' ? data.confidence : undefined,
+        reason: data.reason ?? null,
+      };
+    } catch (error: any) {
+      // Falha segura: não sei → o chamador grava.
+      return { confirmed: null, labels: [], reason: `error:${error?.message ?? 'unknown'}` };
+    }
+  }
+
   async stopAnalysis(cameraId: string) {
     try {
       const response: any = await firstValueFrom(this.httpService.post(

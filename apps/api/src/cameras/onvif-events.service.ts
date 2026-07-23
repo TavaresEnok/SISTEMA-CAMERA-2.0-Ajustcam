@@ -6,6 +6,7 @@ import { RecordingProcessManagerService } from '../recordings/recording-process-
 import { CamerasService } from './cameras.service';
 import { AiManagerService } from '../ai/ai-manager.service';
 import { AiService } from '../ai/ai.service';
+import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const onvif = require('onvif');
 
@@ -353,13 +354,77 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
     if (state.fallbackActive) void this.deactivateFallback(cameraId);
     if (now - (this.lastTriggerByCamera.get(cameraId) ?? 0) < cooldownMs) return;
     this.lastTriggerByCamera.set(cameraId, now);
+    void this.handleNativeMotion(cameraId);
+  }
+
+  /**
+   * Fluxo de um evento de movimento NATIVO (ONVIF), agora com CONFIRMAÇÃO
+   * SEMÂNTICA opcional. As câmeras disparam ruído em cena vazia (medido:
+   * ~222/hora de madrugada); confirmar que há objeto real antes de gravar mata
+   * esse ruído e evita encher o disco de gravações de nada.
+   *
+   * Falha SEMPRE segura: se a IA está desligada, fora do ar, lenta ou não tem
+   * certeza (confirmed=null), GRAVA mesmo assim. Só suprime quando a IA leu o
+   * frame e afirmou que NÃO há objeto (confirmed=false). Perder gravação real
+   * por causa da IA é inaceitável; gravar um evento sem objeto é só custo.
+   */
+  private async handleNativeMotion(cameraId: string) {
+    const filterEnabled = String(process.env.AI_ONVIF_SEMANTIC_FILTER ?? 'true').trim().toLowerCase() !== 'false';
+
+    let confirmation: { confirmed: boolean | null; labels: string[]; confidence?: number; reason?: string | null } | null = null;
+    if (filterEnabled) {
+      // Só vale a pena confirmar se a câmera está ARMADA para gravar por
+      // movimento — senão o evento é apenas informativo e não custeia um YOLO.
+      const cam = await this.prisma.camera.findUnique({
+        where: { id: cameraId },
+        select: { recordingMode: true, enabled: true },
+      }).catch(() => null);
+      if (cam && cam.enabled !== false && cam.recordingMode === 'motion') {
+        confirmation = await this.confirmNativeMotion(cameraId).catch(() => null);
+      }
+    }
+
+    // confirmed === false → frame lido e SEM objeto: suprime a gravação, mas
+    // deixa um rastro leve para diagnóstico (não polui a timeline de alarmes).
+    if (confirmation?.confirmed === false) {
+      void this.registerCameraEvent(cameraId, 'MOTION_SUPPRESSED', 'INFO',
+        'Movimento nativo sem objeto reconhecido — gravação não acionada.',
+        { source: 'onvif', reason: confirmation.reason ?? 'no_object' });
+      return;
+    }
+
+    const semanticLabel = confirmation?.confirmed === true ? (confirmation.labels[0] ?? null) : null;
     void this.registerCameraEvent(cameraId, 'MOTION_DETECTED', 'INFO',
-      'Movimento detectado pela própria câmera (ONVIF).', { source: 'onvif' });
+      semanticLabel
+        ? `${semanticLabel} detectado(a) pela câmera (ONVIF).`
+        : 'Movimento detectado pela própria câmera (ONVIF).',
+      {
+        source: 'onvif',
+        ...(semanticLabel ? { semanticLabel, semanticConfirmed: true, semanticConfidence: confirmation?.confidence } : {}),
+      });
+
     try {
       const recordingManager = this.moduleRef.get(RecordingProcessManagerService, { strict: false });
-      void recordingManager.handleMotionDetected(cameraId, { source: 'onvif' }).catch(() => undefined);
+      void recordingManager.handleMotionDetected(cameraId, {
+        source: 'onvif',
+        ...(semanticLabel ? { semanticLabel } : {}),
+      }).catch(() => undefined);
     } catch {
       // recording manager indisponível — ignora (não derruba a escuta)
+    }
+  }
+
+  /** Resolve o path de grade da câmera e pede confirmação de objeto ao ai-service. */
+  private async confirmNativeMotion(cameraId: string) {
+    try {
+      const mediamtx = this.moduleRef.get(MediamtxProxyService, { strict: false });
+      const pathName = mediamtx.getPathNameForCamera(cameraId, 'grid');
+      const rtspUrl = mediamtx.buildInternalRtspUrl(pathName);
+      if (!rtspUrl) return { confirmed: null as boolean | null, labels: [] as string[] };
+      const aiService = this.moduleRef.get(AiService, { strict: false });
+      return await aiService.confirmMotion(cameraId, rtspUrl);
+    } catch {
+      return { confirmed: null as boolean | null, labels: [] as string[] };
     }
   }
 }

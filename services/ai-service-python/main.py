@@ -22,6 +22,13 @@ class AnalysisRequest(BaseModel):
     source_info: Optional[Dict[str, Any]] = None
 
 
+class ConfirmMotionRequest(BaseModel):
+    camera_id: str
+    rtsp_url: str  # caminho do MediaMTX (grid) — leve, já publicado
+    # objetos que "valem" gravação; vazio = qualquer objeto reconhecido conta.
+    accept_labels: Optional[list] = None
+
+
 class ModeRequest(BaseModel):
     analysis_type: str
 
@@ -146,6 +153,63 @@ async def stop_analysis(camera_id: str, x_service_token: Optional[str] = Header(
     processor.stop()
     
     return {"status": "stopped", "camera_id": camera_id}
+
+@app.post("/confirm-motion")
+async def confirm_motion(request: ConfirmMotionRequest, x_service_token: Optional[str] = Header(default=None)):
+    """Confirma se um evento de movimento NATIVO (ONVIF) contém objeto real.
+
+    Captura UM frame do caminho de grade (leve) e roda o detector de objetos.
+    Usado para filtrar o ruído das câmeras (~centenas de disparos/hora de
+    madrugada em cena vazia) antes de acionar a gravação.
+
+    IMPORTANTE — falha sempre SEGURA: qualquer erro (câmera lenta, modelo
+    indisponível, timeout) devolve confirmed=None. A API interpreta None como
+    "não sei" e GRAVA mesmo assim — nunca se perde um evento real porque a IA
+    falhou. Só confirmed=False (frame lido e SEM objeto) suprime a gravação.
+    """
+    validate_internal_token(x_service_token)
+    import cv2 as _cv2
+    import time as _time
+
+    cap = None
+    try:
+        cap = _cv2.VideoCapture(request.rtsp_url, _cv2.CAP_FFMPEG)
+        cap.set(_cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000)
+        cap.set(_cv2.CAP_PROP_READ_TIMEOUT_MSEC, 4000)
+        cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
+        frame = None
+        started = _time.time()
+        # Descarta os primeiros quadros (podem vir do buffer antigo) e pega um recente.
+        for _ in range(5):
+            ok, f = cap.read()
+            if ok and f is not None:
+                frame = f
+            if _time.time() - started > 5:
+                break
+        if frame is None:
+            return {"confirmed": None, "reason": "no_frame", "labels": []}
+
+        detector = registry.ensure_detector("general")
+        objects = detector.infer(frame, context_key=None, input_size_hint=640)
+        accept = set(request.accept_labels or [])
+        labels = [str(getattr(o, "label", "")) for o in objects]
+        relevant = [l for l in labels if not accept or l in accept]
+        best_conf = max([float(getattr(o, "confidence", 0.0)) for o in objects], default=0.0)
+        return {
+            "confirmed": bool(relevant),
+            "reason": None if relevant else "no_object",
+            "labels": labels,
+            "confidence": round(best_conf, 4),
+        }
+    except Exception as exc:
+        return {"confirmed": None, "reason": f"error:{exc}", "labels": []}
+    finally:
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
+
 
 @app.post("/analyze/wakeup/{camera_id}")
 async def wakeup_camera(camera_id: str, duration_seconds: int = Query(20, ge=5, le=300), x_service_token: Optional[str] = Header(default=None)):
