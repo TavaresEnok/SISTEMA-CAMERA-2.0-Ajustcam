@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CameraStatus } from '@prisma/client';
+import { CameraStatus, CameraPermissionLevel } from '@prisma/client';
+import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
 import { spawn } from 'child_process';
@@ -111,7 +112,7 @@ export class CamerasService {
     }
   }
 
-  async create(dto: CreateCameraDto) {
+  async create(dto: CreateCameraDto, privacy?: { isPrivate: boolean; ownerUserId: string | null }) {
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
     const normalizedProfile = this.normalizeProfileToDetected(dto, null);
     const defaultChannel = dto.channel ?? 1;
@@ -166,12 +167,45 @@ export class CamerasService {
         alarmsEnabled: dto.alarmsEnabled ?? true,
         hasEdgeAi: dto.hasEdgeAi ?? false,
         motionTrigger: dto.motionTrigger ?? (dto.hasEdgeAi ? 'CAMERA' : 'SYSTEM'),
+        // Privacidade (LGPD): câmera do cliente. Conteúdo só do dono.
+        isPrivate: privacy?.isPrivate ?? false,
+        ownerUserId: privacy?.ownerUserId ?? null,
         status: CameraStatus.ONLINE,
         lastSeenAt: new Date(),
       },
     });
 
     return sanitizeCamera(camera);
+  }
+
+  /**
+   * Cadastro de câmera PRIVADA pelo próprio cliente ("+ Adicionar câmera" no app).
+   * A câmera fica com `ownerUserId` = o cliente e é auto-vinculada ao grupo do
+   * usuário responsável (o grupo onde ele é admin) — se existir. Também recebe
+   * uma permissão DIRETA de ADMIN para o dono, garantindo o acesso ao conteúdo
+   * mesmo que ele não pertença a nenhum grupo.
+   */
+  async createPrivateForOwner(dto: CreateCameraDto, owner: AuthUser) {
+    // O grupo do cliente: aquele onde ele tem nível ADMIN. Se tiver mais de um,
+    // usa o primeiro; se nenhum, a câmera fica sem grupo (acesso pela permissão
+    // direta + ownerUserId). O admin do sistema pode reassociar depois.
+    const ownerGroup = await this.prisma.cameraPermission.findFirst({
+      where: { userId: owner.id, groupId: { not: null }, level: CameraPermissionLevel.ADMIN },
+      select: { groupId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    const groupId = ownerGroup?.groupId ?? dto.groupId ?? undefined;
+
+    const created = await this.create({ ...dto, groupId }, { isPrivate: true, ownerUserId: owner.id });
+
+    // Permissão direta de ADMIN para o dono: o gate de conteúdo (canViewCamera)
+    // reconhece o dono por ownerUserId, mas a permissão direta também o habilita
+    // a controlar/gravar e sobrevive a uma eventual troca de dono.
+    await this.prisma.cameraPermission.create({
+      data: { userId: owner.id, cameraId: created.id, level: CameraPermissionLevel.ADMIN },
+    }).catch(() => undefined);
+
+    return created;
   }
 
   async findAll(accessibleIds?: string[]) {

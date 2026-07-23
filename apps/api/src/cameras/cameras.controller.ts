@@ -93,6 +93,23 @@ export class CamerasController {
     return camera;
   }
 
+  /**
+   * "+ Adicionar câmera" do app do CLIENTE. Qualquer usuário autenticado cadastra
+   * a PRÓPRIA câmera privada (LGPD): o conteúdo será acessível só a ele. A câmera
+   * é auto-vinculada ao grupo do responsável e recebe permissão de admin do dono.
+   * O provedor/admin verá a câmera apenas para gerenciamento, nunca o conteúdo.
+   */
+  @Roles(UserRole.VIEWER)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('mine')
+  async createMine(@CurrentUser() user: AuthUser, @Body() dto: CreateCameraDto, @Req() req: Request) {
+    await this.commercialPolicy.assertFeature('addCameras', user);
+    const camera = await this.camerasService.createPrivateForOwner(dto, user);
+    await this.auditService.log(user.id, 'camera.create_private', 'Camera', camera.id, { name: camera.name, private: true }, req);
+    this.schedulePostCreateProvisioning(camera.id);
+    return camera;
+  }
+
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 6, ttl: 60000 } })
   @Post('test-connection-draft')

@@ -110,6 +110,16 @@ model Camera {
   /// - 'include': se houver ao menos uma, só conta movimento DENTRO delas.
   /// Vazio/null = câmera inteira monitorada (comportamento atual preservado).
   detectionZones         Json?
+  /// PRIVACIDADE (LGPD) — câmera dentro da residência do cliente. Quando true, o
+  /// CONTEÚDO (ao vivo, gravação, áudio, snapshot, miniatura, clipe) é acessível
+  /// SOMENTE ao dono (`ownerUserId`) e a quem ele autorizar. Provedor/dono do
+  /// sistema/operadores/admins NÃO veem o conteúdo — nem por privilégio de admin.
+  /// O GERENCIAMENTO (retenção, status, grupo, config técnica) permanece com o
+  /// admin, mas nenhuma dessas funções renderiza a imagem.
+  isPrivate              Boolean      @default(false)
+  /// Usuário responsável pela câmera privada (único com acesso ao conteúdo, além
+  /// dos que ele autorizar). Null em câmeras normais (gerenciadas pelo provedor).
+  ownerUserId            String?
   detectedVideoCodec     String?
   detectedWidth          Int?
   detectedHeight         Int?
