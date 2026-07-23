@@ -13,7 +13,7 @@ import { RecordingSource, type Camera } from '@prisma/client';
 import { type Queue } from 'bullmq';
 import { execFile, spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { statfs, unlink, writeFile } from 'node:fs/promises';
+import { rename, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { type Readable } from 'stream';
 import { promisify } from 'node:util';
@@ -71,6 +71,9 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   private diskGuardTimer: NodeJS.Timeout | null = null;
   private orphanRecoveryTimer: NodeJS.Timeout | null = null;
   private orphanRecoveryInterval: NodeJS.Timeout | null = null;
+  private readonly preEventSeconds: number;
+  private readonly preBufferProcs = new Map<string, { process: ChildProcessByStdio<null, null, Readable>; dir: string }>();
+  private preBufferPruneTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly configService: ConfigService,
@@ -92,6 +95,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     this.storageWriteProbeEnabled = this.configService.get<boolean>('storageWriteProbeEnabled') ?? true;
     this.minFreeBytes = Number(this.configService.get<number>('recordingMinFreeBytes') ?? 2147483648);
     this.minFreePercent = Number(this.configService.get<number>('recordingMinFreePercent') ?? 5);
+    // Buffer PRÉ-EVENTO: segundos ANTES do gatilho de movimento a preservar. 0 =
+    // desligado (padrão — produção intocada). Quando >0, câmeras armadas por
+    // movimento mantêm uma captura contínua LEVE (cópia) numa pasta ring; ao
+    // disparar, os segmentos anteriores viram gravação, para a pessoa não
+    // "nascer" já dentro do quadro. É opt-in porque troca o perfil de recursos
+    // (RTSP sempre aberto) por esse ganho probatório.
+    this.preEventSeconds = Math.max(0, Math.min(30, Number(process.env.MOTION_PRE_EVENT_SECONDS ?? 0)));
   }
 
   onModuleInit() {
@@ -113,6 +123,19 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       const intervalMs = Math.max(10_000, Number(process.env.RECORDING_DISK_GUARD_INTERVAL_MS ?? 30000));
       this.diskGuardTimer = setInterval(() => void this.enforceDiskGuard(), intervalMs);
       if (typeof this.diskGuardTimer.unref === 'function') this.diskGuardTimer.unref();
+    }
+
+    // Buffer pré-evento: poda periódica do ring + sobe o ring das câmeras já
+    // armadas (só quando MOTION_PRE_EVENT_SECONDS > 0 — senão nada disso roda).
+    if (this.preEventSeconds > 0 && this.controlMode === 'local') {
+      this.preBufferPruneTimer = setInterval(() => this.prunePreBuffers(), 3000);
+      this.preBufferPruneTimer.unref?.();
+      setTimeout(() => {
+        void this.prisma.camera.findMany({ where: { recordingMode: 'motion', enabled: true }, select: { id: true } })
+          .then((cams) => Promise.all(cams.map((c) => this.startPreBuffer(c.id).catch(() => undefined))))
+          .catch(() => undefined);
+      }, 20_000).unref?.();
+      this.logger.log(`Buffer pré-evento HABILITADO: ${this.preEventSeconds}s antes do gatilho de movimento.`);
     }
 
     if (this.controlMode === 'local' && String(process.env.RECORDING_ORPHAN_RECOVERY_ENABLED ?? 'true') !== 'false') {
@@ -301,6 +324,18 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     const postRollSeconds = this.getMotionPostRollSeconds();
     const segmentSeconds = this.getMotionSegmentSeconds();
+
+    // PRÉ-EVENTO: promove os segundos ANTERIORES ao gatilho (se habilitado). Best
+    // effort e isolado: se falhar, a gravação normal do movimento segue igual.
+    // Garante que o ring esteja de pé (auto-cura: 1º disparo pode não ter pré-roll).
+    if (this.preEventSeconds > 0) {
+      if (!this.preBufferProcs.has(cameraId)) {
+        await this.startPreBuffer(cameraId).catch(() => undefined);
+      } else {
+        await this.promotePreRoll(cameraId, Date.now()).catch(() => undefined);
+      }
+    }
+
     const runtimeStatus = await this.getStatus(cameraId).catch(() => ({ isRecording: false }));
     let startStatus = 'already_recording';
 
@@ -349,16 +384,142 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         where: { id: cameraId },
         data: { recordingMode: 'motion', recordingEnabled: false },
       });
+      // Câmera armada → liga o ring de pré-evento (se habilitado por flag).
+      void this.startPreBuffer(cameraId).catch(() => undefined);
       return { status: 'motion_recording_armed', cameraId };
     }
 
     this.clearMotionStopTimer(cameraId);
     await this.stop(cameraId).catch(() => undefined);
+    void this.stopPreBuffer(cameraId).catch(() => undefined);
     await this.prisma.camera.update({
       where: { id: cameraId },
       data: { recordingMode: 'manual', recordingEnabled: false },
     });
     return { status: 'motion_recording_disabled', cameraId };
+  }
+
+  // ── BUFFER PRÉ-EVENTO (ring de captura contínua para câmeras armadas) ───────
+  private preBufferDir(cameraId: string) {
+    return join(this.recordingsRoot, '.pre-buffer', `camera-${cameraId}`);
+  }
+
+  /** Sobe (se ainda não) o ring de captura leve da câmera. Idempotente. */
+  private async startPreBuffer(cameraId: string) {
+    if (this.preEventSeconds <= 0 || this.controlMode !== 'local') return;
+    if (this.preBufferProcs.has(cameraId)) return;
+    if (!this.checkFfmpegAvailable()) return;
+    const camera = await this.camerasService.getCameraOrThrow(cameraId).catch(() => null);
+    if (!camera || (camera as { enabled?: boolean }).enabled === false) return;
+
+    const password = this.cryptoService.decrypt(camera.passwordEncrypted);
+    const rtspUrl = this.buildRtsp(camera, password);
+    const transport = camera.preferredRtspTransport ?? this.configService.get<string>('ffmpegRtspTransport') ?? 'tcp';
+    const dir = this.preBufferDir(cameraId);
+    mkdirSync(dir, { recursive: true });
+
+    // Segmentos curtos (2s) em cópia → granularidade fina do pré-roll a custo ~0.
+    // strftime no nome permite reusar o remux/registro por nome de arquivo.
+    const args = [
+      '-hide_banner', '-loglevel', 'warning',
+      '-rtsp_transport', transport,
+      '-timeout', String(this.configService.get<number>('ffmpegStimeoutUs') ?? 8000000),
+      '-i', rtspUrl,
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c', 'copy',
+      '-f', 'segment', '-segment_format', 'mpegts',
+      '-segment_time', '2', '-reset_timestamps', '1', '-strftime', '1',
+      join(dir, '%Y-%m-%d_%H-%M-%S.ts'),
+    ];
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    proc.stderr.on('data', () => {});
+    proc.on('close', () => {
+      if (this.preBufferProcs.get(cameraId)?.process === proc) this.preBufferProcs.delete(cameraId);
+    });
+    proc.on('error', () => {
+      if (this.preBufferProcs.get(cameraId)?.process === proc) this.preBufferProcs.delete(cameraId);
+    });
+    this.preBufferProcs.set(cameraId, { process: proc, dir });
+    this.logger.log(`Buffer pré-evento iniciado camera=${cameraId} (${this.preEventSeconds}s).`);
+  }
+
+  private async stopPreBuffer(cameraId: string) {
+    const entry = this.preBufferProcs.get(cameraId);
+    if (!entry) return;
+    this.preBufferProcs.delete(cameraId);
+    try { entry.process.kill('SIGTERM'); } catch { /* já morto */ }
+    // Limpa o ring: sem gatilho pendente, esses segmentos não viram gravação.
+    for (const file of readdirSync(entry.dir, { withFileTypes: true }).filter((f) => f.name.endsWith('.ts'))) {
+      await unlink(join(entry.dir, file.name)).catch(() => undefined);
+    }
+  }
+
+  /** Poda os segmentos do ring mais velhos que o pré-roll (mantém só a janela útil). */
+  private prunePreBuffers() {
+    if (this.preEventSeconds <= 0) return;
+    const keepMs = (this.preEventSeconds + 6) * 1000;
+    const now = Date.now();
+    for (const { dir } of this.preBufferProcs.values()) {
+      if (!existsSync(dir)) continue;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.name.endsWith('.ts')) continue;
+        const full = join(dir, entry.name);
+        try {
+          // Não apaga o segmento MAIS novo (o ffmpeg ainda pode estar escrevendo).
+          if (now - statSync(full).mtimeMs > keepMs) void unlink(full).catch(() => undefined);
+        } catch { /* corrida com o ffmpeg */ }
+      }
+    }
+  }
+
+  /**
+   * No gatilho de movimento, promove os segmentos do ring que caem na janela
+   * [gatilho - preRoll, gatilho] a gravações permanentes — o "antes" do evento.
+   * Cada .ts é copiado para a pasta de gravação e remuxado/registrado (reusa o
+   * pipeline existente). Falha aqui NUNCA impede a gravação normal do movimento.
+   */
+  private async promotePreRoll(cameraId: string, triggerAt: number) {
+    const entry = this.preBufferProcs.get(cameraId);
+    if (!entry || this.preEventSeconds <= 0) return;
+    const windowStart = triggerAt - this.preEventSeconds * 1000;
+    let promoted = 0;
+    try {
+      const files = readdirSync(entry.dir, { withFileTypes: true })
+        .filter((f) => f.name.endsWith('.ts'))
+        .map((f) => join(entry.dir, f.name))
+        .sort();
+      // Ignora o último (pode estar sendo escrito). Promove os que terminam
+      // dentro/depois do início da janela e antes do gatilho.
+      const candidates = files.slice(0, -1).filter((full) => {
+        try {
+          const mtime = statSync(full).mtimeMs;
+          return mtime >= windowStart && mtime <= triggerAt + 2000;
+        } catch { return false; }
+      });
+      for (const src of candidates) {
+        try {
+          const startDate = new Date(statSync(src).mtimeMs - 2000); // ~início do segmento de 2s
+          const destDir = buildRecordingOutputDir(this.recordingsRoot, cameraId, startDate);
+          mkdirSync(destDir, { recursive: true });
+          const p2 = (n: number) => String(n).padStart(2, '0');
+          const destName = `${startDate.getUTCFullYear()}-${p2(startDate.getUTCMonth() + 1)}-${p2(startDate.getUTCDate())}_${p2(startDate.getUTCHours())}-${p2(startDate.getUTCMinutes())}-${p2(startDate.getUTCSeconds())}.ts`;
+          const destTs = join(destDir, destName);
+          if (existsSync(destTs)) continue;
+          await rename(src, destTs).catch(async () => {
+            // rename entre dispositivos falha: copia+apaga.
+            await writeFile(destTs, await readFile(src));
+            await unlink(src).catch(() => undefined);
+          });
+          await this.remuxAndRegisterTsSegment(cameraId, destTs, Math.max(1, this.getMotionSegmentSeconds()));
+          promoted += 1;
+        } catch (error) {
+          this.logger.warn(`Falha ao promover pré-roll ${basename(src)}: ${sanitizeSensitiveText(error)}`);
+        }
+      }
+      if (promoted) this.logger.log(`Pré-evento: ${promoted} segmento(s) anteriores preservados camera=${cameraId}.`);
+    } catch (error) {
+      this.logger.warn(`Falha ao promover pré-roll camera=${cameraId}: ${sanitizeSensitiveText(error)}`);
+    }
   }
 
   private async getRedisPublisher() {
@@ -1199,6 +1360,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     if (this.orphanRecoveryTimer) {
       clearTimeout(this.orphanRecoveryTimer);
       this.orphanRecoveryTimer = null;
+    }
+    if (this.preBufferPruneTimer) {
+      clearInterval(this.preBufferPruneTimer);
+      this.preBufferPruneTimer = null;
+    }
+    for (const cameraId of [...this.preBufferProcs.keys()]) {
+      void this.stopPreBuffer(cameraId);
     }
     if (this.orphanRecoveryInterval) {
       clearInterval(this.orphanRecoveryInterval);
