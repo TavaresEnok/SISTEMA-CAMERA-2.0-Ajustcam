@@ -24,6 +24,8 @@ type AccessGroup = {
   name: string;
   description?: string | null;
   isActive: boolean;
+  /** Cota de câmeras privadas que o cliente deste grupo pode cadastrar (0 = nenhuma). */
+  maxPrivateCameras?: number;
   cameras: Array<{ id: string; name: string }>;
   _userPermissions?: UserPermission[];
 };
@@ -75,6 +77,7 @@ export default function GroupsPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editMaxPrivate, setEditMaxPrivate] = useState(0);
   const [editSaving, setEditSaving] = useState(false);
 
   // Delete group dialog
@@ -174,6 +177,7 @@ export default function GroupsPage() {
   const openEditGroup = () => {
     setEditName(selGroup?.name ?? '');
     setEditDesc(selGroup?.description ?? '');
+    setEditMaxPrivate(selGroup?.maxPrivateCameras ?? 0);
     setEditOpen(true);
   };
 
@@ -184,6 +188,7 @@ export default function GroupsPage() {
       await apiClient(accessToken).patch(`/camera-groups/${selGroup.id}`, {
         name: editName.trim(),
         description: editDesc.trim() || null,
+        maxPrivateCameras: Math.max(0, Math.floor(Number(editMaxPrivate) || 0)),
       });
       await load();
       setEditOpen(false);
@@ -559,6 +564,19 @@ export default function GroupsPage() {
             <div className="space-y-1.5">
               <Label className="text-xs">Descrição <span className="font-normal text-muted-foreground">(opcional)</span></Label>
               <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="Ex.: Loja principal, Recife" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Câmeras privadas permitidas</Label>
+              <Input
+                type="number"
+                min={0}
+                max={1000}
+                value={editMaxPrivate}
+                onChange={(e) => setEditMaxPrivate(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Quantas câmeras o cliente deste grupo pode cadastrar pelo app dele (o "acordado"). 0 = não permite.
+              </p>
             </div>
             <div className="flex gap-2 pt-2">
               <Button variant="ghost" size="sm" onClick={() => setEditOpen(false)}>Cancelar</Button>
