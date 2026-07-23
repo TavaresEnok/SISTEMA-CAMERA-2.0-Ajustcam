@@ -294,6 +294,8 @@ export default function PlaybackPage() {
   const timelineTrackRef = useRef<HTMLDivElement | null>(null);
   const timelinePanRef = useRef<{ startX: number; startCenter: number; windowMins: number; moved: boolean } | null>(null);
   const timelineDraggedRef = useRef(false);
+  // Prévia ao passar o mouse na timeline: miniatura + hora do trecho sob o cursor.
+  const [timelineHover, setTimelineHover] = useState<{ x: number; minute: number; recordingId: string | null } | null>(null);
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [loadingPlayback, setLoadingPlayback] = useState(false);
@@ -901,6 +903,21 @@ export default function PlaybackPage() {
     const minute = viewStart + pct * (viewEnd - viewStart);
     setPlayheadFromMinute(minute);
   };
+
+  const onTimelineHover = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (timelinePanRef.current?.moved) { setTimelineHover(null); return; }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const pct = clamp(x / rect.width, 0, 1);
+    const minute = viewStart + pct * (viewEnd - viewStart);
+    // Encontra a gravação sob o cursor (para mostrar a miniatura daquele trecho).
+    const rec = recordings.find((item) => {
+      const start = minuteOfDay(item.startedAt);
+      const end = minuteOfDay(item.endedAt ?? item.startedAt);
+      return minute >= start && minute <= end && (item.fileUsable ?? item.fileExists);
+    });
+    setTimelineHover({ x, minute, recordingId: rec?.id ?? null });
+  }, [viewStart, viewEnd, recordings]);
 
   const getSegmentColor = (type: TimelineSegment['type']) => {
     if (type === 'recorded') return 'hsl(150,60%,32%)';
@@ -1607,11 +1624,36 @@ export default function PlaybackPage() {
           </div>
 
           <div className="rounded-xl border border-border bg-card p-3">
+            {/* Envólucro sem clip: deixa a prévia (miniatura) escapar acima da faixa. */}
+            <div className="relative">
+            {timelineHover && (
+              <div
+                className="pointer-events-none absolute bottom-full z-30 mb-2 -translate-x-1/2"
+                style={{ left: `${clamp(timelineHover.x, 60, (timelineTrackRef.current?.clientWidth ?? 600) - 60)}px` }}
+              >
+                <div className="overflow-hidden rounded-md border border-white/15 bg-black/90 shadow-xl">
+                  <div className="h-[68px] w-[120px] bg-black">
+                    {timelineHover.recordingId && thumbnailUrls[timelineHover.recordingId] ? (
+                      <img src={thumbnailUrls[timelineHover.recordingId]} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-[9px] text-white/30">
+                        {timelineHover.recordingId ? '…' : 'sem gravação'}
+                      </div>
+                    )}
+                  </div>
+                  <div className="px-1.5 py-0.5 text-center font-mono text-[10px] text-white/80">
+                    {format(addMinutes(dayStart, timelineHover.minute), 'HH:mm:ss')}
+                  </div>
+                </div>
+              </div>
+            )}
             <div
               ref={timelineTrackRef}
               className="relative mb-2 h-9 cursor-pointer select-none overflow-hidden rounded bg-[hsl(var(--muted))]"
               title="Clique para posicionar · role para dar zoom · arraste para mover"
               onMouseDown={onTimelinePanStart}
+              onMouseMove={onTimelineHover}
+              onMouseLeave={() => setTimelineHover(null)}
               onClick={(event) => onTimelineClick(event.clientX, event.currentTarget.getBoundingClientRect())}
             >
               {timelineSegments.filter((segment) => segment.end >= viewStart && segment.start <= viewEnd).map((segment, index) => {
@@ -1677,6 +1719,7 @@ export default function PlaybackPage() {
                   </div>
                 );
               })}
+            </div>
             </div>
 
             <div className="mb-3 flex flex-wrap items-center gap-3">
