@@ -194,11 +194,14 @@ model CameraEvent {
   metadata   Json?
   occurredAt DateTime
   createdAt  DateTime @default(now())
+  /// Fila de REVISÃO: marcado quando um operador revê o evento. Null = não visto.
+  reviewedAt DateTime?
 
   alarms AlarmInstance[]
 
   @@index([cameraId, type, occurredAt])
   @@index([occurredAt])
+  @@index([reviewedAt])
 }
 
 model AlarmRule {

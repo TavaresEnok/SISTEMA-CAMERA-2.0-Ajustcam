@@ -15,6 +15,7 @@ import { AuditModule } from './audit/audit.module';
 import { SitesModule } from './sites/sites.module';
 import { AreasModule } from './areas/areas.module';
 import { CameraGroupsModule } from './camera-groups/camera-groups.module';
+import { ReviewModule } from './review/review.module';
 import { CameraPermissionsModule } from './camera-permissions/camera-permissions.module';
 import { AiModule } from './ai/ai.module';
 import { SiteMapLayoutsModule } from './site-map-layouts/site-map-layouts.module';
@@ -68,6 +69,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     IntegrityModule,
     InvestigationsModule,
     CameraGroupsModule,
+    ReviewModule,
     CameraPermissionsModule,
     CamerasModule,
     CameraStreamModule,
