@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PlaySquare, Crosshair, Maximize2, Info, AlertTriangle, Circle } from 'lucide-react';
+import { PlaySquare, Crosshair, Maximize2, Info, AlertTriangle, Circle, Lock } from 'lucide-react';
 import { Camera } from '../store/vmsDataStore';
 import { LiveStreamPlayer, type LivePlayerStatus } from './LiveStreamPlayer';
 
@@ -43,6 +43,11 @@ export function CameraTile({
   const [playerStatus, setPlayerStatus] = useState<LivePlayerStatus | null>(null);
   const wallMode = useGridStore((state) => state.wallMode);
 
+  // Câmera privada que ESTE usuário não pode ver (ex.: admin numa câmera do
+  // cliente). O player NÃO é montado — mostramos um aviso de privacidade limpo
+  // no lugar. O backend já bloqueia o conteúdo; aqui é só a UX respeitosa.
+  const contentLocked = camera.isPrivate === true && camera.canViewContent === false;
+
   const isOffline  = camera.status === 'offline' || camera.status === 'no_signal';
   // Overlay "Offline" do tile só quando o player também não tem imagem viva; e
   // enquanto ele estiver visível, o chrome do player (spinner/erro) fica oculto
@@ -68,19 +73,31 @@ export function CameraTile({
           WebRTC saudável (piscada) por causa de um falso-offline de um ciclo. O
           próprio player cuida de retry/backoff quando o stream realmente cai; o
           overlay de offline abaixo só cobre a imagem enquanto não há frame vivo. */}
-      <div className="absolute inset-0">
-        <LiveStreamPlayer
-          cameraId={camera.id}
-          cameraName={camera.name}
-          showOverlay={showDetectionOverlay && !wallMode && !showOfflineOverlay}
-          aiEnabled={camera.aiEnabled}
-          liveViewMode={liveViewMode}
-          className="h-full w-full"
-          muted
-          startDelayMs={streamStartDelayMs}
-          onStatusChange={setPlayerStatus}
-        />
-      </div>
+      {contentLocked ? (
+        // Câmera privada do cliente: conteúdo protegido. NÃO monta o player (nem
+        // tenta buscar o stream — o backend devolveria 403). Aviso limpo e digno.
+        <div className="absolute inset-0 flex items-center justify-center bg-[hsl(210,18%,9%)]">
+          <div className="text-center px-4">
+            <Lock className="mx-auto mb-2 h-6 w-6 text-white/30" />
+            <div className="text-[11px] font-medium text-white/60">Câmera privada</div>
+            <div className="mt-0.5 text-[9px] text-white/35">Conteúdo acessível somente ao cliente</div>
+          </div>
+        </div>
+      ) : (
+        <div className="absolute inset-0">
+          <LiveStreamPlayer
+            cameraId={camera.id}
+            cameraName={camera.name}
+            showOverlay={showDetectionOverlay && !wallMode && !showOfflineOverlay}
+            aiEnabled={camera.aiEnabled}
+            liveViewMode={liveViewMode}
+            className="h-full w-full"
+            muted
+            startDelayMs={streamStartDelayMs}
+            onStatusChange={setPlayerStatus}
+          />
+        </div>
+      )}
 
       <button
         type="button"
@@ -115,6 +132,11 @@ export function CameraTile({
             <span className="max-w-[220px] truncate rounded bg-black/65 px-2 py-1 text-[11px] font-medium text-white/95 shadow-sm backdrop-blur-[2px]">
               {camera.name}
             </span>
+            {camera.isPrivate && (
+              <span className="inline-flex items-center gap-0.5 rounded-sm border border-white/20 bg-black/55 px-1.5 py-px text-[9px] text-white/70 backdrop-blur-[2px]" title="Câmera privada — conteúdo acessível somente ao cliente">
+                <Lock className="h-2.5 w-2.5" /> Privada
+              </span>
+            )}
             {isAlarm && (
               <span className="text-[9px] text-[hsl(var(--status-alarm))] bg-[hsl(var(--status-alarm)_/_0.18)] border border-[hsl(var(--status-alarm)_/_0.4)] px-1.5 py-px rounded-sm rec-pulse">
                 Alarme

@@ -59,6 +59,10 @@ export interface Camera {
   recordingStale?: boolean;
   lastSegmentAt?: string | null;
   lastSegmentAgeSeconds?: number | null;
+  /** Câmera privada do cliente (LGPD): conteúdo só do dono. */
+  isPrivate?: boolean;
+  /** Este usuário pode ver o CONTEÚDO? (false p/ admin numa câmera privada de terceiro). */
+  canViewContent?: boolean;
 }
 
 export interface User {
@@ -300,6 +304,9 @@ function mapCameraItems(
       aiEnabled: camera.aiEnabled !== false,
       alarmsEnabled: camera.alarmsEnabled !== false,
       enabled: camera.enabled !== false,
+      isPrivate: camera.isPrivate === true,
+      // canView vem do withCapabilities da API; ausente = assume permitido (retrocompat).
+      canViewContent: camera.canView !== false,
       isOnline: camera.status === 'ONLINE',
       signalStrength: camera.status === 'ONLINE' ? 100 : 0,
       recordingMode: effectiveRecordingMode,

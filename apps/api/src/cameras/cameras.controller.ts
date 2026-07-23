@@ -70,7 +70,11 @@ export class CamerasController {
   }
 
   private async withCapabilities(user: AuthUser, camera: Record<string, unknown> & { id: string }) {
-    if (user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN) {
+    const isAdmin = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
+    if (isAdmin && camera.isPrivate !== true) {
+      // Atalho de admin só para câmeras NORMAIS. Numa câmera PRIVADA, `canView`
+      // precisa refletir a regra real (admin não vê conteúdo do cliente) para o
+      // frontend mostrar o aviso de privacidade em vez de tentar montar o player.
       return { ...camera, canView: true, canControl: true, canRecord: true, canAdmin: true };
     }
     const [canView, canControl, canRecord, canAdmin] = await Promise.all([
