@@ -13,7 +13,7 @@ import { RecordingSource, type Camera } from '@prisma/client';
 import { type Queue } from 'bullmq';
 import { execFile, spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { rename, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
+import { open, rename, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { type Readable } from 'stream';
 import { promisify } from 'node:util';
@@ -834,9 +834,32 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         throw new Error(`remux_ts_falhou: ${sanitizeSensitiveText(error)}`);
       }
     }
+    // fsync ANTES de registrar no Postgres (técnica moonfire `dir/writer.rs`): força
+    // os bytes do MP4 para o disco enquanto a linha do banco ainda NÃO existe. Sem
+    // isso, um corte de energia logo após o INSERT deixa um registro apontando para
+    // um arquivo cujo conteúdo o kernel ainda não persistiu (0 byte/truncado). É
+    // best-effort: se o fsync falhar, registramos mesmo assim (não fica pior que
+    // hoje) e apenas avisamos.
+    await this.fsyncFile(mp4Path).catch((error) => {
+      this.logger.warn(`fsync do segmento falhou (registrando mesmo assim) ${basename(mp4Path)}: ${sanitizeSensitiveText(error)}`);
+    });
     await this.registerSegment(cameraId, mp4Path, segmentSeconds);
     await unlink(tsPath).catch(() => undefined);
     return mp4Path;
+  }
+
+  /**
+   * fsync de um arquivo pelo caminho. Abre em leitura (fsync no Linux opera sobre o
+   * inode e persiste as escritas pendentes independentemente do modo de abertura) e
+   * garante o `fdatasync`/`fsync` do handle antes de fechar.
+   */
+  private async fsyncFile(filePath: string): Promise<void> {
+    const handle = await open(filePath, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   }
 
   private async recoverOrphanedSegments() {
@@ -1204,6 +1227,22 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     };
   }
 
+  /** Nº de gravações locais ativas (gauge de /metrics — agregado, sem PII). */
+  getActiveRecordingCount(): number {
+    return this.active.size;
+  }
+
+  private isPidAlive(pid: number | null | undefined): boolean {
+    if (!pid || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      // ESRCH = processo não existe (morto); EPERM = existe mas não é nosso (vivo).
+      return err?.code === 'EPERM';
+    }
+  }
+
   async getStatus(cameraId: string) {
     const nowMs = Date.now();
     const latestRecording = await this.prisma.recording.findFirst({
@@ -1252,6 +1291,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         startedAt: latestRecording?.startedAt?.toISOString() ?? null,
         lastSegmentAt: lastSegmentAtMs == null ? null : new Date(lastSegmentAtMs).toISOString(),
         lastSegmentAgeSeconds,
+        hasRecentSegment: inferredRecentRecording,
         staleThresholdSeconds,
         stale,
         statusDetail: !intended ? 'disabled' : autoRecovering ? 'auto_reconnecting' : isRecording ? 'recording_ok' : 'worker_enabled_but_no_recent_segment',
@@ -1281,6 +1321,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         startedAt: latestRecording?.startedAt?.toISOString() ?? null,
         lastSegmentAt: lastSegmentAtMs == null ? null : new Date(lastSegmentAtMs).toISOString(),
         lastSegmentAgeSeconds,
+        hasRecentSegment: inferredRecentRecording,
         staleThresholdSeconds,
         stale,
         statusDetail: !intended ? 'disabled' : autoRecovering ? 'auto_reconnecting' : isRecording ? 'recording_ok' : 'enabled_but_idle',
@@ -1289,16 +1330,18 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       };
     }
 
+    const processAlive = this.isPidAlive(state.pid);
     return {
       cameraId,
-      isRecording: true,
+      isRecording: processAlive,
       intendedRecording: true,
       startedAt: state.startedAt.toISOString(),
       lastSegmentAt: lastSegmentAtMs == null ? null : new Date(lastSegmentAtMs).toISOString(),
       lastSegmentAgeSeconds,
+      hasRecentSegment: inferredRecentRecording,
       staleThresholdSeconds,
-      stale: false,
-      statusDetail: 'recording_ok_local_process',
+      stale: !processAlive,
+      statusDetail: processAlive ? 'recording_ok_local_process' : 'local_process_dead',
       pid: state.pid,
       currentOutputPattern: state.outputPattern,
     };

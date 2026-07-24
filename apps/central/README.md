@@ -47,6 +47,27 @@ DRAC_CENTRAL_COOKIE_SECURE=true
 
 `DRAC_CENTRAL_ADMIN_TOKEN` e opcional e serve somente para automacao/API interna. Deixe vazio se nao houver integracao tecnica consumindo os endpoints administrativos.
 
+## Datastore: JSON ou Postgres (item 2.10)
+
+Por padrao o datastore e o arquivo JSON (`DRAC_CENTRAL_DATA_FILE`). Para migrar para Postgres com seguranca, defina `DRAC_CENTRAL_DATABASE_URL`. A camada de dados vive em `src/datastore/` (mapeamento registro<->linha, resolucao dual-read, reconciliacao e store `pg` — logica pura testada em `tests/datastore-*.test.js`).
+
+Fluxo de migracao segura:
+
+1. **Backup das identidades de assinatura ANTES de migrar.** Na primeira subida em modo Postgres, a Central grava `signing-backup-<timestamp>.json` em `DRAC_CENTRAL_BACKUP_DIR` (default `<dir do data file>/backups`) com `licenseKey`, `installerToken`, `sshHostKeys` de cada instalacao e os hashes de senha admin — sem senha em claro. E durável (fsync).
+2. **Reconciliacao (backfill).** Copia para o Postgres tudo que existe no JSON legado e falta no banco. Idempotente (o marker `migration` na tabela `central_meta` impede repetir).
+3. **Dual-read (`DRAC_CENTRAL_STORE_MODE=dual`, default quando ha URL).** Le do Postgres e cai para o JSON legado (read-only) quando um registro ainda nao existe no banco. Escreve SO no Postgres; o JSON nunca e reescrito — e a **janela de rollback**.
+4. **Cutover (`pg`).** Depois de validar alguns ciclos, mude para `DRAC_CENTRAL_STORE_MODE=pg` (so Postgres).
+
+Variaveis:
+
+```bash
+DRAC_CENTRAL_DATABASE_URL=postgres://usuario:senha@host:5432/central
+DRAC_CENTRAL_STORE_MODE=dual        # json | dual | pg
+DRAC_CENTRAL_BACKUP_DIR=./data/backups
+```
+
+Testes do pacote (`pnpm --filter drac-central test`) rodam a logica pura sempre; os testes de integracao Postgres so rodam quando `DRAC_CENTRAL_DATABASE_URL` aponta para um banco (ex.: um Postgres efemero em docker), senao sao pulados.
+
 ## Heartbeat do DRAC local
 
 Cada instalacao DRAC envia conexao outbound para o central. Nao precisa abrir porta no cliente.

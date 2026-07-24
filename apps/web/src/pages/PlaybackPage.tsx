@@ -36,6 +36,7 @@ import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
 import { localDayRange } from '../lib/web-operational';
+import { minuteOfDay, hmsToMinute } from '../lib/timeline-time';
 
 type TimelineSegment = {
   recordingId?: string;
@@ -171,11 +172,6 @@ const PLAYBACK_TIMEOUT_COMPAT_MS = 150000; // 150s: FFmpeg HEVC→H264 pode leva
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function minuteOfDay(input: string | Date) {
-  const date = input instanceof Date ? input : new Date(input);
-  return date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
 }
 
 function buildTimelineSegments(recordings: RecordingItem[], events: Array<{ timestamp: string; severity: string }>) {
@@ -438,7 +434,7 @@ export default function PlaybackPage() {
         const useRequestedTarget = requestedTarget
           && !Number.isNaN(requestedTarget.getTime())
           && format(requestedTarget, 'yyyy-MM-dd') === selectedDate;
-        setPlayhead(clamp(Math.round(useRequestedTarget ? minuteOfDay(requestedTarget) : minuteOfDay(items[items.length - 1].startedAt)), 0, TOTAL_MINS));
+        setPlayhead(clamp(useRequestedTarget ? minuteOfDay(requestedTarget) : minuteOfDay(items[items.length - 1].startedAt), 0, TOTAL_MINS));
       })
       .catch((error) => {
         if (cancelled) return;
@@ -868,7 +864,7 @@ export default function PlaybackPage() {
     // reprodução assim que o vídeo estiver pronto (comportamento padrão de VMS).
     lastVideoPlayheadRef.current = null;
     autoResumeRef.current = true;
-    setPlayhead(clamp(Math.round(minute), 0, TOTAL_MINS));
+    setPlayhead(clamp(minute, 0, TOTAL_MINS));
   }, []);
 
   const jumpToExactTime = useCallback(() => {
@@ -885,7 +881,7 @@ export default function PlaybackPage() {
       toast({ title: 'Hora inválida', description: 'Valores fora do intervalo válido.', variant: 'destructive' });
       return;
     }
-    const minute = hh * 60 + mm + ss / 60;
+    const minute = hmsToMinute(hh, mm, ss);
     setPlayheadFromMinute(minute);
   }, [jumpTime, setPlayheadFromMinute]);
 

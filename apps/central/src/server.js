@@ -3,6 +3,7 @@ const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { resolveConfig, createDatastore } = require('./datastore');
 
 function loadEnvFile() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -133,10 +134,11 @@ function normalizeDb(parsed) {
   return parsed;
 }
 
-// loadDb NUNCA lança: arquivo corrompido derrubava o processo em qualquer request
-// (login/heartbeat) num loop de crash. Agora cai pro .bak e, em último caso, isola
-// o arquivo corrompido e começa limpo — a Central continua de pé.
-async function loadDb() {
+// legacyLoadDb NUNCA lança: arquivo corrompido derrubava o processo em qualquer
+// request (login/heartbeat) num loop de crash. Agora cai pro .bak e, em último caso,
+// isola o arquivo corrompido e começa limpo — a Central continua de pé.
+// (É a fonte JSON legada; em modo Postgres vira read-only, janela de rollback.)
+async function legacyLoadDb() {
   try {
     const raw = await fs.readFile(DATA_FILE, 'utf8');
     const parsed = parseDbText(raw);
@@ -165,10 +167,10 @@ async function loadDb() {
   return normalizeDb({});
 }
 
-// saveDb atômico: grava em .tmp e faz rename (atômico no mesmo FS), evitando o
-// arquivo meio-escrito que corrompia em crash/escrita concorrente. Antes de
+// legacySaveDb atômico: grava em .tmp e faz rename (atômico no mesmo FS), evitando
+// o arquivo meio-escrito que corrompia em crash/escrita concorrente. Antes de
 // sobrescrever, guarda o último estado VÁLIDO em .bak (rede de segurança).
-async function saveDb(db) {
+async function legacySaveDb(db) {
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
   try {
     const current = await fs.readFile(DATA_FILE, 'utf8');
@@ -183,6 +185,32 @@ async function saveDb(db) {
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
   }
+}
+
+// ── Datastore plugável (item 2.10): JSON | Postgres dual-read | Postgres ──────
+// Sem DRAC_CENTRAL_DATABASE_URL, loadDb/saveDb são passthrough p/ o JSON legado
+// (comportamento atual, DEFAULT). Com URL, a Central lê do Postgres (dual-read cai
+// para o JSON legado read-only) e escreve só no Postgres — sem tocar nas rotas.
+let _datastore = null;
+function getDatastore() {
+  if (!_datastore) {
+    _datastore = createDatastore({
+      legacy: { load: legacyLoadDb, save: legacySaveDb },
+      config: resolveConfig(process.env),
+    });
+    if (_datastore.mode !== 'json') {
+      console.log(`[central] datastore em modo "${_datastore.mode}" (Postgres); JSON legado read-only.`);
+    }
+  }
+  return _datastore;
+}
+
+async function loadDb() {
+  return getDatastore().load();
+}
+
+async function saveDb(db) {
+  return getDatastore().save(db);
 }
 
 function timingSafeTextEquals(a, b) {

@@ -343,11 +343,14 @@ const PLAYBACK_RATES = [1, 1.5, 2, 0.5];
  * play/pause central, avançar/retroceder 10s, barra de progresso arrastável
  * (scrubbing), velocidade e tempo. Toque mostra/esconde; auto-esconde tocando.
  */
-export function PlaybackVideo({ uri, posterUri, style, onRetry }: {
+export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionSeconds }: {
   uri: string;
   posterUri?: string | null;
   style: StyleProp<ViewStyle>;
   onRetry?: () => void;
+  /** Seek inicial (s) aplicado assim que a gravação fica pronta — usado pela
+   *  Revisão para abrir o vídeo NO INSTANTE do evento (recordingId+offset). */
+  initialPositionSeconds?: number | null;
 }) {
   const { theme } = useTheme();
   const player = useVideoPlayer(null, (instance) => {
@@ -371,6 +374,9 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry }: {
   const durationRef = useRef(0);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumeAfterForegroundRef = useRef(false);
+  // Seek pendente do "abrir no instante": aplicado uma única vez quando a
+  // gravação fica pronta (o currentTime só "pega" depois do readyToPlay).
+  const pendingSeekRef = useRef<number | null>(null);
 
   // Troca de gravação: a tela reusa este componente, então ao mudar a uri
   // recarregamos a fonte (sem recriar o player) e resetamos o estado.
@@ -383,13 +389,15 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry }: {
       setPlaying(true);
       setRate(1);
       setPlaybackError(false);
+      // Nova gravação → arma (ou limpa) o seek inicial para esta uri.
+      pendingSeekRef.current = typeof initialPositionSeconds === 'number' && initialPositionSeconds > 0 ? initialPositionSeconds : null;
       player.replace({ uri });
       player.playbackRate = 1;
       player.play();
     } catch {
       // ignore
     }
-  }, [uri, player]);
+  }, [uri, player, initialPositionSeconds]);
 
   useEffect(() => {
     const timeSub = player.addListener('timeUpdate', (p: { currentTime?: number }) => {
@@ -406,6 +414,13 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry }: {
         setPlaybackError(false);
         const d = player.duration;
         if (Number.isFinite(d) && d > 0) { durationRef.current = d; setDuration(d); }
+        // Abrir no instante: aplica o seek pendente uma única vez, limitado à
+        // duração conhecida (evita seek além do fim da gravação).
+        if (pendingSeekRef.current != null) {
+          const target = d > 0 ? Math.min(pendingSeekRef.current, Math.max(0, d - 0.5)) : pendingSeekRef.current;
+          pendingSeekRef.current = null;
+          try { player.currentTime = target; setPosition(target); } catch { /* ignore */ }
+        }
       }
     });
     const playSub = player.addListener('playingChange', (p: { isPlaying?: boolean }) => {

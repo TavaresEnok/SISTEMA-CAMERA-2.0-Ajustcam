@@ -23,6 +23,7 @@ import { LiveScreenRedesign } from './src/screens/redesign/LiveScreenRedesign';
 import { LoginScreen } from './src/screens/LoginScreen';
 import { MosaicScreen } from './src/screens/MosaicScreen';
 import { PlaybackScreen } from './src/screens/PlaybackScreen';
+import { ReviewScreen, type ReviewPlayback } from './src/screens/ReviewScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { request, normalizeServerUrl, setTokenRefreshHandler, setUnauthorizedHandler } from './src/services/api';
 import { authenticatedMediaUrl, isSecureMediaUrl } from './src/services/media-urls';
@@ -45,6 +46,7 @@ import { useLiveDetections } from './src/hooks/useLiveDetections';
 import { ThemeProvider, useTheme } from './src/theme/ThemeProvider';
 import { LibraryProvider, useLibrary } from './src/state/LibraryProvider';
 import { localDateKey, localDayIsoRange } from './src/utils/format';
+import { reviewFeedPath, reviewPlayUrl, reviewPlaybackTarget, type ReviewFilters, type ReviewFeedResponse, type ReviewItem } from './src/utils/review';
 import type { ActivePlayback, Camera, Direction, MobileCapabilities, Recording, Session, StreamUrls, Tab, User } from './src/types';
 
 const RECORDINGS_PAGE_SIZE = 50;
@@ -112,6 +114,15 @@ function AppInner() {
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<MobileCapabilities>({ liveView: true, playback: true, exportEvidence: false, alarmAck: false });
   const [downloadingIds, setDownloadingIds] = useState<string[]>([]);
+  // Revisão (item 2.7): fila de eventos + reprodução no instante em modal próprio.
+  const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
+  const [reviewTotal, setReviewTotal] = useState(0);
+  const [reviewUnseenCount, setReviewUnseenCount] = useState(0);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewRefreshing, setReviewRefreshing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewFilters, setReviewFilters] = useState<ReviewFilters>({ onlyConfirmed: true });
+  const [reviewPlayback, setReviewPlayback] = useState<ReviewPlayback | null>(null);
   const selectedCamera = cameras.find((camera) => camera.id === selectedCameraId) ?? cameras[0] ?? null;
   const sessionScope = session ? `${session.apiUrl}|${session.user.id}` : 'anonymous';
   const sessionTokenRef = useRef<string | null>(null);
@@ -128,6 +139,8 @@ function AppInner() {
   const clipFinalizeSilentRef = useRef(false);
   const recordingRequestRef = useRef(0);
   const playbackRequestRef = useRef(0);
+  const reviewRequestRef = useRef(0);
+  const reviewPlaybackRequestRef = useRef(0);
   const hdRequestRef = useRef(0);
   const brandingRequestRef = useRef(0);
   const posterRequestRef = useRef(0);
@@ -403,6 +416,14 @@ function AppInner() {
     }
   }, [selectedCamera?.id, session?.token, recordingDate, capabilities.playback]);
 
+  // Revisão: ao entrar na aba (ou trocar de sessão), carrega a fila com os
+  // filtros atuais. As trocas de filtro recarregam via changeReviewFilters.
+  useEffect(() => {
+    if (tab !== 'revisao' || !session || !capabilities.playback) return;
+    void loadReview(reviewFilters);
+    void loadReviewUnseen();
+  }, [tab, session?.token, capabilities.playback]);
+
   // A URL de máxima qualidade é por câmera; não vaza entre telas.
   useEffect(() => {
     setHdUrl(null);
@@ -585,6 +606,7 @@ function AppInner() {
       setLastSyncError(null);
       setSelectedCameraId((current) => (current && data.some((camera) => camera.id === current) ? current : data[0]?.id ?? null));
       void reloadAlarms();
+      void loadReviewUnseen();
       // Status sonda a cada 30s; posters têm renovação própria (3,5 min) para
       // não forçar dezenas de frames a cada ciclo silencioso.
       if (!quiet) void loadAllPosters(data);
@@ -1173,6 +1195,96 @@ function AppInner() {
     void openPlayback(current.recording);
   };
 
+  // ─── Revisão (item 2.7) ────────────────────────────────────────────────────
+  // Carrega a fila de eventos com os filtros atuais. O backend já exclui câmera
+  // privada (getAccessibleCameraIds), então nada além do feed chega aqui.
+  const loadReview = async (filters: ReviewFilters, mode: 'initial' | 'refresh' = 'initial') => {
+    if (!session || !capabilities.playback) return;
+    const token = session.token;
+    const generation = ++reviewRequestRef.current;
+    if (mode === 'refresh') setReviewRefreshing(true); else setReviewLoading(true);
+    setReviewError(null);
+    try {
+      const data = await request<ReviewFeedResponse>(session.apiUrl, reviewFeedPath(filters), token);
+      if (sessionTokenRef.current !== token || reviewRequestRef.current !== generation) return;
+      setReviewItems(Array.isArray(data.items) ? data.items : []);
+      setReviewTotal(Number.isFinite(data.total) ? Number(data.total) : 0);
+    } catch (error) {
+      if (sessionTokenRef.current !== token || reviewRequestRef.current !== generation) return;
+      const status = (error as { status?: number })?.status;
+      setReviewItems([]);
+      setReviewError(status === 403
+        ? 'Você não possui permissão para revisar eventos.'
+        : error instanceof Error ? error.message : 'Não foi possível carregar os eventos.');
+    } finally {
+      if (reviewRequestRef.current === generation) { setReviewLoading(false); setReviewRefreshing(false); }
+    }
+  };
+
+  const loadReviewUnseen = async () => {
+    if (!session || !capabilities.playback) { setReviewUnseenCount(0); return; }
+    const token = session.token;
+    try {
+      const data = await request<{ count: number }>(session.apiUrl, '/review/unseen-count', token);
+      if (sessionTokenRef.current !== token) return;
+      setReviewUnseenCount(Number.isFinite(data?.count) ? Number(data.count) : 0);
+    } catch {
+      // Badge é secundário: falha transitória mantém o valor atual.
+    }
+  };
+
+  const changeReviewFilters = (next: ReviewFilters) => {
+    setReviewFilters(next);
+    void loadReview(next);
+  };
+
+  // Marca visto/não-visto por USUÁRIO (POST /review/:id/seen). Update otimista
+  // com reconciliação do badge; reverte a lista em falha.
+  const markReviewSeen = async (item: ReviewItem, seen: boolean) => {
+    if (!session) return;
+    const token = session.token;
+    setReviewItems((current) => current.map((it) => (it.id === item.id ? { ...it, reviewed: seen } : it)));
+    setReviewUnseenCount((c) => Math.max(0, c + (seen ? -1 : 1)));
+    try {
+      await request(session.apiUrl, `/review/${item.id}/seen`, token, { method: 'POST', body: JSON.stringify({ seen }) });
+    } catch {
+      if (sessionTokenRef.current !== token) return;
+      setReviewItems((current) => current.map((it) => (it.id === item.id ? { ...it, reviewed: !seen } : it)));
+      setReviewUnseenCount((c) => Math.max(0, c + (seen ? 1 : -1)));
+    }
+  };
+
+  // Abre a reprodução NO INSTANTE do evento: busca o play-token da gravação e
+  // reproduz num modal próprio já posicionado em offsetSeconds (reusa 1.3),
+  // sem passar pela máquina de estado da aba Reprodução (evita corrida).
+  const openReviewItem = async (item: ReviewItem) => {
+    if (!session || !capabilities.playback) return;
+    const target = reviewPlaybackTarget(item);
+    if (!target) {
+      Alert.alert('Revisão', 'Este evento não tem gravação disponível para reprodução.');
+      return;
+    }
+    if (!item.reviewed) void markReviewSeen(item, true);
+    const token = session.token;
+    const generation = ++reviewPlaybackRequestRef.current;
+    try {
+      const data = await request<{ playToken: string }>(session.apiUrl, `/recordings/${target.recordingId}/play-token`, token, { method: 'POST' });
+      const url = normalizeServerUrl(reviewPlayUrl(session.apiUrl, target.recordingId, data.playToken), session.apiUrl);
+      if (!url) throw new Error('URL de reprodução indisponível.');
+      if (sessionTokenRef.current !== token || reviewPlaybackRequestRef.current !== generation) return;
+      const posterUri = normalizeServerUrl(streamPosters[item.cameraId] ?? null, session.apiUrl);
+      setReviewPlayback({ url, posterUri, offsetSeconds: target.offsetSeconds });
+    } catch (error) {
+      if (sessionTokenRef.current !== token || reviewPlaybackRequestRef.current !== generation) return;
+      Alert.alert('Revisão', error instanceof Error ? error.message : 'Não foi possível abrir a gravação.');
+    }
+  };
+
+  const closeReviewPlayback = () => {
+    reviewPlaybackRequestRef.current += 1;
+    setReviewPlayback(null);
+  };
+
   const downloadRecording = async (recording: Recording) => {
     if (!session || !capabilities.exportEvidence || downloadingRef.current.has(recording.id)) return;
     const currentSession = session;
@@ -1455,6 +1567,7 @@ function AppInner() {
           <BottomTabs
             active={tab}
             alarmCount={openAlarmCount}
+            reviewCount={reviewUnseenCount}
             onChange={(next) => leaveLive(() => setTab(next))}
           />
         ) : null}
@@ -1565,6 +1678,28 @@ function AppInner() {
           />
         )}
 
+        {tab === 'revisao' && (
+          <ReviewScreen
+            items={reviewItems}
+            total={reviewTotal}
+            unseenCount={reviewUnseenCount}
+            loading={reviewLoading}
+            refreshing={reviewRefreshing}
+            error={reviewError}
+            filters={reviewFilters}
+            cameras={cameras}
+            apiUrl={session.apiUrl}
+            token={session.token}
+            canPlayback={capabilities.playback}
+            reviewPlayback={reviewPlayback}
+            onChangeFilters={changeReviewFilters}
+            onRefresh={() => { void loadReview(reviewFilters, 'refresh'); void loadReviewUnseen(); }}
+            onOpenItem={(item) => { void openReviewItem(item); }}
+            onCloseReviewPlayback={closeReviewPlayback}
+            onMarkSeen={(item, seen) => { void markReviewSeen(item, seen); }}
+          />
+        )}
+
         {tab === 'alarmes' && (
           isRedesign ? (
             <EventsRedesign
@@ -1627,17 +1762,20 @@ function AppInner() {
       {isRedesign ? (
         <BottomTabsRedesign
           active={tab}
-          onChange={(next) => { if (next !== 'reproducao') closePlayback(); setTab(next); }}
+          onChange={(next) => { if (next !== 'reproducao') closePlayback(); if (next !== 'revisao') closeReviewPlayback(); setTab(next); }}
           alarmCount={openAlarmCount}
+          reviewCount={reviewUnseenCount}
         />
       ) : (
       <BottomTabs
         active={tab}
         onChange={(next) => {
           if (next !== 'reproducao') closePlayback();
+          if (next !== 'revisao') closeReviewPlayback();
           setTab(next);
         }}
         alarmCount={openAlarmCount}
+        reviewCount={reviewUnseenCount}
       />
       )}
     </SafeAreaView>

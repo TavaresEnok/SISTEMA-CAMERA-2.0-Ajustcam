@@ -1,0 +1,8 @@
+# Imagem leve para rodar os testes do ai-service que dependem de cv2 (MOG2).
+# Só opencv+numpy pinados (o motion.py não puxa a stack pesada de ML). O código
+# é montado em runtime; nada é COPIADO aqui, então a camada de pip fica cacheada.
+FROM python:3.12-slim
+RUN pip install --no-input --no-cache-dir \
+    opencv-python-headless==4.10.0.84 \
+    numpy==1.26.4
+ENV PYTHONDONTWRITEBYTECODE=1

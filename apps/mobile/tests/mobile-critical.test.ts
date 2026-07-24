@@ -9,12 +9,7 @@ import { clearStreamUrlsCache, requestCachedStreamUrls } from '../src/services/s
 import type { Camera, Recording } from '../src/types';
 import { readFileSync } from 'node:fs';
 
-type TestCase = { name: string; fn: () => void | Promise<void> };
-const tests: TestCase[] = [];
-
-function test(name: string, fn: TestCase['fn']) {
-  tests.push({ name, fn });
-}
+import { test } from 'node:test';
 
 function assert(condition: unknown, message: string) {
   if (!condition) throw new Error(message);
@@ -273,23 +268,3 @@ test('api 401: renova o token e repete a requisição sem desconectar', async ()
     setUnauthorizedHandler(null);
   }
 });
-
-async function main() {
-  for (const item of tests) {
-    try {
-      await item.fn();
-      console.log(`ok - ${item.name}`);
-    } catch (error) {
-      console.error(`not ok - ${item.name}`);
-      console.error(error);
-      process.exitCode = 1;
-      break;
-    }
-  }
-
-  if (!process.exitCode) {
-    console.log(`${tests.length} teste(s) mobile passaram.`);
-  }
-}
-
-void main();

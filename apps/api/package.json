@@ -5,8 +5,9 @@
     "dev": "ts-node --transpile-only src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "test:phase2": "tsx tests/phase2-critical.test.ts",
-    "test:e2e": "tsx tests/operational-e2e.test.ts",
+    "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "test:phase2": "node --import tsx --test tests/phase2-critical.test.ts",
+    "test:e2e": "tsx tests/operational-e2e.e2e.ts",
     "prisma": "prisma",
     "import:legacy-camera": "ts-node --transpile-only scripts/import-legacy-camera.ts"
   },

@@ -1,6 +1,7 @@
 import cv2
 import time
 import threading
+import logging
 import requests
 import os
 import numpy as np
@@ -11,6 +12,9 @@ from urllib.parse import urlsplit, urlunsplit
 from detectors.motion import MotionDetector
 from model_registry import registry
 from runtime_profiles import MOTION_PROFILE, runtime_profile
+from reconnect_backoff import compute_reconnect_delay
+
+logger = logging.getLogger("ai-service.stream")
 
 class StreamProcessor:
     def __init__(self, camera_id, rtsp_url, api_url, service_token, analysis_type="motion", source_info=None):
@@ -634,10 +638,14 @@ class StreamProcessor:
             return
         self._apply_qos_mode(target_qos_mode)
         self._last_applied_qos_signature = signature
-        print(
-            f"[{self.camera_id}] QoS ativo={self.current_qos_mode} "
-            f"fps={self.process_fps:.2f} analysis={self.frame_width}x{self.frame_height} "
-            f"imgsz_hint={self.current_input_size_hint or 'default'}"
+        logger.info(
+            "[%s] QoS ativo=%s fps=%.2f analysis=%dx%d imgsz_hint=%s",
+            self.camera_id,
+            self.current_qos_mode,
+            self.process_fps,
+            self.frame_width,
+            self.frame_height,
+            self.current_input_size_hint or "default",
         )
 
     def _refresh_qos_mode(self):
@@ -733,7 +741,8 @@ class StreamProcessor:
             }
 
     def _capture_frames(self):
-        print(f"[{self.camera_id}] Iniciando captura: {self._sanitize_url(self.rtsp_url)}")
+        # NUNCA logar self.rtsp_url cru: _sanitize_url remove user:senha (invariante 1.2.v).
+        logger.info("[%s] Iniciando captura: %s", self.camera_id, self._sanitize_url(self.rtsp_url))
         cap = None
         last_yield_time = 0
         grab_failures = 0
@@ -772,9 +781,10 @@ class StreamProcessor:
                         self.consecutive_capture_failures += 1
                         self.last_capture_failure_at = time.time()
                         self.last_error = f"capture_failed (grab x{grab_failures})"
-                        print(f"[{self.camera_id}] Falha na captura (grab), reconectando em 5s...")
+                        delay = compute_reconnect_delay(self.consecutive_capture_failures)
+                        logger.warning("[%s] Falha na captura (grab), reconectando em %.1fs...", self.camera_id, delay)
                         cap.release()
-                        time.sleep(5)
+                        time.sleep(delay)
                         cap = self._open_capture()
                         grab_failures = 0
                 continue
@@ -787,9 +797,10 @@ class StreamProcessor:
                 self.consecutive_capture_failures += 1
                 self.last_capture_failure_at = time.time()
                 self.last_error = f"capture_failed ({self.consecutive_capture_failures} consecutive)"
-                print(f"[{self.camera_id}] Falha na captura, reconectando em 5s...")
+                delay = compute_reconnect_delay(self.consecutive_capture_failures)
+                logger.warning("[%s] Falha na captura, reconectando em %.1fs...", self.camera_id, delay)
                 cap.release()
-                time.sleep(5)
+                time.sleep(delay)
                 cap = self._open_capture()
                 continue
             
@@ -860,16 +871,16 @@ class StreamProcessor:
 
     def _process(self):
         if self.advanced_analysis_type:
-            print(f"[{self.camera_id}] Iniciando IA global 'motion+{self.advanced_analysis_type}' ({self.process_fps} fps)...")
+            logger.info("[%s] Iniciando IA global 'motion+%s' (%s fps)...", self.camera_id, self.advanced_analysis_type, self.process_fps)
             try:
                 # Pré-carrega o detector no registry (serializado, sem duplicatas)
                 registry.ensure_detector(self.advanced_analysis_type)
             except Exception as exc:
                 self.last_error = str(exc)
-                print(f"[{self.camera_id}] Falha ao carregar detector '{self.advanced_analysis_type}': {exc}")
+                logger.error("[%s] Falha ao carregar detector '%s': %s", self.camera_id, self.advanced_analysis_type, exc)
                 return
         else:
-            print(f"[{self.camera_id}] Iniciando IA global 'motion' ({self.process_fps} fps)...")
+            logger.info("[%s] Iniciando IA global 'motion' (%s fps)...", self.camera_id, self.process_fps)
 
         while self.running:
             self.process_loop_iterations += 1
@@ -951,7 +962,7 @@ class StreamProcessor:
                     self._store_live_detections(detections, current_time)
             except Exception as exc:
                 self.last_error = str(exc)
-                print(f"[{self.camera_id}] erro inferência: {exc}")
+                logger.warning("[%s] erro inferência: %s", self.camera_id, exc)
                 time.sleep(1)
                 continue
 
@@ -1201,7 +1212,7 @@ class StreamProcessor:
             self._report_event(event_type, metadata.get("value", detection.confidence), message, metadata)
 
     def _report_event(self, event_type, value, message=None, metadata=None):
-        print(f"[{self.camera_id}] Evento: {event_type} ({value})")
+        logger.info("[%s] Evento: %s (%s)", self.camera_id, event_type, value)
         try:
             url = f"{self.api_url}/cameras/internal/{self.camera_id}/events"
             payload = {
@@ -1215,6 +1226,6 @@ class StreamProcessor:
             # Timeout curto para não travar a thread de IA
             response = requests.post(url, json=payload, headers=headers, timeout=3)
             if response.status_code not in [200, 201]:
-                print(f"[{self.camera_id}] Erro API: {response.status_code}")
+                logger.warning("[%s] Erro API: %s", self.camera_id, response.status_code)
         except Exception as e:
-            print(f"[{self.camera_id}] Falha de conexão com API: {e}")
+            logger.warning("[%s] Falha de conexão com API: %s", self.camera_id, e)

@@ -20,6 +20,14 @@ import { ListRecordingsQueryDto } from './dto/list-recordings-query.dto';
 import { RegisterRecordingDto } from './dto/register-recording.dto';
 import { ExportClipDto } from './dto/export-clip.dto';
 import { ensureFileUnderRoot } from './helpers/safe-file.helper';
+import { listRecordingFilesOnDisk } from './helpers/recording-disk-scan.helper';
+import { reconcileRecordingPaths, type RecordingReconciliation } from './helpers/recording-reconcile.helper';
+import {
+  planTimelinePreview,
+  buildTimelinePreviewPath,
+  buildTimelinePreviewArgs,
+  type TimelinePreviewPlan,
+} from './helpers/timeline-preview.helper';
 import archiver from 'archiver';
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +41,7 @@ type RecordingHealthCacheEntry = {
 export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RecordingsService.name);
   private readonly thumbnailGenerationInFlight = new Map<string, Promise<void>>();
+  private readonly timelinePreviewInFlight = new Map<string, Promise<void>>();
   private readonly thumbnailGenerationWaiters: Array<() => void> = [];
   private thumbnailGenerationActive = 0;
   private integritySweepTimer: NodeJS.Timeout | null = null;
@@ -695,6 +704,44 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  /**
+   * `recordings:check` — reconciliação bidirecional DB↔disco (moonfire `check.rs` /
+   * ZoneMinder `zmaudit.pl`). Coleta os paths que o Postgres conhece e os que
+   * existem no disco e usa o helper PURO `reconcileRecordingPaths` para apontar:
+   *  - `orfaosNoDisco`: arquivos no disco SEM registro (recuperáveis — a varredura
+   *    de órfãos do process-manager os readota);
+   *  - `orfaosNoDb`: registros cujo arquivo sumiu (linha aponta p/ nada).
+   * Apenas RELATA (não apaga nem cria nada): a decisão de agir é do operador.
+   */
+  async checkRecordingIntegrity(limit = 100_000): Promise<RecordingReconciliation & { dbCount: number; diskCount: number }> {
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const boundedLimit = Math.max(1, Math.min(1_000_000, Math.floor(limit)));
+
+    const records = await this.prisma.recording.findMany({
+      orderBy: { startedAt: 'desc' },
+      take: boundedLimit,
+      select: { filePath: true },
+    });
+    const dbPaths: string[] = [];
+    for (const record of records) {
+      try {
+        dbPaths.push(ensureFileUnderRoot(recordingsRoot, record.filePath));
+      } catch {
+        // Path fora da raiz (dado legado/corrompido): trata como está, sem quebrar
+        // — ele nunca casará com o disco e vira `orfaosNoDb`, que é o esperado.
+        dbPaths.push(record.filePath);
+      }
+    }
+
+    const diskPaths = listRecordingFilesOnDisk(recordingsRoot);
+    const { orfaosNoDisco, orfaosNoDb } = reconcileRecordingPaths(dbPaths, diskPaths);
+
+    this.logger.log(
+      `recordings:check — db=${dbPaths.length} disco=${diskPaths.length} órfãosNoDisco=${orfaosNoDisco.length} órfãosNoDb=${orfaosNoDb.length}.`,
+    );
+    return { orfaosNoDisco, orfaosNoDb, dbCount: dbPaths.length, diskCount: diskPaths.length };
+  }
+
   async streamThumbnail(recordingId: string, res: Response) {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
@@ -799,6 +846,103 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       await generation;
     } finally {
       this.thumbnailGenerationInFlight.delete(recordingId);
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 2.9 — Sprite de scrubbing da timeline.
+  // Gera (sob demanda, cacheado ao lado do MP4) um único mosaico low-res com 1
+  // frame a cada N s. O front usa o sprite + o plano (grid/intervalo) para
+  // varrer horas de vídeo sem baixar o vídeo nem decodificar em JS.
+  // ───────────────────────────────────────────────────────────────────────
+  private buildTimelinePreviewPlan(durationSeconds: number | null | undefined): TimelinePreviewPlan {
+    const tileWidth = Math.max(16, Number(process.env.RECORDING_PREVIEW_TILE_WIDTH ?? 160));
+    const maxTiles = Math.max(1, Number(process.env.RECORDING_PREVIEW_MAX_TILES ?? 120));
+    return planTimelinePreview({ durationSeconds, tileWidth, maxTiles });
+  }
+
+  async getTimelinePreviewMeta(recordingId: string) {
+    const recording = await this.ensureRecordingExists(recordingId);
+    const plan = this.buildTimelinePreviewPlan(recording.durationSeconds);
+    return {
+      recordingId,
+      durationSeconds: recording.durationSeconds ?? null,
+      spriteUrl: `/recordings/${recordingId}/preview-sprite`,
+      intervalSeconds: plan.intervalSeconds,
+      frameCount: plan.frameCount,
+      columns: plan.columns,
+      rows: plan.rows,
+      tileWidth: plan.tileWidth,
+      tileHeight: plan.tileHeight,
+    };
+  }
+
+  async streamTimelinePreview(recordingId: string, res: Response) {
+    const recording = await this.ensureRecordingExists(recordingId);
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+    const spritePath = ensureFileUnderRoot(recordingsRoot, buildTimelinePreviewPath(recording.filePath));
+    const plan = this.buildTimelinePreviewPlan(recording.durationSeconds);
+    await this.ensureTimelinePreviewGenerated(recording.id, filePath, spritePath, plan);
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('Content-Length', String(statSync(spritePath).size));
+    createReadStream(spritePath).pipe(res);
+  }
+
+  private async ensureTimelinePreviewGenerated(
+    recordingId: string,
+    inputPath: string,
+    outputPath: string,
+    plan: TimelinePreviewPlan,
+  ) {
+    if (existsSync(outputPath) && statSync(outputPath).size > 0) return;
+    if (!existsSync(inputPath)) {
+      throw new NotFoundException('Arquivo de gravação não encontrado no disco.');
+    }
+
+    const current = this.timelinePreviewInFlight.get(recordingId);
+    if (current) return current;
+
+    const generation = (async () => {
+      // Reusa o mesmo pool de slots do thumbnail: ambos são passes ffmpeg e não
+      // devem competir sem limite pela CPU do host.
+      await this.acquireThumbnailGenerationSlot();
+      try {
+        if (existsSync(outputPath) && statSync(outputPath).size > 0) return;
+        const temporaryPath = `${outputPath}.${process.pid}.${Date.now()}.tmp.jpg`;
+        try {
+          await rm(temporaryPath, { force: true }).catch(() => undefined);
+          await execFileAsync(
+            'ffmpeg',
+            buildTimelinePreviewArgs(inputPath, temporaryPath, plan),
+            { timeout: 60_000, maxBuffer: 1024 * 1024 },
+          );
+          const generated = await stat(temporaryPath);
+          if (generated.size <= 0) throw new Error('FFmpeg não produziu um sprite válido.');
+          await rename(temporaryPath, outputPath);
+        } finally {
+          await rm(temporaryPath, { force: true }).catch(() => undefined);
+        }
+        if (!existsSync(outputPath) || statSync(outputPath).size <= 0) {
+          throw new Error('FFmpeg não produziu um sprite válido.');
+        }
+      } catch (error) {
+        throw new InternalServerErrorException(
+          error instanceof Error
+            ? `Falha ao gerar sprite de preview: ${sanitizeSensitiveText(error.message)}`
+            : 'Falha ao gerar sprite de preview.',
+        );
+      } finally {
+        this.releaseThumbnailGenerationSlot();
+      }
+    })();
+
+    this.timelinePreviewInFlight.set(recordingId, generation);
+    try {
+      await generation;
+    } finally {
+      this.timelinePreviewInFlight.delete(recordingId);
     }
   }
 

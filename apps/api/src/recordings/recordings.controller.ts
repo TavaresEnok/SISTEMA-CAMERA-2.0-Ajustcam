@@ -657,6 +657,44 @@ export class RecordingsController {
     return this.recordingsService.enqueueThumbnailGeneration(id, true);
   }
 
+  // 2.9 — Metadados do sprite de scrubbing (grid/intervalo). Autenticado e
+  // atrás do MESMO gate de conteúdo por câmera (câmera privada herda o gate).
+  @Roles(UserRole.VIEWER)
+  @RequirePermission('playback')
+  @Get('recordings/:id/preview-meta')
+  async getTimelinePreviewMeta(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    const recording = await this.recordingsService.ensureRecordingExists(id);
+    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    return this.recordingsService.getTimelinePreviewMeta(id);
+  }
+
+  // 2.9 — Sprite (mosaico low-res) para varrer a timeline. Mesmo gate do
+  // thumbnail: token de playback da própria gravação + assertCanViewCamera, de
+  // modo que derivados de câmera privada NUNCA vazam (invariante LGPD 1.2.i).
+  @Public()
+  @Get('recordings/:id/preview-sprite')
+  async getTimelinePreviewSprite(
+    @Param('id') id: string,
+    @Query('token') token: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const bearerToken = this.extractBearerToken(req);
+    const cookieToken = this.extractCookieToken(req, 'vms_play_token');
+    const tokenValue = token?.trim() || bearerToken || cookieToken;
+    if (!tokenValue) {
+      throw new UnauthorizedException('Token de preview ausente.');
+    }
+    const payload = await this.authService.verifyPlaybackToken(tokenValue);
+    if (payload.recordingId !== id) {
+      throw new UnauthorizedException('Token inválido para esta gravação.');
+    }
+    const tokenUser = await this.authService.me(payload.sub);
+    const recording = await this.recordingsService.ensureRecordingExists(id);
+    await this.accessControlService.assertCanViewCamera(tokenUser, recording.cameraId);
+    return this.recordingsService.streamTimelinePreview(id, res);
+  }
+
   @Public()
   @UseGuards(ServiceTokenGuard)
   @Post('recordings/internal/register')

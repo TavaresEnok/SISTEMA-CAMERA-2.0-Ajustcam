@@ -20,6 +20,31 @@ jobs:
         run: |
           bash -n scripts/*.sh
 
+  python-tests:
+    name: ai-service python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Instala as MESMAS versões pinadas de opencv/numpy do serviço, para que os
+      # testes que dependem de cv2 (MOG2 em detectors/motion.py) rodem DE VERDADE
+      # no CI — não só a lógica pura. (item 0.3 do docs/PLANO-EVOLUCAO-DRAC.md)
+      - name: Install ai-service test deps (cv2/numpy pinados)
+        run: |
+          pip install "$(grep -E '^opencv-python-headless==' services/ai-service-python/requirements.txt)" \
+                      "$(grep -E '^numpy==' services/ai-service-python/requirements.txt)"
+
+      - name: Run ai-service unit tests
+        run: python3 -m unittest discover -s services/ai-service-python/tests -t services/ai-service-python -v
+
   pnpm-verify:
     name: pnpm verify
     runs-on: ubuntu-latest

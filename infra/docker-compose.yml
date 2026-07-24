@@ -460,6 +460,11 @@ services:
       - MTX_HLSALLOWORIGINS=${MEDIAMTX_HLS_ALLOW_ORIGIN:-*}
       - MTX_WEBRTCALLOWORIGINS=${MEDIAMTX_WEBRTC_ALLOW_ORIGIN:-*}
       - MEDIAMTX_WEBRTC_ADDITIONAL_HOST=${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-127.0.0.1}
+      # Override nativo do MediaMTX: aplica o host WebRTC (ICE) renderizado POR
+      # INSTALAÇÃO (install-drac.sh → DRAC_SERVER_IP), no lugar do valor fixo do
+      # yml. Sem esta linha o mediamtx.yml (hardcoded) vencia — instalação
+      # white-label nova nascia anunciando o host ICE errado.
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-127.0.0.1}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 8554 || exit 1"]
       interval: 30s

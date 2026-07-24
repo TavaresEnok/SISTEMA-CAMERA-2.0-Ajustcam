@@ -9,7 +9,7 @@
     "docker:dev": "docker compose --env-file infra/.env -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d --build",
     "docker:prod": "docker compose --env-file infra/.env -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --build",
     "docker:down": "docker compose --env-file infra/.env -f infra/docker-compose.yml -f infra/docker-compose.dev.yml down",
-    "verify": "pnpm test:phase2 && pnpm test:mobile && pnpm --filter web test && pnpm --filter drac-central test && pnpm --filter api build && pnpm --filter web typecheck && pnpm --filter web build && pnpm --filter mobile typecheck",
+    "verify": "pnpm --filter api test && pnpm test:mobile && pnpm --filter web test && pnpm --filter drac-central test && pnpm --filter api build && pnpm --filter web typecheck && pnpm --filter web build && pnpm --filter mobile typecheck",
     "test:phase2": "pnpm --filter api test:phase2",
     "test:e2e": "pnpm --filter api test:e2e",
     "db:migrate": "pnpm --filter api prisma migrate deploy",

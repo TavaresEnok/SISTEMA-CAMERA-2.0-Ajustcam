@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header, Query
 import os
+import logging
+import threading
 import uvicorn
 from pydantic import BaseModel
 from typing import Any, Optional, Dict
@@ -10,10 +12,19 @@ from model_registry import registry
 from runtime_profiles import exposed_profiles
 from onnxruntime_session import inference_threading_status
 
+logging.basicConfig(
+    level=(os.getenv("AI_LOG_LEVEL", "INFO") or "INFO").strip().upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("ai-service")
+
 app = FastAPI(title="VMS AI Service", description="AI analysis service for VMS Drac")
 
-# Gerenciador de processos ativos
+# Gerenciador de processos ativos.
+# `_processors_lock` serializa as MUTAÇÕES do dict global entre threads/workers
+# (start/stop/stop_all) — a leitura em /health é tolerante a corrida por design.
 processors: Dict[str, StreamProcessor] = {}
+_processors_lock = threading.Lock()
 
 class AnalysisRequest(BaseModel):
     camera_id: str
@@ -124,34 +135,45 @@ async def latest_detections(
 @app.post("/analyze/start")
 async def start_analysis(request: AnalysisRequest, x_service_token: Optional[str] = Header(default=None)):
     validate_internal_token(x_service_token)
-    if request.camera_id in processors:
-        return {"status": "already_running", "camera_id": request.camera_id}
-    
+
     api_url = os.getenv("API_URL", "http://api:3000")
     service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "change_me_service_token")
-    
-    processor = StreamProcessor(
-        request.camera_id,
-        request.rtsp_url,
-        api_url,
-        service_token,
-        request.analysis_type,
-        request.source_info or {},
-    )
-    processor.start()
-    processors[request.camera_id] = processor
-    
+
+    # Serializa o check-and-set do dict global: sem o lock, duas requisições
+    # concorrentes poderiam ambas ver "não existe" e criar dois StreamProcessor
+    # para a mesma câmera (dois pipelines de captura). start() só dispara threads
+    # (não bloqueia), então mantê-lo sob o lock é seguro.
+    with _processors_lock:
+        if request.camera_id in processors:
+            return {"status": "already_running", "camera_id": request.camera_id}
+        processor = StreamProcessor(
+            request.camera_id,
+            request.rtsp_url,
+            api_url,
+            service_token,
+            request.analysis_type,
+            request.source_info or {},
+        )
+        processor.start()
+        processors[request.camera_id] = processor
+
+    logger.info("[%s] análise iniciada (analysis_type=%s)", request.camera_id, request.analysis_type)
     return {"status": "started", "camera_id": request.camera_id, "analysis_type": request.analysis_type}
 
 @app.post("/analyze/stop/{camera_id}")
 async def stop_analysis(camera_id: str, x_service_token: Optional[str] = Header(default=None)):
     validate_internal_token(x_service_token)
-    if camera_id not in processors:
-        raise HTTPException(status_code=404, detail="Processador não encontrado")
-    
-    processor = processors.pop(camera_id)
+
+    # Remove sob o lock; para FORA dele (stop() faz join de threads, pode demorar
+    # ~2s e não deve segurar as demais mutações do dict).
+    with _processors_lock:
+        if camera_id not in processors:
+            raise HTTPException(status_code=404, detail="Processador não encontrado")
+        processor = processors.pop(camera_id)
+
     processor.stop()
-    
+
+    logger.info("[%s] análise parada", camera_id)
     return {"status": "stopped", "camera_id": camera_id}
 
 @app.post("/confirm-motion")
@@ -267,11 +289,17 @@ async def stop_live_view(camera_id: str, request: LiveViewLeaseRequest, x_servic
 @app.post("/analyze/stop-all")
 async def stop_all(x_service_token: Optional[str] = Header(default=None)):
     validate_internal_token(x_service_token)
+    # Drena o dict sob o lock e para os processadores FORA dele (stop() faz join
+    # de threads — segurar o lock durante isso bloquearia start/stop concorrentes).
+    with _processors_lock:
+        draining = list(processors.items())
+        processors.clear()
+
     stopped = []
-    for camera_id, processor in list(processors.items()):
-        processors.pop(camera_id, None)
+    for camera_id, processor in draining:
         processor.stop()
         stopped.append(camera_id)
+    logger.info("análise parada para %d câmera(s)", len(stopped))
     return {"status": "stopped", "camera_ids": stopped}
 
 

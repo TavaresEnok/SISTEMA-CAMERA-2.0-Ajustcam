@@ -197,11 +197,25 @@ model CameraEvent {
   /// Fila de REVISÃO: marcado quando um operador revê o evento. Null = não visto.
   reviewedAt DateTime?
 
-  alarms AlarmInstance[]
+  alarms      AlarmInstance[]
+  userReviews UserEventReview[]
 
   @@index([cameraId, type, occurredAt])
   @@index([occurredAt])
   @@index([reviewedAt])
+}
+
+/// Revisão POR USUÁRIO: cada operador tem o seu próprio "visto". Substitui o
+/// reviewedAt global do CameraEvent (que marcava como visto para TODOS de uma vez).
+model UserEventReview {
+  userId     String
+  eventId    String
+  reviewedAt DateTime    @default(now())
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event      CameraEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([userId, eventId])
+  @@index([eventId])
 }
 
 model AlarmRule {
@@ -277,6 +291,7 @@ model User {
   pushDevices       PushDevice[]
   liveLayouts       LiveLayout[]
   authSessions      AuthSession[]
+  eventReviews      UserEventReview[]
 }
 
 model AuthSession {

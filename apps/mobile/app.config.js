@@ -98,7 +98,28 @@ function firebaseRegistered(pkg) {
     return false;
   }
 }
-const skipFirebase = c.skipFirebase === true || !firebaseRegistered(c.packageId || base.android.package);
+// Push explícito no white-label: a flag `pushEnabled` no config do cliente evita
+// a desativação SILENCIOSA do push. Se o cliente EXIGE push (pushEnabled:true) mas
+// falta o google-services.json que registra o pacote, o build FALHA alto — em vez
+// de entregar um app "com alarmes" que na prática só faz polling em foreground.
+const pkgForPush = c.packageId || base.android.package;
+const pushRegistered = firebaseRegistered(pkgForPush);
+if (c.pushEnabled === true && !pushRegistered) {
+  throw new Error(
+    `[app.config] Cliente "${c.slug || 'default'}" define pushEnabled:true, mas falta um google-services.json `
+    + `registrando o pacote "${pkgForPush}". Registre o pacote no Firebase (clients/<slug>/google-services.json) `
+    + `ou defina pushEnabled:false conscientemente.`,
+  );
+}
+const skipFirebase = c.pushEnabled === false || c.skipFirebase === true || !pushRegistered;
+if (skipFirebase && c.pushEnabled !== false) {
+  // Desativação NÃO-intencional (falta de registro): avisa em vez de silenciar.
+  console.warn(
+    `[app.config] AVISO: push DESATIVADO para "${c.slug || 'default'}" (pacote "${pkgForPush}" sem google-services.json). `
+    + `O app não receberá notificações em background — só polling em foreground. `
+    + `Defina pushEnabled:true para transformar isso em erro de build.`,
+  );
+}
 let effectivePlugins = skipFirebase
   ? plugins.filter((p) => (Array.isArray(p) ? p[0] : p) !== 'expo-notifications')
   : plugins;

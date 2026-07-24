@@ -59,7 +59,7 @@ export class ReviewService {
     const where: any = {
       cameraId: { in: cameraIds },
       type: { in: REVIEWABLE_TYPES },
-      ...(filters.unseenOnly ? { reviewedAt: null } : {}),
+      ...(filters.unseenOnly ? { userReviews: { none: { userId: user.id } } } : {}),
       ...(from || to ? { occurredAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
       ...(filters.onlyConfirmed
         ? { metadata: { path: ['semanticConfirmed'], equals: true } }
@@ -80,19 +80,50 @@ export class ReviewService {
       this.prisma.cameraEvent.count({ where }),
     ]);
 
-    // Para cada evento, localiza a gravação que contém o instante (uma query em
-    // lote por câmera evitaria N+1, mas o volume por página é pequeno).
-    const items = await Promise.all(rows.map(async (event) => {
-      const meta = (event.metadata ?? {}) as Record<string, unknown>;
-      const recording = await this.prisma.recording.findFirst({
+    // Uma única query em lote das gravações que cobrem a janela desta página de
+    // eventos (evita o N+1 de uma findFirst por evento). O casamento evento→gravação
+    // é feito em memória com a MESMA semântica: a gravação mais recente cujo intervalo
+    // [startedAt, endedAt|∞) contém o instante do evento.
+    const recordingsByCamera = new Map<string, Array<{ id: string; startedAt: Date; endedAt: Date | null }>>();
+    if (rows.length) {
+      const times = rows.map((event) => event.occurredAt.getTime());
+      const candidates = await this.prisma.recording.findMany({
         where: {
-          cameraId: event.cameraId,
-          startedAt: { lte: event.occurredAt },
-          OR: [{ endedAt: null }, { endedAt: { gte: event.occurredAt } }],
+          cameraId: { in: [...new Set(rows.map((event) => event.cameraId))] },
+          startedAt: { lte: new Date(Math.max(...times)) },
+          OR: [{ endedAt: null }, { endedAt: { gte: new Date(Math.min(...times)) } }],
         },
         orderBy: { startedAt: 'desc' },
-        select: { id: true, startedAt: true },
+        select: { id: true, cameraId: true, startedAt: true, endedAt: true },
       });
+      for (const rec of candidates) {
+        const list = recordingsByCamera.get(rec.cameraId) ?? [];
+        list.push({ id: rec.id, startedAt: rec.startedAt, endedAt: rec.endedAt });
+        recordingsByCamera.set(rec.cameraId, list);
+      }
+    }
+
+    const findRecording = (cameraId: string, occurredAt: Date) => {
+      const list = recordingsByCamera.get(cameraId);
+      if (!list) return null;
+      const t = occurredAt.getTime();
+      // list já vem ordenada por startedAt desc → o primeiro match é o mais recente.
+      return list.find((r) => r.startedAt.getTime() <= t && (r.endedAt == null || r.endedAt.getTime() >= t)) ?? null;
+    };
+
+    // "visto" é POR USUÁRIO (UserEventReview), não global — uma query em lote.
+    const reviewedEventIds = new Set(
+      rows.length
+        ? (await this.prisma.userEventReview.findMany({
+            where: { userId: user.id, eventId: { in: rows.map((e) => e.id) } },
+            select: { eventId: true },
+          })).map((r) => r.eventId)
+        : [],
+    );
+
+    const items = rows.map((event) => {
+      const meta = (event.metadata ?? {}) as Record<string, unknown>;
+      const recording = findRecording(event.cameraId, event.occurredAt);
       const offsetSeconds = recording
         ? Math.max(0, Math.floor((event.occurredAt.getTime() - recording.startedAt.getTime()) / 1000))
         : null;
@@ -107,11 +138,11 @@ export class ReviewService {
         confidence: typeof meta.semanticConfidence === 'number' ? meta.semanticConfidence : null,
         source: (meta.source as string) ?? null,
         occurredAt: event.occurredAt,
-        reviewed: Boolean(event.reviewedAt),
+        reviewed: reviewedEventIds.has(event.id),
         recordingId: recording?.id ?? null,
         offsetSeconds,
       };
-    }));
+    });
 
     return { items, total, limit, offset };
   }
@@ -126,10 +157,15 @@ export class ReviewService {
     if (!(await this.accessControl.canViewCamera(user, event.cameraId))) {
       throw new ForbiddenException('Sem acesso a este evento.');
     }
-    await this.prisma.cameraEvent.update({
-      where: { id: eventId },
-      data: { reviewedAt: seen ? new Date() : null },
-    });
+    if (seen) {
+      await this.prisma.userEventReview.upsert({
+        where: { userId_eventId: { userId: user.id, eventId } },
+        create: { userId: user.id, eventId },
+        update: {},
+      });
+    } else {
+      await this.prisma.userEventReview.deleteMany({ where: { userId: user.id, eventId } });
+    }
     return { id: eventId, reviewed: seen };
   }
 
@@ -138,7 +174,7 @@ export class ReviewService {
     const accessible = await this.accessControl.getAccessibleCameraIds(user);
     if (!accessible.length) return { count: 0 };
     const count = await this.prisma.cameraEvent.count({
-      where: { cameraId: { in: accessible }, type: { in: REVIEWABLE_TYPES }, reviewedAt: null },
+      where: { cameraId: { in: accessible }, type: { in: REVIEWABLE_TYPES }, userReviews: { none: { userId: user.id } } },
     });
     return { count };
   }

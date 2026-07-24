@@ -29,12 +29,7 @@ import { ensureFileUnderRoot } from '../src/recordings/helpers/safe-file.helper'
 import { CameraHealthCheckProcessor } from '../src/jobs/processors/camera-health-check.processor';
 import { containsCredentialBearingUrl, sanitizeSensitiveText } from '../src/common/security/sensitive-text.helper';
 
-type TestCase = { name: string; run: () => Promise<void> | void };
-const tests: TestCase[] = [];
-
-function test(name: string, run: TestCase['run']) {
-  tests.push({ name, run });
-}
+import { test } from 'node:test';
 
 function config(values: Record<string, string>) {
   return { get: (key: string) => values[key] };
@@ -1443,26 +1438,3 @@ test('permissions audit: rotas sensiveis mantem RequirePermission', () => {
   assertRoutePermission('src/ai/ai.controller.ts', "@Patch('settings')", 'serverConfig');
   assertRoutePermission('src/ai/ai.controller.ts', "@Post('sync')", 'serverConfig');
 });
-
-async function main() {
-  let failures = 0;
-  for (const item of tests) {
-    try {
-      await item.run();
-      console.log(`ok - ${item.name}`);
-    } catch (error) {
-      failures += 1;
-      console.error(`not ok - ${item.name}`);
-      console.error(error);
-    }
-  }
-
-  if (failures > 0) {
-    console.error(`${failures} teste(s) falharam.`);
-    process.exit(1);
-  }
-
-  console.log(`${tests.length} teste(s) passaram.`);
-}
-
-void main();

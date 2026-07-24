@@ -1,7 +1,7 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { Processor, WorkerHost, InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Job } from 'bullmq';
+import { Job, Queue } from 'bullmq';
 import { AlarmInstance, AlarmRule, Prisma } from '@prisma/client';
 import axios from 'axios';
 import { createHmac } from 'node:crypto';
@@ -10,6 +10,8 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { isAllowedHost, isPrivateOrReservedIp, resolveHostIps } from '../../common/network/safe-url.helper';
 import { ALARM_NOTIFICATION_QUEUE } from '../queues/alarm-notification.queue';
+import { PUSH_RECEIPTS_QUEUE, pushReceiptsDelayMs } from '../queues/push-receipts.queue';
+import type { PushReceiptsJob } from './push-receipts.processor';
 import { PushService } from '../../notifications/push.service';
 import { PushDevicesService } from '../../notifications/push-devices.service';
 
@@ -56,6 +58,7 @@ export class AlarmNotificationProcessor extends WorkerHost {
     private readonly auditService: AuditService,
     private readonly pushService: PushService,
     private readonly pushDevices: PushDevicesService,
+    @InjectQueue(PUSH_RECEIPTS_QUEUE) private readonly pushReceiptsQueue: Queue<PushReceiptsJob>,
   ) {
     super();
   }
@@ -217,7 +220,7 @@ export class AlarmNotificationProcessor extends WorkerHost {
       return { skipped: true, reason: 'no_registered_devices' } as const;
     }
     const cameraName = (alarm as any).camera?.name as string | undefined;
-    const { invalidTokens } = await this.pushService.sendToTokens(tokens, {
+    const { invalidTokens, receiptIds } = await this.pushService.sendToTokens(tokens, {
       // Título = NOME da câmera (o que o usuário reconhece na hora).
       // Corpo = descrição humana do evento. Ex.: "Grupo Flash Cam-12" / "Movimento detectado".
       title: cameraName ?? 'Câmera',
@@ -233,6 +236,28 @@ export class AlarmNotificationProcessor extends WorkerHost {
     });
     if (invalidTokens.length) {
       await this.pushDevices.pruneInvalid(invalidTokens);
+    }
+    // Estágio 2: agenda a conferência dos RECEIPTS ~15min depois (job atrasado). O
+    // Expo só revela alguns tokens mortos no processamento assíncrono, que não
+    // aparecem no ticket imediato acima. Falha ao agendar NÃO reprova a entrega já
+    // feita — só perde a poda tardia daquele lote.
+    const receiptCount = Object.keys(receiptIds).length;
+    if (receiptCount > 0) {
+      try {
+        await this.pushReceiptsQueue.add(
+          'fetch-receipts',
+          { receiptIds },
+          {
+            delay: pushReceiptsDelayMs(),
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 30_000 },
+            removeOnComplete: true,
+            removeOnFail: 100,
+          },
+        );
+      } catch (error) {
+        this.logger.warn(`Falha ao agendar conferência de receipts (${receiptCount} ticket(s)): ${error instanceof Error ? error.message : 'unknown'}`);
+      }
     }
     return { skipped: false } as const;
   }

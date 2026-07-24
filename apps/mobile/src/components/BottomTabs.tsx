@@ -13,17 +13,19 @@ interface BottomTabsProps {
   active: Tab;
   onChange: (tab: Tab) => void;
   alarmCount?: number;
+  reviewCount?: number;
 }
 
 const TABS: Array<{ id: Tab; label: string; icon: IconName }> = [
   { id: 'central', label: 'Central', icon: 'home' },
   { id: 'mosaico', label: 'Mosaico', icon: 'grid' },
   { id: 'reproducao', label: 'Reprodução', icon: 'play' },
+  { id: 'revisao', label: 'Revisão', icon: 'eye' },
   { id: 'alarmes', label: 'Alarmes', icon: 'bell' },
   { id: 'ajustes', label: 'Ajustes', icon: 'settings' },
 ];
 
-export function BottomTabs({ active, onChange, alarmCount = 0 }: BottomTabsProps) {
+export function BottomTabs({ active, onChange, alarmCount = 0, reviewCount = 0 }: BottomTabsProps) {
   const { theme } = useTheme();
 
   // edge-to-edge: o app desenha atrás da barra de navegação do Android. O inset
@@ -40,7 +42,8 @@ export function BottomTabs({ active, onChange, alarmCount = 0 }: BottomTabsProps
       {TABS.map((tab) => {
         const on = active === tab.id;
         const color = on ? theme.accent : theme.menuText;
-        const showBadge = tab.id === 'alarmes' && alarmCount > 0;
+        const badgeCount = tab.id === 'alarmes' ? alarmCount : tab.id === 'revisao' ? reviewCount : 0;
+        const showBadge = badgeCount > 0;
         const filled = tab.icon === 'play';
         return (
           <Pressable
@@ -55,7 +58,7 @@ export function BottomTabs({ active, onChange, alarmCount = 0 }: BottomTabsProps
               <Icon name={tab.icon} size={tab.icon === 'home' ? 23 : 22} color={color} fill={filled} />
               {showBadge ? (
                 <View style={[styles.badge, { backgroundColor: theme.danger, borderColor: theme.menu }]}>
-                  <Text style={styles.badgeText}>{alarmCount > 9 ? '9+' : alarmCount}</Text>
+                  <Text style={styles.badgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
                 </View>
               ) : null}
             </View>

@@ -27,7 +27,7 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ['*']
 webrtcLocalUDPAddress: :8189
-webrtcAdditionalHosts: ['168.194.13.70']
+webrtcAdditionalHosts: ['127.0.0.1']  # default inócuo; o valor real por instalação vem do compose via MTX_WEBRTCADDITIONALHOSTS (install-drac.sh → DRAC_SERVER_IP)
 # Em Docker, anunciar os IPs das interfaces inclui IPs internos (172.x) inalcançáveis
 # pelos clientes na LAN — isso vira candidato ICE morto e faz o WebRTC demorar/flapar
 # (vídeo piscando/reconectando). Anunciamos apenas o host real acima.

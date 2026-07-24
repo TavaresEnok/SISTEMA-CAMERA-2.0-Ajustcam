@@ -65,7 +65,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   private readonly watchdogState = new Map<string, { lastBytes: number; badTicks: number }>();
   private static readonly WATCHDOG_INTERVAL_MS = 20_000;
   private static readonly WATCHDOG_BAD_TICKS = 3; // 3 × 20s = ~60s antes de agir
-  private recovering = false;
+  private readonly recoveringPaths = new Set<string>();
 
   constructor(
     private readonly configService: ConfigService,
@@ -155,6 +155,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     await this.reconcileMissingPaths(new Set(items.map((item: any) => String(item?.name ?? ''))));
 
     const seen = new Set<string>();
+    const stuck: Array<{ name: string; ready: boolean; readers: number }> = [];
     for (const item of items) {
       const name: string = item?.name ?? '';
       if (!name.startsWith('cam_')) continue;
@@ -179,9 +180,12 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
 
       if (badTicks >= MediamtxProxyService.WATCHDOG_BAD_TICKS) {
         this.watchdogState.delete(name);
-        await this.recoverStuckPath(name, ready, readers);
+        stuck.push({ name, ready, readers });
       }
     }
+
+    // Recupera os paths travados em PARALELO (limite interno), não um a um.
+    await this.recoverStuckPaths(stuck);
 
     // Limpa estado de paths que não existem mais.
     for (const key of [...this.watchdogState.keys()]) {
@@ -189,12 +193,25 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     }
   }
 
+  private async recoverStuckPaths(stuck: Array<{ name: string; ready: boolean; readers: number }>) {
+    // Recupera em PARALELO com limite (antes: serial, uma de cada vez). Uma fleet
+    // inteira travada reconstitui em ~max(tempo de 1 recuperação) × ceil(N/limite),
+    // não na SOMA das recuperações. O limite evita uma tempestade de reconfigurações.
+    const CONCURRENCY = 4;
+    for (let i = 0; i < stuck.length; i += CONCURRENCY) {
+      await Promise.all(
+        stuck.slice(i, i + CONCURRENCY).map((s) => this.recoverStuckPath(s.name, s.ready, s.readers)),
+      );
+    }
+  }
+
   private async recoverStuckPath(pathName: string, ready: boolean, readers: number) {
     const parsed = this.cameraIdFromPathName(pathName);
     if (!parsed) return;
-    // Serializa recuperações para não disparar várias reconfigurações ao mesmo tempo.
-    if (this.recovering) return;
-    this.recovering = true;
+    // Guard POR-PATH: evita recuperar o MESMO path duas vezes em paralelo (entre
+    // ticks). Paths DIFERENTES recuperam concorrentemente (ver recoverStuckPaths).
+    if (this.recoveringPaths.has(pathName)) return;
+    this.recoveringPaths.add(pathName);
     this.logger.warn(
       `Watchdog: path travado ${pathName} (ready=${ready}, readers=${readers}, sem progresso) — forçando reset.`,
     );
@@ -209,7 +226,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         `Watchdog: falha ao recuperar ${pathName}: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
-      this.recovering = false;
+      this.recoveringPaths.delete(pathName);
     }
   }
 

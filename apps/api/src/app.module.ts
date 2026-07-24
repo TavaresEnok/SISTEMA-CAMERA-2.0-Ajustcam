@@ -4,6 +4,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { envConfig } from './config/env.config';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { HealthModule } from './health/health.module';
+import { MetricsModule } from './observability/metrics.module';
 import { CamerasModule } from './cameras/cameras.module';
 import { CameraStreamModule } from './camera-stream/camera-stream.module';
 import { PtzModule } from './ptz/ptz.module';
@@ -56,6 +57,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     GpuModule,
     RolePermissionsModule,
     CloudConnectorModule,
+    MetricsModule,
     HealthModule,
     AuthModule,
     UsersModule,

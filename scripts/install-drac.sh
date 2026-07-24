@@ -8,6 +8,8 @@ DRAC_OPERATING_USER="${DRAC_OPERATING_USER:-flashnet}"
 DRAC_CENTRAL_URL="${DRAC_CENTRAL_URL:-https://ajustcam.ajustconsulting.com.br/central}"
 DRAC_ENVIRONMENT="${DRAC_ENVIRONMENT:-prod}"
 DRAC_AUTO_YES="${DRAC_AUTO_YES:-false}"
+DRAC_WATCHDOG_ENABLED="${DRAC_WATCHDOG_ENABLED:-true}"
+DRAC_WATCHDOG_INTERVAL_MINUTES="${DRAC_WATCHDOG_INTERVAL_MINUTES:-5}"
 
 log() {
   printf '\033[1;36m[DRAC]\033[0m %s\n' "$*"
@@ -366,6 +368,121 @@ run_migrations() {
   run_as_user "$DRAC_OPERATING_USER" bash -lc "cd '$DRAC_INSTALL_DIR' && docker compose --env-file infra/.env $files exec -T -w /app/apps/api api npx prisma migrate deploy"
 }
 
+remove_watchdog_cron() {
+  # Remove QUALQUER agendamento antigo do watchdog no crontab do usuario operacional
+  # (marcado por "drac-runtime-watchdog"), preservando as demais linhas. Idempotente:
+  # se nao houver nada nosso, nao mexe no crontab.
+  command -v crontab >/dev/null 2>&1 || return 0
+  local current
+  current="$(run_as_user "$DRAC_OPERATING_USER" crontab -l 2>/dev/null || true)"
+  printf '%s' "$current" | grep -q 'drac-runtime-watchdog' || return 0
+  printf '%s\n' "$current" | grep -v 'drac-runtime-watchdog' | sed '/^[[:space:]]*$/d' \
+    | run_as_user "$DRAC_OPERATING_USER" crontab - 2>/dev/null || true
+}
+
+provision_watchdog_systemd() {
+  local script_path="$1"
+  local interval="$2"
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [ -d /run/systemd/system ] || return 1
+
+  local service_file="/etc/systemd/system/drac-watchdog.service"
+  local timer_file="/etc/systemd/system/drac-watchdog.timer"
+
+  log "Agendando runtime-watchdog via systemd timer (a cada ${interval}min)"
+
+  # Reescrever os units com o mesmo conteudo e' idempotente por natureza.
+  run_sudo tee "$service_file" >/dev/null <<EOF || return 1
+[Unit]
+Description=DRAC runtime watchdog (deteccao + auto-cura de infra)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=$DRAC_OPERATING_USER
+Nice=10
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$script_path
+EOF
+
+  run_sudo tee "$timer_file" >/dev/null <<EOF || return 1
+[Unit]
+Description=Executa o DRAC runtime watchdog a cada ${interval} minutos
+
+[Timer]
+OnCalendar=*:0/${interval}
+Persistent=true
+AccuracySec=30s
+RandomizedDelaySec=20s
+Unit=drac-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  run_sudo systemctl daemon-reload || { warn "systemctl daemon-reload falhou; tentando cron."; return 1; }
+  # Evita execucao dupla se uma instalacao anterior usou cron.
+  remove_watchdog_cron
+  if run_sudo systemctl enable --now drac-watchdog.timer >/dev/null 2>&1; then
+    log "Timer drac-watchdog ativo (systemctl list-timers | grep drac-watchdog)."
+    return 0
+  fi
+  warn "Nao foi possivel habilitar o timer systemd; tentando cron."
+  return 1
+}
+
+provision_watchdog_cron() {
+  local script_path="$1"
+  local interval="$2"
+  if ! command -v crontab >/dev/null 2>&1; then
+    warn "Nem systemd nem crontab disponiveis. Agende manualmente: */$interval * * * * $script_path"
+    return 0
+  fi
+
+  log "Agendando runtime-watchdog via cron do usuario $DRAC_OPERATING_USER (a cada ${interval}min)"
+  local cron_line existing merged
+  cron_line="*/$interval * * * * PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $script_path >/dev/null 2>&1 # drac-runtime-watchdog"
+
+  existing="$(run_as_user "$DRAC_OPERATING_USER" crontab -l 2>/dev/null || true)"
+  # Remove a nossa linha antiga (idempotencia) e re-adiciona a atual; preserva o resto.
+  merged="$(printf '%s\n' "$existing" | grep -v 'drac-runtime-watchdog' | sed '/^[[:space:]]*$/d' || true)"
+  merged="$(printf '%s\n%s\n' "$merged" "$cron_line" | sed '/^[[:space:]]*$/d')"
+  if printf '%s\n' "$merged" | run_as_user "$DRAC_OPERATING_USER" crontab - 2>/dev/null; then
+    log "Cron do watchdog instalado (crontab -l -u $DRAC_OPERATING_USER)."
+  else
+    warn "Falha ao instalar o cron do watchdog. Agende manualmente: $cron_line"
+  fi
+  return 0
+}
+
+provision_watchdog() {
+  if [ "$DRAC_WATCHDOG_ENABLED" != "true" ]; then
+    log "Watchdog de runtime desabilitado (DRAC_WATCHDOG_ENABLED=$DRAC_WATCHDOG_ENABLED); pulando agendamento."
+    return 0
+  fi
+
+  local script_path="$DRAC_INSTALL_DIR/scripts/runtime-watchdog.sh"
+  if [ ! -f "$script_path" ]; then
+    warn "runtime-watchdog.sh nao encontrado em $script_path; auto-cura nao sera agendada."
+    return 0
+  fi
+  run_sudo chmod +x "$script_path" 2>/dev/null || true
+
+  # Intervalo em minutos (1..59); cai para 5 se invalido.
+  local interval="$DRAC_WATCHDOG_INTERVAL_MINUTES"
+  case "$interval" in
+    ''|*[!0-9]*) interval=5 ;;
+  esac
+  { [ "$interval" -ge 1 ] && [ "$interval" -le 59 ]; } 2>/dev/null || interval=5
+
+  if provision_watchdog_systemd "$script_path" "$interval"; then
+    return 0
+  fi
+  provision_watchdog_cron "$script_path" "$interval"
+  return 0
+}
+
 register_central_now() {
   local base="${DRAC_CENTRAL_URL%/}"
   local payload response_file
@@ -441,6 +558,10 @@ Central configurada:
 Instalacao enviada para a central:
   ${DRAC_INSTALLATION_ID} - ${DRAC_CUSTOMER_NAME}
 
+Auto-cura / monitoramento (watchdog de infra):
+  journalctl -t drac-watchdog             (eventos e auto-curas)
+  systemctl list-timers | grep drac-watchdog   (se agendado via systemd)
+
 Se a instalacao ainda nao apareceu na central, aguarde ate 60 segundos
 ou verifique os logs:
   docker logs --tail=120 vms-api
@@ -457,6 +578,7 @@ main() {
   prepare_env
   start_stack
   run_migrations
+  provision_watchdog || warn "Watchdog nao pode ser agendado automaticamente; agende scripts/runtime-watchdog.sh manualmente."
   register_central_now
   validate_installation
   print_summary
