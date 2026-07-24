@@ -189,6 +189,12 @@ services:
       - MOTION_RECORDING_POST_ROLL_SECONDS=${MOTION_RECORDING_POST_ROLL_SECONDS:-90}
       - MOTION_RECORDING_SEGMENT_SECONDS=${MOTION_RECORDING_SEGMENT_SECONDS:-120}
       - MOTION_ALARM_QUIET_SECONDS=${MOTION_ALARM_QUIET_SECONDS:-300}
+      # IA de identificação de OBJETO/FACE desativada (ainda não pronta p/ uso). O
+      # filtro semântico ONVIF invoca o detector YOLO p/ confirmar objeto antes de
+      # gravar movimento nativo; com false, o movimento nativo grava direto (fail-safe),
+      # SEM carregar/rodar o detector de objeto. A análise de stream já é só o MOG2
+      # (AiSettings.mode='motion'). Reative com 'true' quando a IA de objeto estiver pronta.
+      - AI_ONVIF_SEMANTIC_FILTER=${AI_ONVIF_SEMANTIC_FILTER:-false}
       - FFMPEG_RECORDING_CODEC_MODE=${FFMPEG_RECORDING_CODEC_MODE:-copy}
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
       - RECORDING_RETENTION_DAYS=${RECORDING_RETENTION_DAYS:-7}
