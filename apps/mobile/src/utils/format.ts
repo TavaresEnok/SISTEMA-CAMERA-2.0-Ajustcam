@@ -16,6 +16,19 @@ export function localDayIsoRange(value: string): { from: string; to: string } {
   return { from: from.toISOString(), to: to.toISOString() };
 }
 
+/**
+ * Desloca uma chave YYYY-MM-DD por N dias (fuso local), sem NUNCA passar de hoje
+ * — o app não tem gravações do futuro. Usa meio-dia como âncora para não
+ * escorregar de dia por horário de verão. `today` é injetável para teste, mas
+ * cai em `localDateKey()` (avaliado a cada chamada) no uso real.
+ */
+export function shiftDateKey(current: string, days: number, today = localDateKey()): string {
+  const next = new Date(`${current}T12:00:00`);
+  next.setDate(next.getDate() + days);
+  const nextKey = localDateKey(next);
+  return nextKey > today ? today : nextKey;
+}
+
 export function formatTime(value?: string | null) {
   if (!value) return '--:--';
   return new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });

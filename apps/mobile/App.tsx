@@ -45,7 +45,9 @@ import { useAlarms } from './src/hooks/useAlarms';
 import { useLiveDetections } from './src/hooks/useLiveDetections';
 import { ThemeProvider, useTheme } from './src/theme/ThemeProvider';
 import { LibraryProvider, useLibrary } from './src/state/LibraryProvider';
-import { localDateKey, localDayIsoRange } from './src/utils/format';
+import { localDateKey, localDayIsoRange, shiftDateKey } from './src/utils/format';
+import { buildOperationalMessages } from './src/utils/operational';
+import { cameraPosterUrl, clipDownloadUrl, recordingThumbnailUrl } from './src/utils/media-endpoints';
 import { reviewFeedPath, reviewPlayUrl, reviewPlaybackTarget, type ReviewFilters, type ReviewFeedResponse, type ReviewItem } from './src/utils/review';
 import type { ActivePlayback, Camera, Direction, MobileCapabilities, Recording, Session, StreamUrls, Tab, User } from './src/types';
 
@@ -160,16 +162,7 @@ function AppInner() {
   const { alarms, openAlarmCount, reload: reloadAlarms, ack: ackAlarm, resolve: resolveAlarm } = useAlarms(session);
   const liveDetections = useLiveDetections(session, liveCamera != null, liveCamera?.id ?? null);
 
-  const operationalMessages = (() => {
-    const messages: string[] = [];
-    const offline = cameras.filter((camera) => camera.status !== 'ONLINE').length;
-    if (lastSyncError) messages.push(lastSyncError);
-    if (offline > 0) messages.push(`${offline} câmera(s) offline ou sem comunicação.`);
-    // NÃO expor o perfil do usuário (ex.: "somente visualização") — é informação
-    // interna que o cliente/grupo não deve ver no app. As permissões continuam
-    // valendo silenciosamente (gravação/PTZ bloqueados quando for o caso).
-    return messages.slice(0, 3);
-  })();
+  const operationalMessages = buildOperationalMessages(cameras, lastSyncError);
   const statusBarStyle = isLightColor(theme.bg) ? 'dark' : 'light';
 
   // Busca a marca (logo/nome/cores) do servidor e aplica no tema. Silencioso:
@@ -643,9 +636,7 @@ function AppInner() {
       const whepUrl = authenticatedMediaUrl(whepRaw, session.apiUrl, data.streamToken);
       // Poster montado a partir do session.apiUrl (alcançável pelo celular), não
       // do host que a API devolve (pode ser interno do Docker atrás do nginx).
-      const posterUrl = data.streamToken
-        ? `${session.apiUrl.replace(/\/+$/, '')}/camera-stream/${encodeURIComponent(cameraId)}/poster?token=${encodeURIComponent(data.streamToken)}&v=${Date.now()}`
-        : null;
+      const posterUrl = data.streamToken ? cameraPosterUrl(session.apiUrl, cameraId, data.streamToken) : null;
       setStreamUrls((current) => ({ ...current, [cameraId]: hlsUrl }));
       setStreamWhep((current) => ({ ...current, [cameraId]: whepUrl }));
       setStreamPosters((current) => ({ ...current, [cameraId]: posterUrl }));
@@ -688,13 +679,12 @@ function AppInner() {
       // Monta a URL do poster a partir do session.apiUrl (SEMPRE alcançável pelo
       // celular). NÃO usa o host que a API devolve — atrás do nginx/Docker ele
       // pode vir interno (ex.: vms-api:3000), que o celular não acessa → tile preto.
-      const apiBase = session.apiUrl.replace(/\/+$/, '');
       let cursor = 0;
       const worker = async () => {
         while (cursor < items.length) {
           const item = items[cursor++];
           if (sessionTokenRef.current !== token || posterRequestRef.current !== generation) return;
-          const url = `${apiBase}/camera-stream/${encodeURIComponent(item.cameraId)}/poster?token=${encodeURIComponent(item.streamToken)}&v=${Date.now()}`;
+          const url = cameraPosterUrl(session.apiUrl, item.cameraId, item.streamToken);
           try { await Image.prefetch(url); } catch { /* CameraTile oferece retry/token novo. */ }
           if (sessionTokenRef.current !== token || posterRequestRef.current !== generation) return;
           setStreamPosters((current) => ({ ...current, [item.cameraId]: url }));
@@ -719,7 +709,7 @@ function AppInner() {
       if (sessionTokenRef.current !== token) return null;
       const item = items[0];
       if (!item) return null;
-      const url = `${session.apiUrl.replace(/\/+$/, '')}/camera-stream/${encodeURIComponent(cameraId)}/poster?token=${encodeURIComponent(item.streamToken)}&v=${Date.now()}`;
+      const url = cameraPosterUrl(session.apiUrl, cameraId, item.streamToken);
       try { await Image.prefetch(url); } catch { /* o componente ainda fará retry */ }
       if (sessionTokenRef.current === token) {
         setStreamPosters((current) => ({ ...current, [cameraId]: url }));
@@ -739,12 +729,11 @@ function AppInner() {
       { method: 'POST', body: JSON.stringify({ recordingIds: items.map((item) => item.id) }) },
     );
     if (sessionTokenRef.current !== token || (generation != null && recordingRequestRef.current !== generation)) return;
-    const apiBase = session.apiUrl.replace(/\/+$/, '');
     setRecordings((current) => current.map((item) => {
       const thumbnailToken = thumbnailTokens[item.id];
       return thumbnailToken ? {
         ...item,
-        thumbnailUrl: `${apiBase}/recordings/${encodeURIComponent(item.id)}/thumbnail?token=${encodeURIComponent(thumbnailToken)}&v=${Date.now()}`,
+        thumbnailUrl: recordingThumbnailUrl(session.apiUrl, item.id, thumbnailToken),
       } : item;
     }));
   };
@@ -877,13 +866,7 @@ function AppInner() {
 
   const shiftRecordingDate = (days: number) => {
     playbackRequestRef.current += 1;
-    setRecordingDate((current) => {
-      const next = new Date(`${current}T12:00:00`);
-      next.setDate(next.getDate() + days);
-      const nextKey = localDateKey(next);
-      const todayKey = localDateKey();
-      return nextKey > todayKey ? todayKey : nextKey;
-    });
+    setRecordingDate((current) => shiftDateKey(current, days));
     setActivePlayback(null);
     setRecordings([]);
     setRecordingsError(null);
@@ -941,7 +924,7 @@ function AppInner() {
     const target = `${FileSystem.documentDirectory}clip-${safeId}.mp4`;
     try {
       await FileSystem.deleteAsync(target, { idempotent: true }).catch(() => undefined);
-      const url = `${currentSession.apiUrl.replace(/\/+$/, '')}/camera-stream/clip/${encodeURIComponent(pending.id)}/download`;
+      const url = clipDownloadUrl(currentSession.apiUrl, pending.id);
       const result = await FileSystem.downloadAsync(url, target, {
         headers: { Authorization: `Bearer ${currentSession.token}` },
       });
