@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
+const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
 
 function loadEnvFile() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -569,6 +570,9 @@ function publicInstallation(item) {
   const ageSeconds = lastHeartbeatAt ? Math.round((Date.now() - lastHeartbeatAt) / 1000) : null;
   const policyPending = Boolean(updatedAt && lastHeartbeatAt && updatedAt > lastHeartbeatAt);
   const status = ageSeconds == null ? 'PENDING_INSTALL' : ageSeconds <= ONLINE_THRESHOLD_SECONDS ? 'ONLINE' : 'OFFLINE';
+  // Nós de computação (item 3.2): campo OMITIDO quando não há nós definidos, para
+  // preservar exatamente a saída atual das instalações single-primary (retrocompat).
+  const computeNodes = normalizeComputeNodes(item.computeNodes);
   return {
     id: item.id,
     name: item.name,
@@ -595,6 +599,7 @@ function publicInstallation(item) {
     provisionedServerAddress: item.provisionedServerAddress || null,
     app: item.app || null,
     updatedAt: item.updatedAt || null,
+    ...(computeNodes.length ? { computeNodes } : {}),
   };
 }
 
@@ -636,6 +641,11 @@ function fleetSummary(installations) {
     acc.recordingGapSecondsLast24h += Number(item.metrics?.recordingGapSecondsLast24h || 0);
     acc.recordingAttentionCameras += Number(item.metrics?.recordingAttentionCameras || 0);
     acc.maxDiskUsagePercent = Math.max(acc.maxDiskUsagePercent, diskUsagePercent);
+    // Nós de computação (item 3.2): agregados aditivos. Sem nós → não conta como
+    // "configured" (single-primary implícito) — retrocompat total do resumo.
+    const nodeSummary = summarizeNodes(item.computeNodes);
+    acc.computeNodesConfigured += nodeSummary.configured ? 1 : 0;
+    acc.computeNodesTotal += nodeSummary.total;
     return acc;
   }, {
     installations: 0,
@@ -657,6 +667,8 @@ function fleetSummary(installations) {
     recordingGapSecondsLast24h: 0,
     recordingAttentionCameras: 0,
     maxDiskUsagePercent: 0,
+    computeNodesConfigured: 0,
+    computeNodesTotal: 0,
   });
 
   const topAttention = items
@@ -1215,6 +1227,41 @@ async function handlePatchApp(req, res, db, actor, installationId) {
   });
 }
 
+// ── Nós de computação por instalação (item 3.2) ──────────────────────────────
+// Gerência dos nós como DADO, seguindo o mesmo padrão da PATCH de licença: mesma
+// sessão/admin do bloco /api/admin, valida ANTES de salvar, escreve no datastore
+// plugável (JSON/PG) sem tabela nova (os nós vivem no objeto da instalação).
+// Corpo vazio / [] volta ao single-primary implícito (remove o campo) — INERTE.
+async function handlePatchComputeNodes(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  const body = await readBody(req);
+  const nodes = normalizeComputeNodes(body.computeNodes);
+  const validation = validateComputeNodes(nodes);
+  if (!validation.valid) {
+    return json(req, res, 400, { error: 'invalid_compute_nodes', details: validation.errors });
+  }
+  const previousCount = normalizeComputeNodes(item.computeNodes).length;
+  if (nodes.length === 0) {
+    // Ausência = single-primary implícito. Remove o campo em vez de gravar [] para
+    // manter o registro idêntico ao de uma instalação que nunca definiu nós.
+    delete item.computeNodes;
+  } else {
+    item.computeNodes = nodes;
+  }
+  item.updatedAt = new Date().toISOString();
+  addAuditEvent(db, req, {
+    type: 'installation.compute_nodes_changed',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    from: previousCount,
+    to: nodes.length,
+  });
+  await saveDb(db);
+  return json(req, res, 200, publicInstallation(item));
+}
+
 async function handleInstallationApp(req, res, db, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
@@ -1656,6 +1703,12 @@ async function route(req, res) {
         return handlePatchApp(req, res, db, actor, decodeURIComponent(instAppMatch[1]));
       }
 
+      // ── Nós de computação por instalação (item 3.2) ────────────────────────
+      const computeNodesMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/compute-nodes$/);
+      if (req.method === 'PATCH' && computeNodesMatch) {
+        return handlePatchComputeNodes(req, res, db, actor, decodeURIComponent(computeNodesMatch[1]));
+      }
+
       // ── Instalação remota via SSH ──────────────────────────────────────────
       const remoteInstallMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/remote-install$/);
       if (req.method === 'POST' && remoteInstallMatch) {
@@ -1818,6 +1871,8 @@ module.exports = {
   isStrongPassword,
   normalizeDb,
   parseDbText,
+  publicInstallation,
+  fleetSummary,
   runSerialized,
   startServer,
   verifyPassword,
