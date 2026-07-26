@@ -37,6 +37,7 @@ import { useAuthStore } from '../store/authStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
 import { localDayRange } from '../lib/web-operational';
 import { minuteOfDay, hmsToMinute } from '../lib/timeline-time';
+import { recordingOffsetSeconds, spriteTileStyle, type TimelinePreviewMeta } from '../lib/timeline-preview';
 
 type TimelineSegment = {
   recordingId?: string;
@@ -308,6 +309,15 @@ export default function PlaybackPage() {
   const [recordings, setRecordings] = useState<RecordingItem[]>([]);
   const [playbackEvents, setPlaybackEvents] = useState<PlaybackEvent[]>([]);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
+  // Token bruto de playback por gravação (o MESMO que a miniatura usa): reaproveitado
+  // para montar a URL do sprite de preview (2.9). O gate do sprite é idêntico ao do
+  // /thumbnail (token da própria gravação), então derivado de câmera privada não vaza.
+  const [thumbnailTokens, setThumbnailTokens] = useState<Record<string, string>>({});
+  // Cache do meta do sprite (grid/intervalo) por gravação. `null` = sem sprite (404
+  // ou erro): cai no fallback da miniatura estática, NUNCA quebra o playback.
+  const [previewMetaByRecordingId, setPreviewMetaByRecordingId] = useState<Record<string, TimelinePreviewMeta | null>>({});
+  const previewMetaRef = useRef<Record<string, TimelinePreviewMeta | null>>({});
+  const previewMetaInFlightRef = useRef<Set<string>>(new Set());
   const [thumbnailRefreshNonce, setThumbnailRefreshNonce] = useState(0);
   const [diagnosticsByRecordingId, setDiagnosticsByRecordingId] = useState<Record<string, RecordingDiagnostics>>({});
   const [healthSummary, setHealthSummary] = useState<RecordingHealthSummary | null>(null);
@@ -510,6 +520,7 @@ export default function PlaybackPage() {
   useEffect(() => {
     if (!accessToken || !recordings.length) {
       setThumbnailUrls({});
+      setThumbnailTokens({});
       return;
     }
 
@@ -529,6 +540,7 @@ export default function PlaybackPage() {
           urls[recordingId] = `${API_URL}/recordings/${encodeURIComponent(recordingId)}/thumbnail?token=${encodeURIComponent(token)}`;
         }
         setThumbnailUrls(urls);
+        setThumbnailTokens(tokens);
       })
       .catch(() => {
         // Mantém as URLs anteriores durante falhas transitórias. Se expirarem, o
@@ -561,6 +573,36 @@ export default function PlaybackPage() {
     lastThumbnailRetryRef.current = now;
     setThumbnailRefreshNonce((value) => value + 1);
   }, []);
+
+  // 2.9 — busca (sob demanda, no hover) o meta do sprite de uma gravação e cacheia.
+  // Deduplica por ref (in-flight + já-conhecido) para não refazer request a cada
+  // pixel do mousemove. Erro/404 marca `null` → fallback gracioso na miniatura.
+  const ensurePreviewMeta = useCallback((recordingId: string) => {
+    if (!recordingId || !accessToken) return;
+    if (recordingId in previewMetaRef.current) return;
+    if (previewMetaInFlightRef.current.has(recordingId)) return;
+    previewMetaInFlightRef.current.add(recordingId);
+    void client
+      .get<TimelinePreviewMeta>(`/recordings/${encodeURIComponent(recordingId)}/preview-meta`)
+      .then(({ data }) => {
+        previewMetaRef.current = { ...previewMetaRef.current, [recordingId]: data };
+        setPreviewMetaByRecordingId(previewMetaRef.current);
+      })
+      .catch(() => {
+        previewMetaRef.current = { ...previewMetaRef.current, [recordingId]: null };
+        setPreviewMetaByRecordingId(previewMetaRef.current);
+      })
+      .finally(() => {
+        previewMetaInFlightRef.current.delete(recordingId);
+      });
+  }, [accessToken, client]);
+
+  // Troca de câmera/data invalida o cache de metas (ids diferentes; evita crescer sem fim).
+  useEffect(() => {
+    previewMetaRef.current = {};
+    previewMetaInFlightRef.current.clear();
+    setPreviewMetaByRecordingId({});
+  }, [selectedCamId, selectedDate]);
 
   useEffect(() => {
     if (!accessToken || !selectedCamId || !selectedDate) {
@@ -912,8 +954,27 @@ export default function PlaybackPage() {
       const end = minuteOfDay(item.endedAt ?? item.startedAt);
       return minute >= start && minute <= end && (item.fileUsable ?? item.fileExists);
     });
+    // Aquece o meta do sprite da gravação sob o cursor (varredura fina no hover).
+    if (rec?.id) ensurePreviewMeta(rec.id);
     setTimelineHover({ x, minute, recordingId: rec?.id ?? null });
-  }, [viewStart, viewEnd, recordings]);
+  }, [viewStart, viewEnd, recordings, ensurePreviewMeta]);
+
+  // 2.9 — o tile do sprite correspondente ao instante sob o cursor. Só existe
+  // quando temos meta (sprite disponível) E token da gravação; senão o render cai
+  // no fallback da miniatura estática (comportamento anterior).
+  const hoverSpriteTile = useMemo(() => {
+    const recordingId = timelineHover?.recordingId;
+    if (!recordingId) return null;
+    const meta = previewMetaByRecordingId[recordingId];
+    const token = thumbnailTokens[recordingId];
+    if (!meta || !token) return null;
+    const rec = recordings.find((item) => item.id === recordingId);
+    if (!rec) return null;
+    const offset = recordingOffsetSeconds(timelineHover.minute, minuteOfDay(rec.startedAt));
+    const { backgroundSize, backgroundPosition } = spriteTileStyle(meta, offset);
+    const url = `${API_URL}/recordings/${encodeURIComponent(recordingId)}/preview-sprite?token=${encodeURIComponent(token)}`;
+    return { backgroundImage: `url(${url})`, backgroundSize, backgroundPosition, backgroundRepeat: 'no-repeat' as const };
+  }, [timelineHover, previewMetaByRecordingId, thumbnailTokens, recordings]);
 
   const getSegmentColor = (type: TimelineSegment['type']) => {
     if (type === 'recorded') return 'hsl(150,60%,32%)';
@@ -1629,7 +1690,9 @@ export default function PlaybackPage() {
               >
                 <div className="overflow-hidden rounded-md border border-white/15 bg-black/90 shadow-xl">
                   <div className="h-[68px] w-[120px] bg-black">
-                    {timelineHover.recordingId && thumbnailUrls[timelineHover.recordingId] ? (
+                    {hoverSpriteTile ? (
+                      <div className="h-full w-full" style={hoverSpriteTile} />
+                    ) : timelineHover.recordingId && thumbnailUrls[timelineHover.recordingId] ? (
                       <img src={thumbnailUrls[timelineHover.recordingId]} alt="" className="h-full w-full object-cover" />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-[9px] text-white/30">
