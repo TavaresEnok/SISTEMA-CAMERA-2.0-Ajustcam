@@ -151,6 +151,17 @@ if [[ ! -f "$KS" ]]; then
     -dname "CN=$APP_NAME, O=DRAC, C=BR" >/dev/null
 fi
 
+# A assinatura (apksigner do APK e jarsigner do AAB) exige a senha da keystore,
+# guardada NUM ARQUIVO 0600 ao lado da keystore — nunca em texto claro no fonte,
+# em log, nem como argumento visível no `ps`. Se esse arquivo sumiu (keystore
+# pré-existente sem .pass, remoção manual), falha CEDO e claro em vez de assinar
+# com senha vazia/errada ou publicar um artefato sem assinatura.
+if [[ ! -s "$PASS_FILE" ]]; then
+  echo "senha da keystore ausente/vazia: $PASS_FILE" >&2
+  echo "  esperado: arquivo 0600 gerado junto da keystore ($KS)." >&2
+  exit 5
+fi
+
 OUT="$BUILDS_DIR/drac-$SLUG.apk"
 echo ">> assinando com a keystore do cliente…"
 # Sem --key-pass: a senha da chave é a mesma do store (apksigner assume).
@@ -212,15 +223,16 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED
         if not sig.match(it.filename):
             zout.writestr(it, zin.read(it.filename))
 PY
-  # AAB é assinado com jarsigner (JAR signing), não com apksigner. A senha é
-  # lida do arquivo p/ uma variável (host confiável; o .pass já vive ao lado).
-  KS_PASS="$(cat "$PASS_FILE")"
+  # AAB é assinado com jarsigner (JAR signing), não com apksigner. A senha é lida
+  # DIRETO do arquivo 0600 pelo próprio jarsigner (-storepass:file / -keypass:file),
+  # igual ao keytool e ao apksigner acima — nunca cai numa variável de shell nem
+  # vira argumento de linha de comando visível no `ps`/`/proc/<pid>/cmdline` para
+  # outros usuários do host.
   echo ">> assinando o AAB (cadeia única do cliente)…"
   "$JAVA_HOME/bin/jarsigner" -keystore "$KS" \
-    -storepass "$KS_PASS" -keypass "$KS_PASS" \
+    -storepass:file "$PASS_FILE" -keypass:file "$PASS_FILE" \
     -sigalg SHA256withRSA -digestalg SHA-256 \
     -signedjar "$AAB_OUT" "$AAB_CLEAN" "$SLUG" >/dev/null
-  unset KS_PASS
   rm -f "$AAB_CLEAN"
   # Upload keys locais são autoassinadas; `-strict` retorna 4 nesse caso mesmo
   # quando a assinatura é íntegra. A verificação normal valida a integridade e

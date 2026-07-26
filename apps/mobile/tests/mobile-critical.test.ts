@@ -35,6 +35,37 @@ test('android security: build bloqueia permissões e backup inseguros', () => {
   assert(plugin.includes("android:requestLegacyExternalStorage'] = 'false'"), 'storage legado deve ser desativado');
 });
 
+test('white-label build: senha da keystore nunca em texto claro (invariante 1.2.ii)', () => {
+  // build-client.sh roda no HOST (fora do container) com acesso às keystores de
+  // assinatura. A senha de cada cliente vive num arquivo 0600 ao lado da keystore
+  // e JAMAIS pode: virar argumento de linha de comando (visível no `ps` p/ outros
+  // usuários), cair numa variável de shell, ou aparecer num echo. Este teste trava
+  // a regressão que reintroduziria isso no fluxo de assinatura do APK e do AAB.
+  const sh = readFileSync('scripts/build-client.sh', 'utf8');
+
+  // Toda ferramenta de assinatura lê a senha do arquivo 0600, nunca de um argumento.
+  assert(sh.includes('-storepass:file "$PASS_FILE" -keypass:file "$PASS_FILE"'),
+    'keytool/jarsigner devem ler a senha via -storepass:file (não como argumento)');
+  assert(sh.includes('--ks-pass "file:$PASS_FILE"'),
+    'apksigner deve ler a senha via --ks-pass file: (não como argumento)');
+
+  // Nenhum `-storepass <valor>` / `-keypass <valor>` em texto claro: no fluxo
+  // seguro só existem as formas com dois-pontos (`-storepass:file`/`:env`), então
+  // um espaço após a flag denuncia a senha exposta no process list.
+  assert(!/-storepass /.test(sh), 'nenhum -storepass com senha em texto claro (use :file)');
+  assert(!/-keypass /.test(sh), 'nenhum -keypass com senha em texto claro (use :file)');
+
+  // A senha não pode ser slurpada para uma variável de shell (rastro em `set -x`,
+  // core dump, ou reuso acidental como argumento).
+  assert(!/KS_PASS=/.test(sh), 'a senha da keystore não pode cair numa variável de shell');
+  assert(!/cat "\$PASS_FILE"/.test(sh), 'a senha não pode ser lida via cat do arquivo .pass');
+
+  // Falha CEDO e clara se a senha não estiver disponível — nunca gera um artefato
+  // sem assinatura nem assina com senha vazia.
+  assert(/\[\[ ! -s "\$PASS_FILE" \]\]/.test(sh),
+    'deve falhar cedo quando o arquivo de senha estiver ausente/vazio');
+});
+
 test('formatDateLabel: hoje e data histórica', () => {
   const today = localDateKey();
   assert(formatDateLabel(today) === 'Hoje', 'data atual deve ser Hoje');
