@@ -1862,17 +1862,19 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const uniqueIds = [...new Set(recordingIds)];
     const recordings = await this.prisma.recording.findMany({
       where: { id: { in: uniqueIds } },
-      select: { id: true, cameraId: true },
+      select: { id: true, cameraId: true, camera: { select: { isPrivate: true } } },
     });
 
+    const isPrivileged = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
     const tokenMap: Record<string, string> = {};
     for (const rec of recordings) {
-      if (user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN) {
-        const token = await this.authService.createPlaybackToken(user.id, rec.id);
-        tokenMap[rec.id] = token.playToken;
-        continue;
-      }
-      const canView = await this.accessControlService.canViewCamera(user, rec.cameraId);
+      // Gate único do conteúdo (invariante 1.2.i): o atalho de admin/super-admin
+      // vale SÓ para câmera NÃO-privada. A câmera privada respeita canViewCamera
+      // (admin GERENCIA mas NÃO vê) — nunca emitir token de conteúdo privado a quem
+      // não pode ver, mesmo que todo consumidor de token hoje re-cheque o gate.
+      const canView = isPrivileged && !rec.camera?.isPrivate
+        ? true
+        : await this.accessControlService.canViewCamera(user, rec.cameraId);
       if (!canView) continue;
       const token = await this.authService.createPlaybackToken(user.id, rec.id);
       tokenMap[rec.id] = token.playToken;
