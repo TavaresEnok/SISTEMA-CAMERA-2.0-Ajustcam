@@ -11,6 +11,12 @@ const allowRecordingMutation = process.env.DRAC_E2E_RECORDING_MUTATION === '1';
 
 function requireE2eEnabled() {
   if (process.env.DRAC_E2E !== '1') {
+    // Anti-teatro (item 0.3): em contexto OBRIGATORIO (ex.: CI) o auto-skip vira
+    // falso-verde. DRAC_E2E_REQUIRED=1 força FALHA em vez de exit 0.
+    if (process.env.DRAC_E2E_REQUIRED === '1') {
+      console.error('not ok - e2e operacional OBRIGATORIO (DRAC_E2E_REQUIRED=1) mas DRAC_E2E!=1: recuso passar sem rodar de verdade.');
+      process.exit(1);
+    }
     console.log('skip - defina DRAC_E2E=1 para executar o teste operacional contra uma instalacao real.');
     process.exit(0);
   }

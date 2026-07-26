@@ -71,6 +71,39 @@ jobs:
       - name: Verify
         run: pnpm verify
 
+  rtsp-e2e:
+    name: e2e pipeline RTSP (fonte sintética)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Pré-baixa a imagem MediaMTX de teste
+        run: docker pull bluenviron/mediamtx:1-ffmpeg
+
+      # Exercita o caminho REAL streaming→gravação contra uma fonte RTSP sintética.
+      # DRAC_E2E_REQUIRED=1: se a fixture/config falhar, o teste FALHA (não pula
+      # calado = falso-verde). A fixture usa containers/rede/portas próprios; NÃO
+      # toca nenhum MediaMTX de produção. (item 0.3 do docs/PLANO-EVOLUCAO-DRAC.md)
+      - name: e2e RTSP (obrigatório — falha se o pipeline não gravar)
+        run: DRAC_E2E_REQUIRED=1 bash scripts/e2e-rtsp-fixture.sh run
+
   docker-build:
     name: docker build api web
     runs-on: ubuntu-latest
