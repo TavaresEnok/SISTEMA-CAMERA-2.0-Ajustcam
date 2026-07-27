@@ -6,6 +6,7 @@ import { basename, extname, join } from 'node:path';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { ensureFileUnderRoot } from './helpers/safe-file.helper';
+import { buildTimelinePreviewPath } from './helpers/timeline-preview.helper';
 
 type ProtectionSets = {
   recordingIds: Set<string>;
@@ -158,6 +159,9 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const fullPath = ensureFileUnderRoot(root, recording.filePath);
     this.removeFile(fullPath);
     this.removeFile(this.derivedThumbnailPath(fullPath));
+    // Sprite de scrubbing (2.9): mora ao lado do MP4 e DEVE morrer com ele — senão
+    // sobra derivado de conteúdo no disco após a retenção apagar a origem.
+    this.removeFile(buildTimelinePreviewPath(fullPath));
     this.removeFile(`${fullPath}.invalid.json`);
     this.removeFile(join(root, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`));
     await this.prisma.recording.delete({ where: { id: recording.id } });
@@ -241,11 +245,13 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const rows = await this.prisma.recording.findMany({ select: { id: true, cameraId: true, filePath: true } });
     const expectedThumbnails = new Set<string>();
+    const expectedPreviews = new Set<string>();
     const expectedCompatible = new Set<string>();
     const validIds = new Set<string>();
     for (const row of rows) {
       const filePath = ensureFileUnderRoot(root, row.filePath);
       expectedThumbnails.add(this.derivedThumbnailPath(filePath));
+      expectedPreviews.add(buildTimelinePreviewPath(filePath));
       expectedCompatible.add(join(root, '.playback-compatible', row.cameraId, `${row.id}.mp4`));
       validIds.add(row.id);
     }
@@ -261,6 +267,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
         if (entry.name.endsWith('.thumb.jpg') && !expectedThumbnails.has(fullPath)) {
+          if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
+        } else if (entry.name.endsWith('.preview.jpg') && !expectedPreviews.has(fullPath)) {
           if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
         } else if (fullPath.includes(`${join(root, '.playback-compatible')}/`) && entry.name.endsWith('.mp4') && !expectedCompatible.has(fullPath)) {
           if (this.removeFile(fullPath)) orphanCompatibleFilesDeleted += 1;
