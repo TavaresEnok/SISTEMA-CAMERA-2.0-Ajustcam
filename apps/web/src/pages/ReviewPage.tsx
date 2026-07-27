@@ -61,6 +61,8 @@ function EventThumb({ eventId, token }: { eventId: string; token: string | null 
 
 const LABEL_ICON: Record<string, typeof User> = { pessoa: User, carro: Car, moto: Car, onibus: Car, bicicleta: Car };
 
+const PAGE_SIZE = 48;
+
 export default function ReviewPage() {
   const [, setLocation] = useLocation();
   const accessToken = useAuthStore((state) => state.accessToken);
@@ -74,19 +76,25 @@ export default function ReviewPage() {
   const [onlyConfirmed, setOnlyConfirmed] = useState(true);
   const [unseenOnly, setUnseenOnly] = useState(false);
   const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const busy = useRef(false);
+
+  const buildParams = useCallback((offset: number) => {
+    const params: Record<string, string> = { limit: String(PAGE_SIZE) };
+    if (offset > 0) params.offset = String(offset);
+    if (cameraId !== '__all__') params.cameraId = cameraId;
+    if (label !== '__all__') params.label = label;
+    if (onlyConfirmed) params.onlyConfirmed = 'true';
+    if (unseenOnly) params.unseenOnly = 'true';
+    return params;
+  }, [cameraId, label, onlyConfirmed, unseenOnly]);
 
   const load = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
     setLoading(true);
     try {
-      const params: Record<string, string> = { limit: '48' };
-      if (cameraId !== '__all__') params.cameraId = cameraId;
-      if (label !== '__all__') params.label = label;
-      if (onlyConfirmed) params.onlyConfirmed = 'true';
-      if (unseenOnly) params.unseenOnly = 'true';
-      const { data } = await client.get<{ items: ReviewItem[]; total: number }>('/review/feed', { params });
+      const { data } = await client.get<{ items: ReviewItem[]; total: number }>('/review/feed', { params: buildParams(0) });
       setItems(Array.isArray(data.items) ? data.items : []);
       setTotal(Number(data.total) || 0);
     } catch {
@@ -95,7 +103,32 @@ export default function ReviewPage() {
       setLoading(false);
       busy.current = false;
     }
-  }, [client, cameraId, label, onlyConfirmed, unseenOnly]);
+  }, [client, buildParams]);
+
+  /** Próxima página: ANEXA ao que já está na tela. Sem isto, só os primeiros
+   *  PAGE_SIZE eventos eram alcançáveis — o resto ficava inatingível. */
+  const loadMore = useCallback(async () => {
+    if (busy.current || loadingMore) return;
+    busy.current = true;
+    setLoadingMore(true);
+    try {
+      const { data } = await client.get<{ items: ReviewItem[]; total: number }>(
+        '/review/feed',
+        { params: buildParams(items.length) },
+      );
+      const next = Array.isArray(data.items) ? data.items : [];
+      setItems((cur) => {
+        const known = new Set(cur.map((it) => it.id));
+        return [...cur, ...next.filter((it) => !known.has(it.id))];
+      });
+      if (Number.isFinite(data.total)) setTotal(Number(data.total) || 0);
+    } catch {
+      // Falha ao paginar não derruba o que já está na tela.
+    } finally {
+      setLoadingMore(false);
+      busy.current = false;
+    }
+  }, [client, buildParams, items.length, loadingMore]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -199,6 +232,22 @@ export default function ReviewPage() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* Sem isto, os eventos além do primeiro lote eram INATINGÍVEIS na tela. */}
+        {items.length > 0 && items.length < total && (
+          <div className="flex justify-center py-4">
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              className="btn btn-secondary btn-sm"
+            >
+              {loadingMore
+                ? <><LoaderCircle className="h-3.5 w-3.5 animate-spin" /> Carregando…</>
+                : `Carregar mais (${items.length} de ${total})`}
+            </button>
           </div>
         )}
       </div>
