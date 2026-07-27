@@ -49,14 +49,19 @@ async function writeSigningBackup(db, dir, now = new Date()) {
   const payload = collectSigningIdentities(db);
   payload.createdAt = now.toISOString();
   await fs.mkdir(dir, { recursive: true });
+  // O conteúdo é SEGREDO (licenseKey, installerToken, chaves SSH, hash de senha):
+  // nasce 0600 e o diretório 0700. O `mode` do open só vale na CRIAÇÃO e é filtrado
+  // pelo umask, então o chmod explícito depois garante o modo em qualquer umask.
+  await fs.chmod(dir, 0o700).catch(() => {});
   const stamp = now.toISOString().replace(/[:.]/g, '-');
   const suffix = crypto.randomBytes(3).toString('hex');
   const file = path.join(dir, `signing-backup-${stamp}-${suffix}.json`);
   const body = JSON.stringify(payload, null, 2);
   // Grava + fsync do arquivo e do diretório: o rename/entrada tem de sobreviver a
   // um crash logo após o backup (senão migrávamos sem rede de segurança real).
-  const handle = await fs.open(file, 'w');
+  const handle = await fs.open(file, 'w', 0o600);
   try {
+    await handle.chmod(0o600);
     await handle.writeFile(body);
     await handle.sync();
   } finally {

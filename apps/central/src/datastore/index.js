@@ -17,7 +17,12 @@ const { writeSigningBackup } = require('./signing-backup');
 //   pg    → só Postgres (estado-alvo após reconciliação).
 
 function resolveConfig(env = process.env) {
-  const databaseUrl = String(env.DRAC_CENTRAL_DATABASE_URL || env.DATABASE_URL || '').trim();
+  // SOMENTE a variável específica da Central. Aceitar o `DATABASE_URL` genérico era
+  // perigoso: a stack DRAC exporta DATABASE_URL para a API, então a Central subindo
+  // nesse ambiente trocaria de datastore SOZINHA (modo dual) apontando para o banco
+  // do VMS — troca silenciosa do painel mestre. Migração para Postgres é decisão
+  // explícita: exige DRAC_CENTRAL_DATABASE_URL.
+  const databaseUrl = String(env.DRAC_CENTRAL_DATABASE_URL || '').trim();
   let mode = String(env.DRAC_CENTRAL_STORE_MODE || '').trim().toLowerCase();
   if (!databaseUrl) {
     // Sem URL, só há o JSON. Um modo pg/dual pedido sem URL cai p/ json (com aviso).
