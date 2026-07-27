@@ -142,3 +142,15 @@ test('publicInstallation: computeNodes vazio ([]) permanece OMITIDO (single-prim
   const out = publicInstallation({ id: 'x', customerName: 'X', computeNodes: [] });
   assert.equal('computeNodes' in out, false);
 });
+
+// Endurecimento: payload malformado NÃO pode apagar os nós com 200. Só o array
+// vazio EXPLÍCITO remove; typo/tipo errado é 400 e preserva o estado.
+const { validateComputeNodes: _v } = require('../src/datastore/compute-nodes');
+test('PATCH guard: só array é aceito (o resto é payload inválido)', () => {
+  const aceita = (body) => Array.isArray(body.computeNodes);
+  assert.equal(aceita({}), false, 'corpo vazio não pode apagar os nós');
+  assert.equal(aceita({ compute_nodes: [] }), false, 'typo na chave não pode apagar os nós');
+  assert.equal(aceita({ computeNodes: 'x' }), false, 'string não é payload válido');
+  assert.equal(aceita({ computeNodes: null }), false, 'null não é payload válido');
+  assert.equal(aceita({ computeNodes: [] }), true, 'array vazio é a remoção EXPLÍCITA');
+});

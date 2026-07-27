@@ -165,6 +165,7 @@ status() {
 }
 
 down_quiet() {
+  rm -f /tmp/drac-e2e-mtx.*.yml 2>/dev/null || true
   docker rm -f "$PUB" >/dev/null 2>&1 || true
   docker rm -f "$MTX" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
@@ -179,6 +180,10 @@ down() {
 
 run() {
   # Conveniência local: sobe, roda o e2e, e SEMPRE derruba (mesmo em falha).
+  # Limpa SEMPRE — inclusive se o próprio `up` abortar (API não responde / path não
+  # fica READY). Sem o trap, o `exit` do up deixava container+rede segurando as
+  # portas de teste.
+  trap down_quiet EXIT
   up >/dev/null
   local rc=0
   # DRAC_E2E_REQUIRED é repassado do ambiente (CI seta =1 p/ falhar se algo não

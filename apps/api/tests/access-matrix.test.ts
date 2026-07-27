@@ -257,6 +257,11 @@ test('anti-regressão: todo derivado de câmera passa pelo gate de acesso', () =
     ['recordings clips/export (evidência)', recordings, "@Post('recordings/:id/clips/export')"],
     ['recordings clips/:clipId/download (evidência)', recordings, "@Get('recordings/clips/:clipId/download')"],
     ['ai detections/latest', ai, "@Get('detections/latest/:cameraId')"],
+    // Produtores de conteúdo/token que também devem ser vigiados (estavam corretos
+    // mas fora do scan — só uma regressão futura neles passaria despercebida).
+    ['camera-stream urls', cameraStream, "@Get(':cameraId/urls')"],
+    ['camera-stream token', cameraStream, "@Post(':cameraId/token')"],
+    ['recordings play-token', recordings, "@Post('recordings/:id/play-token')"],
   ];
   for (const [label, source, route] of contentDerivatives) {
     assert.match(

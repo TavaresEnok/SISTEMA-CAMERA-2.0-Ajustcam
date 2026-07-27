@@ -1236,6 +1236,11 @@ async function handlePatchComputeNodes(req, res, db, actor, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
   const body = await readBody(req);
+  // Remoção é o ARRAY VAZIO explícito. Corpo sem a chave, typo (`compute_nodes`) ou
+  // tipo errado NÃO podem "apagar todos os nós com 200" — payload malformado é 400.
+  if (!Array.isArray(body.computeNodes)) {
+    return json(req, res, 400, { error: 'invalid_compute_nodes_payload', details: ['computeNodes deve ser um array (use [] para remover)'] });
+  }
   const nodes = normalizeComputeNodes(body.computeNodes);
   const validation = validateComputeNodes(nodes);
   if (!validation.valid) {
