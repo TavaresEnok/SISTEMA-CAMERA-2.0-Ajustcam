@@ -6,11 +6,13 @@ import { ALARM_NOTIFICATION_QUEUE } from './queues/alarm-notification.queue';
 import { RECORDING_CLEANUP_QUEUE } from './queues/recording-cleanup.queue';
 import { THUMBNAIL_GENERATION_QUEUE } from './queues/thumbnail-generation.queue';
 import { EVIDENCE_EXPORT_QUEUE } from './queues/evidence-export.queue';
+import { RECORDING_EXPORT_QUEUE } from './queues/recording-export.queue';
 import { PUSH_RECEIPTS_QUEUE } from './queues/push-receipts.queue';
 import { AlarmNotificationProcessor } from './processors/alarm-notification.processor';
 import { CameraHealthCheckProcessor } from './processors/camera-health-check.processor';
 import { EvidenceExportProcessor } from './processors/evidence-export.processor';
 import { RecordingCleanupProcessor } from './processors/recording-cleanup.processor';
+import { RecordingExportProcessor } from './processors/recording-export.processor';
 import { ThumbnailGenerationProcessor } from './processors/thumbnail-generation.processor';
 import { PushReceiptsProcessor } from './processors/push-receipts.processor';
 import { OnModuleInit } from '@nestjs/common';
@@ -48,10 +50,11 @@ import { AlarmsModule } from '../alarms/alarms.module';
       { name: RECORDING_CLEANUP_QUEUE },
       { name: THUMBNAIL_GENERATION_QUEUE },
       { name: EVIDENCE_EXPORT_QUEUE },
+      { name: RECORDING_EXPORT_QUEUE },
       { name: PUSH_RECEIPTS_QUEUE },
     ),
   ],
-  providers: [AlarmNotificationProcessor, CameraHealthCheckProcessor, RecordingCleanupProcessor, ThumbnailGenerationProcessor, EvidenceExportProcessor, PushReceiptsProcessor],
+  providers: [AlarmNotificationProcessor, CameraHealthCheckProcessor, RecordingCleanupProcessor, ThumbnailGenerationProcessor, EvidenceExportProcessor, RecordingExportProcessor, PushReceiptsProcessor],
 })
 export class JobsModule implements OnModuleInit {
   constructor(

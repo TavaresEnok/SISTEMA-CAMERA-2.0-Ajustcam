@@ -21,6 +21,7 @@ import { UseGuards } from '@nestjs/common';
 import { RecordingProcessManagerService } from './recording-process-manager.service';
 import { RecordingsService } from './recordings.service';
 import { ExportClipDto } from './dto/export-clip.dto';
+import { ExportRangeDto } from './dto/export-range.dto';
 import { InvestigationsService } from '../investigations/investigations.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
 import { ModuleRef } from '@nestjs/core';
@@ -689,6 +690,54 @@ export class RecordingsController {
       req,
     );
     return { ...clip, investigationItemId };
+  }
+
+  // Exportação por INTERVALO, atravessando segmentos (achado da análise do
+  // Frigate). Enfileira e volta na hora: o FFmpeg roda no worker, com prioridade
+  // rebaixada e concorrência limitada, para não disputar CPU com a GRAVAÇÃO.
+  @Roles(UserRole.OPERATOR)
+  @RequirePermission('exportEvidence')
+  @Post('cameras/:cameraId/recordings/export-range')
+  async exportRange(
+    @CurrentUser() user: AuthUser,
+    @Param('cameraId') cameraId: string,
+    @Body() dto: ExportRangeDto,
+    @Req() req: Request,
+  ) {
+    const exportReason = dto.notes?.trim() ?? '';
+    if (!exportReason) throw new BadRequestException('Motivo é obrigatório para exportar por intervalo.');
+    await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
+    const result = await this.recordingsService.enqueueCameraRangeExport(user, {
+      cameraId,
+      from: dto.from,
+      to: dto.to,
+      profile: dto.profile,
+      reason: exportReason,
+      label: dto.label ?? null,
+    });
+    await this.auditService.log(
+      user.id,
+      'recording.range.export.enqueue',
+      'Camera',
+      cameraId,
+      {
+        jobId: result.jobId,
+        from: dto.from,
+        to: dto.to,
+        profile: dto.profile ?? 'auto',
+        status: result.status,
+        reason: exportReason,
+      },
+      req,
+    );
+    return result;
+  }
+
+  @Roles(UserRole.OPERATOR)
+  @RequirePermission('exportEvidence')
+  @Get('recordings/exports/:jobId')
+  async getRangeExportStatus(@CurrentUser() user: AuthUser, @Param('jobId') jobId: string) {
+    return this.recordingsService.getCameraRangeExportStatus(user, jobId);
   }
 
   @Roles(UserRole.OPERATOR)

@@ -9,6 +9,7 @@ import { RecordingsController } from './recordings.controller';
 import { RecordingProcessManagerService } from './recording-process-manager.service';
 import { RecordingsService } from './recordings.service';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
+import { RECORDING_EXPORT_QUEUE } from '../jobs/queues/recording-export.queue';
 import { InvestigationsModule } from '../investigations/investigations.module';
 
 import { RetentionService } from './retention.service';
@@ -21,7 +22,7 @@ import { RetentionService } from './retention.service';
     AuditModule,
     AccessControlModule,
     InvestigationsModule,
-    BullModule.registerQueue({ name: THUMBNAIL_GENERATION_QUEUE }),
+    BullModule.registerQueue({ name: THUMBNAIL_GENERATION_QUEUE }, { name: RECORDING_EXPORT_QUEUE }),
   ],
   controllers: [RecordingsController],
   providers: [RecordingProcessManagerService, RecordingsService, RetentionService],

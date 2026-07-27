@@ -16,6 +16,24 @@ import { AccessControlService } from '../access-control/access-control.service';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
+import { RANGE_EXPORT_JOB_NAME, RECORDING_EXPORT_QUEUE } from '../jobs/queues/recording-export.queue';
+import {
+  buildRangeExportFileName,
+  buildRangeExportJobId,
+  normalizeRangeExportIdentity,
+  planOrphanRecovery,
+  rangeExportProgress,
+  type RangeExportIdentity,
+  type RangeExportProfile,
+  type RangeExportStep,
+} from '../jobs/helpers/range-export-job.helper';
+import { envNumber, parseFiniteNumber } from '../common/config/env-number.helper';
+import {
+  buildConcatManifest,
+  buildRangeExportAttempts,
+  planRangeExport,
+  type RangeSourceSegment,
+} from './helpers/range-export.helper';
 import { ListRecordingsQueryDto } from './dto/list-recordings-query.dto';
 import { RegisterRecordingDto } from './dto/register-recording.dto';
 import { ExportClipDto } from './dto/export-clip.dto';
@@ -74,6 +92,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     private readonly authService: AuthService,
     private readonly accessControlService: AccessControlService,
     @InjectQueue(THUMBNAIL_GENERATION_QUEUE) private readonly thumbnailQueue: Queue,
+    @InjectQueue(RECORDING_EXPORT_QUEUE) private readonly rangeExportQueue: Queue,
   ) {}
 
   onModuleInit() {
@@ -2072,6 +2091,633 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       },
       downloadUrl: `/recordings/clips/${clip.id}/download`,
     };
+  }
+
+  // ── EXPORTAÇÃO POR INTERVALO (atravessando segmentos) ───────────────────────
+  //
+  // O `exportClip` acima recebe UM `recordingId` e offsets DENTRO daquele
+  // arquivo. Com segmento de 300s (60s no modo movimento), um evento de 3
+  // minutos que cruza a borda NÃO CABE num segmento — e isso é prova judicial.
+  // O Frigate exporta por INTERVALO (`frigate/api/export.py`), juntando os N
+  // segmentos com `-c copy` e só reencodando quando é obrigatório; é o que está
+  // implementado daqui para baixo. O `exportClip` continua existindo: outros
+  // consumidores (investigações, front atual) dependem dele.
+
+  private rangeExportRoot(): string {
+    return process.env.RECORDINGS_ROOT ?? './storage/recordings';
+  }
+
+  /** Janela máxima exportável de uma vez. Inválido no .env cai no padrão e AVISA. */
+  private rangeExportMaxHours(): number {
+    return envNumber('RECORDING_EXPORT_MAX_HOURS', 6, {
+      min: 1,
+      max: 72,
+      onInvalid: (message) => this.logger.warn(message),
+    });
+  }
+
+  /**
+   * Caminho FINAL do arquivo, derivado da identidade (câmera+intervalo+perfil).
+   * É o que dá idempotência em disco: repetir o pedido encontra o arquivo pronto
+   * em vez de gerar uma segunda cópia da mesma prova (e `ExportedClip.filePath`
+   * é UNIQUE no banco, fechando a porta de vez).
+   */
+  private buildRangeExportOutputPath(identity: RangeExportIdentity): string {
+    const inicio = new Date(identity.fromMs);
+    return join(
+      this.rangeExportRoot(),
+      'clips',
+      identity.cameraId,
+      `${inicio.getUTCFullYear()}`,
+      `${String(inicio.getUTCMonth() + 1).padStart(2, '0')}`,
+      `${String(inicio.getUTCDate()).padStart(2, '0')}`,
+      buildRangeExportFileName(identity),
+    );
+  }
+
+  private serializeExportedClip(clip: {
+    id: string;
+    cameraId: string;
+    filePath: string;
+    startedAt: Date;
+    endedAt: Date;
+    durationSeconds: number;
+    sizeBytes?: bigint | null;
+    fileSha256?: string | null;
+  }) {
+    return {
+      id: clip.id,
+      cameraId: clip.cameraId,
+      filePath: clip.filePath,
+      startedAt: clip.startedAt,
+      endedAt: clip.endedAt,
+      durationSeconds: clip.durationSeconds,
+      sizeBytes: clip.sizeBytes?.toString() ?? null,
+      fileSha256: clip.fileSha256 ?? null,
+      downloadUrl: `/recordings/clips/${clip.id}/download`,
+    };
+  }
+
+  /**
+   * Codecs do segmento. Usa o diagnóstico JÁ gravado (sem ffprobe novo) e só cai
+   * no probe quando o cache não sabe. Devolve também a duração medida: segmento
+   * ABERTO (gravando agora) não tem `endedAt` nem `durationSeconds` no banco, e
+   * sem isso o trecho mais recente — justo o do fato — ficaria de fora.
+   */
+  private async resolveSegmentCodecs(
+    recordingId: string,
+    filePath: string,
+    cache?: Record<string, RecordingHealthCacheEntry>,
+  ): Promise<{ videoCodec: string | null; audioCodec: string | null; durationSeconds?: number | null }> {
+    const diagnostics = (cache ?? this.readDiagnosticsCache())[recordingId]?.diagnostics as
+      | { video?: { codec?: string | null }; audio?: { codec?: string | null }; durationSeconds?: number | null }
+      | undefined;
+    if (diagnostics?.video?.codec) {
+      return {
+        videoCodec: diagnostics.video.codec,
+        audioCodec: diagnostics.audio?.codec ?? null,
+        durationSeconds: diagnostics.durationSeconds ?? null,
+      };
+    }
+    const probe = await this.inspectClipExternalPlayback(filePath);
+    return { videoCodec: probe.videoCodec, audioCodec: probe.audioCodec, durationSeconds: probe.durationSeconds };
+  }
+
+  /** Segmentos do intervalo que EXISTEM em disco, já com codec resolvido. */
+  private async collectRangeSegments(identity: RangeExportIdentity): Promise<RangeSourceSegment[]> {
+    const fromDate = new Date(identity.fromMs);
+    const toDate = new Date(identity.toMs);
+    const lookbackMinutes = envNumber('RECORDING_EXPORT_LOOKBACK_MINUTES', 60, {
+      min: 1,
+      max: 360,
+      integer: true,
+      onInvalid: (message) => this.logger.warn(message),
+    });
+    const records = await this.prisma.recording.findMany({
+      where: {
+        cameraId: identity.cameraId,
+        startedAt: { gte: new Date(identity.fromMs - lookbackMinutes * 60_000), lte: toDate },
+        // fechada terminando depois do início pedido OU ainda aberta (gravando)
+        OR: [{ endedAt: { gte: fromDate } }, { endedAt: null }],
+      },
+      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true },
+      orderBy: { startedAt: 'asc' },
+      take: 5_000,
+    });
+
+    const root = this.rangeExportRoot();
+    const cache = this.readDiagnosticsCache();
+    const segments: RangeSourceSegment[] = [];
+    for (const record of records) {
+      let absolutePath: string;
+      try {
+        absolutePath = ensureFileUnderRoot(root, record.filePath);
+        // Arquivo sumido (retenção, disco trocado) NÃO entra: um buraco no meio
+        // da emenda quebra o arquivo exportado inteiro.
+        if (!existsSync(absolutePath) || statSync(absolutePath).size <= 0) continue;
+      } catch {
+        continue;
+      }
+      const codecs = await this.resolveSegmentCodecs(record.id, absolutePath, cache);
+      segments.push({
+        id: record.id,
+        filePath: absolutePath,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+        durationSeconds: record.durationSeconds ?? codecs.durationSeconds ?? null,
+        videoCodec: codecs.videoCodec,
+        audioCodec: codecs.audioCodec,
+      });
+    }
+    return segments;
+  }
+
+  /** Seam única para executar o ffmpeg da exportação por intervalo. */
+  private async runRangeExportAttempt(args: string[]): Promise<void> {
+    await this.execFfmpegLowPriority(args, {
+      timeout: envNumber('RECORDING_EXPORT_TIMEOUT_MS', 30 * 60_000, {
+        min: 60_000,
+        max: 6 * 60 * 60_000,
+        integer: true,
+        onInvalid: (message) => this.logger.warn(message),
+      }),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  }
+
+  /**
+   * Exporta o intervalo [from, to) de uma câmera como UM arquivo contínuo.
+   *
+   * Roda no worker da fila (nunca no request). Mantém o que o `exportClip` já
+   * garantia — gate de acesso, validação de reprodução externa e SHA-256 da
+   * evidência — e acrescenta o manifesto de proveniência ao lado do vídeo.
+   */
+  async exportCameraRange(
+    user: AuthUser,
+    params: {
+      cameraId: string;
+      from: string | Date | number;
+      to: string | Date | number;
+      profile?: RangeExportProfile | string | null;
+      reason: string;
+      label?: string | null;
+    },
+    hooks?: { onProgress?: (progress: { step: RangeExportStep; percent: number }) => void | Promise<void> },
+  ) {
+    const identity = normalizeRangeExportIdentity(params);
+    if (identity.toMs <= identity.fromMs) {
+      throw new BadRequestException('Intervalo inválido: o fim precisa ser depois do início.');
+    }
+    const maxHours = this.rangeExportMaxHours();
+    if (identity.toMs - identity.fromMs > maxHours * 60 * 60_000) {
+      throw new BadRequestException(`Intervalo máximo de exportação é de ${maxHours}h.`);
+    }
+    // Gate de conteúdo ANTES de tocar em qualquer arquivo de câmera — o mesmo
+    // do exportClip. Defesa em profundidade: o controller já conferiu, mas o job
+    // roda depois, fora do request, e pode ser reprocessado.
+    await this.accessControlService.assertCanPlaybackCamera(user, identity.cameraId);
+
+    const report = async (step: RangeExportStep) => {
+      const progress = rangeExportProgress(step);
+      await hooks?.onProgress?.(progress);
+      return progress;
+    };
+    await report('planning');
+
+    const outputPath = this.buildRangeExportOutputPath(identity);
+    const existing = await this.prisma.exportedClip.findUnique({ where: { filePath: outputPath } });
+    if (existing && existsSync(outputPath)) {
+      await report('done');
+      return { ...this.serializeExportedClip(existing as any), reused: true as const };
+    }
+
+    const segments = await this.collectRangeSegments(identity);
+    const plan = planRangeExport({
+      segments,
+      from: identity.fromMs,
+      to: identity.toMs,
+      forceTranscode: identity.profile === 'compatible',
+      copySafetySeconds: envNumber('RECORDING_EXPORT_COPY_SAFETY_SECONDS', 2, {
+        min: 0,
+        max: 30,
+        onInvalid: (message) => this.logger.warn(message),
+      }),
+      maxSegments: envNumber('RECORDING_EXPORT_MAX_SEGMENTS', 240, {
+        min: 1,
+        max: 2_000,
+        integer: true,
+        onInvalid: (message) => this.logger.warn(message),
+      }),
+    });
+    if (!plan.parts.length) {
+      throw new NotFoundException('Nenhuma gravação reproduzível neste intervalo.');
+    }
+
+    const manifestDir = join(this.rangeExportRoot(), '.range-export');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, `${buildRangeExportJobId(identity)}.txt`);
+    writeFileSync(manifestPath, buildConcatManifest(plan), 'utf-8');
+    mkdirSync(join(outputPath, '..'), { recursive: true });
+    // Escreve num TEMPORÁRIO e só depois renomeia: o nome final nunca aponta
+    // para um arquivo pela metade que alguém baixaria como prova.
+    const tmpPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
+
+    const hwaccel = await this.resolveTranscodeHwaccel();
+    if (hwaccel.degraded) {
+      this.logger.warn(`Aceleração por hardware indisponível: ${hwaccel.reason}`);
+    }
+    const attempts = buildRangeExportAttempts({
+      plan,
+      manifestPath,
+      output: tmpPath,
+      hwaccel: hwaccel.preset ? { preset: hwaccel.preset, device: hwaccel.device } : null,
+    });
+
+    const limpar = () => {
+      try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
+      try { rmSync(manifestPath, { force: true }); } catch { /* best-effort */ }
+    };
+
+    let usada: (typeof attempts)[number] | null = null;
+    let externalPlayback: Awaited<ReturnType<RecordingsService['inspectClipExternalPlayback']>> | null = null;
+    let ultimoErro: string | null = null;
+    try {
+      for (const attempt of attempts) {
+        await report(attempt.kind === 'copy' ? 'copying' : 'encoding');
+        try {
+          await this.runRangeExportAttempt(attempt.args);
+          // Código de saída 0 NÃO é prova: falha de hwaccel costuma sair 0 sem
+          // escrever nada, e um copy mal emendado sai 0 com vídeo ilegível.
+          if (existsSync(tmpPath) && statSync(tmpPath).size > 0) {
+            await report('validating');
+            const inspecao = await this.inspectClipExternalPlayback(tmpPath);
+            if (inspecao.ok) {
+              if (attempt.preset) reportHwaccelSuccess(attempt.preset);
+              usada = attempt;
+              externalPlayback = inspecao;
+              break;
+            }
+            ultimoErro = `arquivo gerado não reproduz fora do sistema: ${inspecao.reasons.join(', ') || 'motivo desconhecido'}`;
+          } else {
+            ultimoErro = 'o ffmpeg terminou sem produzir arquivo';
+          }
+        } catch (error) {
+          ultimoErro = error instanceof Error ? sanitizeSensitiveText(error.message) : String(error);
+        }
+        try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
+        if (attempt.preset) {
+          const emQuarentena = reportHwaccelFailure(attempt.preset);
+          this.logger.warn(
+            `Exportação por intervalo com aceleração ${attempt.preset} FALHOU (${ultimoErro}); refazendo em CPU` +
+              (emQuarentena ? ' — preset colocado em QUARENTENA após falhas repetidas.' : '.'),
+          );
+        } else if (attempt.kind === 'copy') {
+          this.logger.warn(`Stream-copy do intervalo FALHOU (${ultimoErro}); refazendo com transcode.`);
+        }
+      }
+
+      if (!usada) {
+        throw new InternalServerErrorException(
+          `Falha ao exportar o intervalo: ${ultimoErro ?? 'erro desconhecido'}`,
+        );
+      }
+
+      await report('hashing');
+      const fileSha256 = await this.computeFileSha256(tmpPath);
+      const sizeBytes = statSync(tmpPath).size;
+      renameSync(tmpPath, outputPath); // atômico no mesmo filesystem
+
+      // Manifesto de PROVENIÊNCIA ao lado do vídeo: qual segmento entrou, em que
+      // ponto, o que faltava em disco e quem pediu. Arquivo emendado sem isso não
+      // se defende em perícia.
+      const startedAt = new Date(Date.parse(plan.coveredFrom as string));
+      const endedAt = new Date(Date.parse(plan.coveredTo as string));
+      const proveniencia = {
+        cameraId: identity.cameraId,
+        profile: identity.profile,
+        requestedFrom: plan.requestedFrom,
+        requestedTo: plan.requestedTo,
+        coveredFrom: plan.coveredFrom,
+        coveredTo: plan.coveredTo,
+        strategy: plan.strategy,
+        strategyUsed: usada.kind,
+        strategyReasons: plan.strategyReasons,
+        leadInSeconds: plan.leadInSeconds,
+        leadOutSeconds: plan.leadOutSeconds,
+        durationSeconds: plan.totalDurationSeconds,
+        continuous: plan.continuous,
+        gaps: plan.gaps,
+        truncated: plan.truncated,
+        parts: plan.parts.map((part) => ({
+          recordingId: part.recordingId,
+          segmentStartedAt: part.segmentStartedAt,
+          inpointSeconds: part.inpointSeconds,
+          outpointSeconds: part.outpointSeconds,
+          offsetSeconds: part.offsetSeconds,
+          durationSeconds: part.durationSeconds,
+        })),
+        fileSha256,
+        sizeBytes,
+        generatedAt: new Date().toISOString(),
+        reason: params.reason ?? null,
+        requestedBy: { userId: user.id, userName: user.name },
+      };
+      writeFileSync(outputPath.replace(/\.mp4$/, '.json'), JSON.stringify(proveniencia, null, 2), 'utf-8');
+
+      const clip = await this.prisma.exportedClip.create({
+        data: {
+          cameraId: identity.cameraId,
+          // O schema exige UMA gravação de origem: fica a primeira do intervalo.
+          // A lista COMPLETA vive no manifesto de proveniência e na auditoria.
+          sourceRecordingId: plan.parts[0].recordingId,
+          filePath: outputPath,
+          startedAt,
+          endedAt,
+          durationSeconds: Math.max(1, Math.round(plan.totalDurationSeconds)),
+          sizeBytes: BigInt(sizeBytes),
+          fileSha256,
+          createdByUserId: user.id,
+          createdByUserName: user.name,
+        },
+      });
+
+      // O job roda FORA do request, então a trilha é escrita aqui. Best-effort de
+      // propósito: o arquivo e o manifesto já existem em disco — derrubar a
+      // exportação pronta por causa de um insert de log seria pior.
+      try {
+        await this.prisma.auditLog.create({
+          data: {
+            userId: user.id,
+            action: 'recording.range.export',
+            entityType: 'ExportedClip',
+            entityId: clip.id,
+            metadata: proveniencia as unknown as object,
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Falha ao registrar auditoria da exportação por intervalo ${clip.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      await report('done');
+      return {
+        ...this.serializeExportedClip(clip as any),
+        strategy: plan.strategy,
+        strategyUsed: usada.kind,
+        strategyReasons: plan.strategyReasons,
+        segmentCount: plan.parts.length,
+        sourceRecordingIds: plan.parts.map((part) => part.recordingId),
+        requestedFrom: plan.requestedFrom,
+        requestedTo: plan.requestedTo,
+        requestedSeconds: plan.requestedSeconds,
+        coveredFrom: plan.coveredFrom,
+        coveredTo: plan.coveredTo,
+        coveredSeconds: plan.coveredSeconds,
+        leadInSeconds: plan.leadInSeconds,
+        leadOutSeconds: plan.leadOutSeconds,
+        continuous: plan.continuous,
+        gaps: plan.gaps,
+        truncated: plan.truncated,
+        externalPlayback: {
+          validated: true,
+          container: externalPlayback?.container ?? null,
+          videoCodec: externalPlayback?.videoCodec ?? null,
+          audioCodec: externalPlayback?.audioCodec ?? null,
+          durationSeconds: externalPlayback?.durationSeconds ?? null,
+        },
+      };
+    } finally {
+      limpar();
+    }
+  }
+
+  /**
+   * Ponto de entrada do WORKER. O usuário é resolvido AQUI, não no enfileiramento:
+   * entre o clique e a execução o operador pode ter sido desativado, e `me()`
+   * recusa usuário inativo — a fila não pode virar porta dos fundos de quem
+   * perdeu o acesso. Em seguida o gate por câmera roda de novo dentro do export.
+   */
+  async runRangeExportJob(
+    data: {
+      cameraId: string;
+      from: string;
+      to: string;
+      profile?: RangeExportProfile | string | null;
+      reason?: string;
+      label?: string | null;
+      requestedByUserId: string;
+    },
+    hooks?: { onProgress?: (progress: { step: RangeExportStep; percent: number }) => void | Promise<void> },
+  ) {
+    const user = await this.authService.me(data.requestedByUserId);
+    return this.exportCameraRange(
+      user as AuthUser,
+      {
+        cameraId: data.cameraId,
+        from: data.from,
+        to: data.to,
+        profile: data.profile ?? 'auto',
+        reason: data.reason ?? '',
+        label: data.label ?? null,
+      },
+      hooks,
+    );
+  }
+
+  private rangeExportJobOptions(jobId: string) {
+    return {
+      jobId,
+      attempts: envNumber('RECORDING_EXPORT_MAX_ATTEMPTS', 3, {
+        min: 1,
+        max: 10,
+        integer: true,
+        onInvalid: (message: string) => this.logger.warn(message),
+      }),
+      backoff: { type: 'exponential' as const, delay: 30_000 },
+      removeOnComplete: { age: 7 * 24 * 3600, count: 500 },
+      removeOnFail: { age: 30 * 24 * 3600, count: 500 },
+    };
+  }
+
+  /**
+   * Enfileira a exportação e volta na hora. Sem isto, três operadores clicando
+   * "Exportar" disparam três FFmpeg competindo com a GRAVAÇÃO das câmeras —
+   * e o modo de falha não é a exportação lenta, é a gravação furar.
+   */
+  async enqueueCameraRangeExport(
+    user: AuthUser,
+    params: {
+      cameraId: string;
+      from: string;
+      to: string;
+      profile?: RangeExportProfile | string | null;
+      reason: string;
+      label?: string | null;
+    },
+  ) {
+    let identity: RangeExportIdentity;
+    try {
+      identity = normalizeRangeExportIdentity(params);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Intervalo inválido.');
+    }
+    if (identity.toMs <= identity.fromMs) {
+      throw new BadRequestException('Intervalo inválido: "to" precisa ser depois de "from".');
+    }
+    const maxHours = this.rangeExportMaxHours();
+    if (identity.toMs - identity.fromMs > maxHours * 60 * 60_000) {
+      throw new BadRequestException(`Intervalo máximo de exportação é de ${maxHours}h.`);
+    }
+    await this.accessControlService.assertCanPlaybackCamera(user, identity.cameraId);
+
+    const jobId = buildRangeExportJobId(identity);
+    const outputPath = this.buildRangeExportOutputPath(identity);
+    const pronto = await this.prisma.exportedClip.findUnique({ where: { filePath: outputPath } });
+    // "Pronto" é pronto NO DISCO: linha no banco apontando para arquivo que a
+    // retenção apagou não pode ser vendida como exportação concluída.
+    if (pronto && existsSync(outputPath)) {
+      return {
+        jobId,
+        cameraId: identity.cameraId,
+        status: 'completed' as const,
+        progress: rangeExportProgress('done'),
+        clip: this.serializeExportedClip(pronto as any),
+        reused: true as const,
+      };
+    }
+
+    await this.rangeExportQueue.add(
+      RANGE_EXPORT_JOB_NAME,
+      {
+        cameraId: identity.cameraId,
+        from: new Date(identity.fromMs).toISOString(),
+        to: new Date(identity.toMs).toISOString(),
+        profile: identity.profile,
+        reason: params.reason,
+        label: params.label ?? null,
+        requestedByUserId: user.id,
+      },
+      this.rangeExportJobOptions(jobId),
+    );
+
+    return {
+      jobId,
+      cameraId: identity.cameraId,
+      status: 'queued' as const,
+      progress: rangeExportProgress('queued'),
+      from: new Date(identity.fromMs).toISOString(),
+      to: new Date(identity.toMs).toISOString(),
+      profile: identity.profile,
+    };
+  }
+
+  private normalizeJobProgress(raw: unknown): { step: string; percent: number } {
+    if (raw && typeof raw === 'object') {
+      const value = raw as { step?: unknown; percent?: unknown };
+      return {
+        step: typeof value.step === 'string' ? value.step : 'queued',
+        percent: parseFiniteNumber(value.percent) ?? 0,
+      };
+    }
+    return { step: 'queued', percent: parseFiniteNumber(raw) ?? 0 };
+  }
+
+  async getCameraRangeExportStatus(user: AuthUser, jobId: string) {
+    const job = await this.rangeExportQueue.getJob(jobId);
+    if (!job) throw new NotFoundException('Exportação não encontrada.');
+    const data = (job.data ?? {}) as { cameraId?: string; from?: string; to?: string; profile?: string };
+    // O gate confere a câmera DO JOB — quem consulta pode não ter acesso a ela.
+    await this.accessControlService.assertCanPlaybackCamera(user, String(data.cameraId ?? ''));
+    const status = await job.getState();
+    return {
+      jobId,
+      cameraId: data.cameraId ?? null,
+      from: data.from ?? null,
+      to: data.to ?? null,
+      profile: data.profile ?? 'auto',
+      status,
+      progress: this.normalizeJobProgress(job.progress),
+      attemptsMade: job.attemptsMade ?? 0,
+      failedReason: (job as { failedReason?: string }).failedReason ?? null,
+      result: (job as { returnvalue?: unknown }).returnvalue ?? null,
+    };
+  }
+
+  /**
+   * Recupera exportações ÓRFÃS: o job ficou `active` no Redis porque o processo
+   * que o executava morreu (deploy, OOM, queda de energia). Sem isto a tela do
+   * operador mostra "exportando" para sempre e o trabalho nunca sai.
+   *
+   * Job com lock ativo (worker vivo) recusa `remove()` — é assim que não
+   * duplicamos um FFmpeg em cima do mesmo arquivo.
+   */
+  async recoverOrphanRangeExports() {
+    const jobs = ((await this.rangeExportQueue.getJobs(['active'])) ?? []).filter(
+      (job: { name?: string }) => !job?.name || job.name === RANGE_EXPORT_JOB_NAME,
+    );
+    const decisions = planOrphanRecovery(
+      jobs.map((job: any) => ({
+        id: String(job.id),
+        processedOn: job.processedOn ?? null,
+        heartbeatAt: (job.progress as { at?: number } | null)?.at ?? null,
+        attemptsMade: job.attemptsMade ?? 0,
+      })),
+      {
+        now: Date.now(),
+        staleAfterMs: envNumber('RECORDING_EXPORT_ORPHAN_STALE_MS', 10 * 60_000, {
+          min: 60_000,
+          max: 6 * 60 * 60_000,
+          integer: true,
+          onInvalid: (message) => this.logger.warn(message),
+        }),
+        maxAttempts: envNumber('RECORDING_EXPORT_MAX_ATTEMPTS', 3, {
+          min: 1,
+          max: 10,
+          integer: true,
+          onInvalid: (message) => this.logger.warn(message),
+        }),
+      },
+    );
+
+    let requeued = 0;
+    let abandoned = 0;
+    let kept = 0;
+    let skipped = 0;
+    for (const decision of decisions) {
+      const job: any = jobs.find((candidate: any) => String(candidate.id) === decision.id);
+      if (!job) continue;
+      if (decision.action === 'keep') {
+        kept += 1;
+        continue;
+      }
+      try {
+        await job.remove();
+      } catch (error) {
+        // Lock ativo: existe worker trabalhando apesar do batimento velho.
+        skipped += 1;
+        this.logger.warn(
+          `Exportação ${decision.id} parecia órfã (${decision.reason}) mas ainda está travada por um worker: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+      if (decision.action === 'requeue') {
+        await this.rangeExportQueue.add(
+          RANGE_EXPORT_JOB_NAME,
+          job.data,
+          this.rangeExportJobOptions(decision.id),
+        );
+        requeued += 1;
+        this.logger.warn(`Exportação órfã ${decision.id} (${decision.reason}) devolvida à fila.`);
+      } else {
+        abandoned += 1;
+        this.logger.error(
+          `Exportação ${decision.id} ABANDONADA (${decision.reason}): já consumiu as tentativas sem concluir.`,
+        );
+      }
+    }
+
+    return { scanned: decisions.length, requeued, abandoned, kept, skipped };
   }
 
   async downloadExportedClip(clipId: string, res: Response) {

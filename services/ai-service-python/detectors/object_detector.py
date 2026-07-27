@@ -7,6 +7,7 @@ import numpy as np
 import supervision as sv
 
 from .base import Detection, Detector
+from .region_proposal import MotionRegionPlanner, RegionConfig
 from onnxruntime_session import inference_threading_status
 from runtime_profiles import GENERAL_PROFILE
 
@@ -30,7 +31,7 @@ CLASS_LABELS = {
 class ObjectDetector(Detector):
     event_type = "OBJECT_DETECTED"
 
-    def __init__(self):
+    def __init__(self, region_config: RegionConfig | None = None):
         self.input_size = int(GENERAL_PROFILE["imgsz"])
         self.model_name = str(GENERAL_PROFILE.get("model", "yolo26n")).strip().lower()
         self.requested_precision = str(GENERAL_PROFILE.get("precision", "fp32")).strip().lower()
@@ -63,6 +64,18 @@ class ObjectDetector(Detector):
         self._pool_busy_drops = 0
         self._pool_busy_drops_by_size: dict[int, int] = {}
         self._last_selected_size = self.input_size
+        # DETECÇÃO POR REGIÃO (derivada do movimento) — PADRÃO DESLIGADO.
+        # Com `enabled=False` nada muda: a inferência continua no frame inteiro,
+        # mesmo que o chamador passe motion_boxes. Ver detectors/region_proposal.py.
+        self._region_config = region_config if region_config is not None else RegionConfig.from_env()
+        self._region_planners: dict[str, MotionRegionPlanner] = {}
+        self._region_planner_locks: dict[str, threading.Lock] = {}
+        self._region_registry_lock = threading.Lock()
+        self._region_runs = 0
+        self._region_crops = 0
+        self._region_stationary_skips = 0
+        self._region_sweeps = 0
+        self._region_idle_full_frames = 0
 
     def _candidate_model_dirs(self, input_size: int) -> list[str]:
         base_dir = "/app/models"
@@ -262,15 +275,99 @@ class ObjectDetector(Detector):
             return float(self.vehicle_min_conf)
         return float(self.min_conf)
 
-    def infer(self, frame, context_key: str | None = None, input_size_hint: int | None = None, **kwargs) -> list[Detection]:
+    @property
+    def accepts_motion_regions(self) -> bool:
+        """True quando a inferência por região está LIGADA (padrão: False).
+
+        O StreamProcessor consulta isto antes de sequer montar a lista de caixas
+        de movimento: com a flag desligada nenhum argumento novo chega ao infer().
+        """
+        return bool(self._region_config.enabled)
+
+    def _planner_for(self, context_key: str | None):
+        """Planejador (cache de cena) por câmera — criado sob demanda."""
+        key = str(context_key or "")
+        # Tudo sob o mesmo lock: uma busca em dict é irrelevante perto de uma
+        # inferência, e o par (planejador, lock) nunca pode ser visto pela metade
+        # por outra câmera criando o seu.
+        with self._region_registry_lock:
+            if key not in self._region_planners:
+                self._region_planner_locks[key] = threading.Lock()
+                self._region_planners[key] = MotionRegionPlanner(self._region_config)
+            return self._region_planners[key], self._region_planner_locks[key]
+
+    def _infer_by_regions(self, frame, runtime, motion_boxes, context_key: str | None) -> list[Detection]:
+        """Roda o modelo NAS REGIÕES do movimento, em resolução nativa.
+
+        As coordenadas voltam para o frame INTEIRO (a região é uma fatia, então
+        basta somar a origem — o recorte não é redimensionado antes da inferência,
+        quem escala é o letterbox do _preprocess, que o pós-processamento já
+        desfaz). Objetos parados são reaproveitados do cache em vez de reinferidos.
+        """
+        frame_height, frame_width = frame.shape[:2]
+        planner, lock = self._planner_for(context_key)
+        with lock:
+            plan = planner.plan((frame_height, frame_width), motion_boxes)
+            self._region_runs += 1
+            self._region_stationary_skips += int(plan.skipped)
+            if plan.sweep:
+                self._region_sweeps += 1
+            if plan.idle:
+                self._region_idle_full_frames += 1
+
+            fresh: list[Detection] = []
+            executed: list[tuple[int, int, int, int]] = []
+            for region in plan.regions:
+                x1, y1, x2, y2 = region
+                crop = frame[y1:y2, x1:x2]
+                if getattr(crop, "size", 0) == 0:
+                    continue
+                found, ran = self._detect_raw(crop, runtime)
+                if not ran:
+                    # Pool ocupado: a região NÃO rodou. Não pode entrar em
+                    # `executed`, senão o cache concluiria que o objeto sumiu por
+                    # causa de uma inferência que nunca aconteceu.
+                    continue
+                executed.append(region)
+                self._region_crops += 1
+                for detection in found:
+                    bx1, by1, bx2, by2 = detection.bbox
+                    detection.bbox = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
+                    detection.extra = {**(detection.extra or {}), "region": [x1, y1, x2, y2]}
+                fresh.extend(found)
+            return planner.commit(fresh, plan, executed_regions=executed)
+
+    def infer(
+        self,
+        frame,
+        context_key: str | None = None,
+        input_size_hint: int | None = None,
+        motion_boxes=None,
+        **kwargs,
+    ) -> list[Detection]:
         if self.model is None:
             self.load()
         runtime = self._runtime_for_hint(input_size_hint)
+        if self._region_config.enabled and motion_boxes is not None:
+            detections = self._infer_by_regions(frame, runtime, motion_boxes, context_key)
+        else:
+            detections, _ran = self._detect_raw(frame, runtime)
+        if GENERAL_PROFILE["persistent_track_id"] and context_key:
+            return self._track_people(detections, context_key)
+        return detections
+
+    def _detect_raw(self, frame, runtime) -> tuple[list[Detection], bool]:
+        """Inferência + pós-processamento NAS COORDENADAS de `frame`.
+
+        `frame` é o quadro inteiro (caminho de hoje) ou o recorte de uma região.
+        O segundo retorno diz se a inferência REALMENTE rodou (False = pool
+        ocupado/ausente), informação que o cache de estacionários precisa.
+        """
         selected_size = int(runtime["input_size"])
         blob, scale, pad_x, pad_y, width, height, _ = self._preprocess(frame, selected_size)
         pool = runtime["pool"]
         if pool is None:
-            return []
+            return [], False
         # Latest-frame semantics: if no request is available now, drop this
         # frame and let the next loop consume the newest one from the camera queue.
         try:
@@ -278,7 +375,7 @@ class ObjectDetector(Detector):
         except Empty:
             self._pool_busy_drops += 1
             self._pool_busy_drops_by_size[selected_size] = self._pool_busy_drops_by_size.get(selected_size, 0) + 1
-            return []
+            return [], False
         try:
             infer_request.infer({runtime["input"]: blob})
             raw = np.array(infer_request.get_output_tensor(0).data, copy=True)
@@ -316,9 +413,7 @@ class ObjectDetector(Detector):
                     },
                 )
             )
-        if GENERAL_PROFILE["persistent_track_id"] and context_key:
-            return self._track_people(detections, context_key)
-        return detections
+        return detections, True
 
     def status(self) -> dict:
         loaded_variants = {
@@ -346,4 +441,19 @@ class ObjectDetector(Detector):
             "class_confidence": {str(key): value for key, value in sorted(self.class_confidence.items())},
             "openvino_device": self.openvino_device,
             "openvino_performance_hint": self.openvino_performance_hint,
+            "region_detection": self.region_status(),
+        }
+
+    def region_status(self) -> dict:
+        with self._region_registry_lock:
+            contexts = {key: planner.stats() for key, planner in sorted(self._region_planners.items())}
+        return {
+            "enabled": bool(self._region_config.enabled),
+            "config": self._region_config.as_dict(),
+            "region_runs": self._region_runs,
+            "region_crops": self._region_crops,
+            "stationary_skips": self._region_stationary_skips,
+            "sweeps": self._region_sweeps,
+            "idle_full_frames": self._region_idle_full_frames,
+            "contexts": contexts,
         }

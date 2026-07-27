@@ -1025,6 +1025,16 @@ class StreamProcessor:
                     det = registry.ensure_detector(self.advanced_analysis_type)
                     advanced_frame = self._resize_for_advanced(frame)
                     advanced_height, advanced_width = advanced_frame.shape[:2]
+                    # Detecção por REGIÃO (flag do detector, padrão DESLIGADA): as
+                    # caixas de movimento deste mesmo frame viram os recortes onde
+                    # o modelo roda. Desligada, `extra_infer_kwargs` é {} e a
+                    # chamada abaixo é exatamente a de hoje.
+                    extra_infer_kwargs = self._advanced_infer_kwargs(
+                        det,
+                        detections,
+                        frame.shape[:2],
+                        (advanced_height, advanced_width),
+                    )
                     # O detector compartilhado gerencia a inferência thread-safe.
                     infer_started_at = time.time()
                     try:
@@ -1032,6 +1042,7 @@ class StreamProcessor:
                             advanced_frame,
                             context_key=self.camera_id,
                             input_size_hint=self.current_input_size_hint,
+                            **extra_infer_kwargs,
                         )
                     except Exception:
                         self.advanced_infer_errors += 1
@@ -1080,6 +1091,59 @@ class StreamProcessor:
 
             # Pausa para aliviar CPU entre frames
             time.sleep(0.02)
+
+    @staticmethod
+    def _motion_boxes_for_advanced(motion_detections, frame_shape, advanced_shape) -> list:
+        """Caixas de movimento nas coordenadas do frame que a IA de objeto analisa.
+
+        O movimento roda no frame ORIGINAL e a IA de objeto num frame reduzido
+        (`_resize_for_advanced`). Sem reescalar aqui, a região sairia deslocada e
+        o alvo pequeno — que é justamente o motivo de existir o recorte — ficaria
+        de fora. Só MOTION_DETECTED vira região; detecção de objeto não.
+        """
+        try:
+            frame_height, frame_width = int(frame_shape[0]), int(frame_shape[1])
+            advanced_height, advanced_width = int(advanced_shape[0]), int(advanced_shape[1])
+        except Exception:
+            return []
+        if frame_width <= 0 or frame_height <= 0:
+            return []
+        scale_x = advanced_width / float(frame_width)
+        scale_y = advanced_height / float(frame_height)
+        boxes = []
+        for detection in motion_detections or []:
+            if (getattr(detection, "event_type", None) or "") != "MOTION_DETECTED":
+                continue
+            bbox = getattr(detection, "bbox", None)
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(value) for value in bbox)
+            except Exception:
+                continue
+            boxes.append(
+                (
+                    int(round(x1 * scale_x)),
+                    int(round(y1 * scale_y)),
+                    int(round(x2 * scale_x)),
+                    int(round(y2 * scale_y)),
+                )
+            )
+        return boxes
+
+    def _advanced_infer_kwargs(self, detector, motion_detections, frame_shape, advanced_shape) -> dict:
+        """Argumentos extras da inferência avançada.
+
+        As caixas só são montadas quando o detector declara
+        `accepts_motion_regions` (flag GENERAL_REGION_DETECTION ligada). Com a
+        flag desligada — o padrão, e o estado de produção — devolve {} e a
+        chamada de inferência continua idêntica à de hoje.
+        """
+        if not getattr(detector, "accepts_motion_regions", False):
+            return {}
+        return {
+            "motion_boxes": self._motion_boxes_for_advanced(motion_detections, frame_shape, advanced_shape),
+        }
 
     def _confirm_motion_semantically(self, frame, motion_detections, current_time):
         """Roda o detector de objetos SÓ no recorte do movimento.

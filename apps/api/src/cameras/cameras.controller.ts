@@ -10,6 +10,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { AlarmsService } from '../alarms/alarms.service';
 import { CamerasService } from './cameras.service';
+import { CameraPreviewFrameDto } from './dto/camera-preview-frame.dto';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { TestCameraConnectionDto } from './dto/test-camera-connection.dto';
 import { UpdateCameraDto } from './dto/update-camera.dto';
@@ -128,6 +129,41 @@ export class CamerasController {
   async testConnectionDraft(@CurrentUser() user: AuthUser, @Body() dto: TestCameraConnectionDto, @Req() req: Request) {
     const result = await this.camerasService.testConnectionDraft(dto);
     await this.auditService.log(user.id, 'camera.test_connection_draft', 'Camera', null, result, req);
+    return result;
+  }
+
+  /**
+   * CONFIRMAÇÃO VISUAL DO CADASTRO — devolve UM frame da câmera antes de salvar.
+   *
+   * Metadado (1920x1080 · H.264) não distingue a câmera do estacionamento da
+   * câmera da recepção: com IP trocado, o erro só aparece quando o cliente pede
+   * a gravação e alguém precisa VOLTAR AO LOCAL. O frame mata isso no cadastro.
+   *
+   * A imagem NÃO vai para a auditoria: além de estourar a tabela, guardaria
+   * conteúdo de câmera em texto. Só o resultado e a fonte que respondeu.
+   */
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Throttle({ default: { limit: 12, ttl: 60000 } })
+  @Post('preview-frame')
+  async previewFrameDraft(@CurrentUser() user: AuthUser, @Body() dto: TestCameraConnectionDto, @Req() req: Request) {
+    const result = await this.camerasService.capturePreviewFrame({
+      ip: dto.ip,
+      rtspPort: dto.rtspPort,
+      username: dto.username ?? '',
+      password: dto.password ?? '',
+      rtspPath: dto.rtspPath,
+      channel: dto.channel,
+      subtype: dto.subtype,
+    });
+    await this.auditService.log(
+      user.id,
+      'camera.preview_frame_draft',
+      'Camera',
+      null,
+      { ip: dto.ip, ok: result.ok, source: result.source, bytes: result.bytes },
+      req,
+    );
     return result;
   }
 
@@ -575,6 +611,48 @@ export class CamerasController {
   async getDiagnostics(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     await this.accessControlService.assertCanViewCamera(user, id);
     return this.camerasService.getDiagnostics(id);
+  }
+
+  /**
+   * DIAGNÓSTICO RICO da câmera já salva, sob demanda: o que a sonda detecta
+   * AGORA contra o que está configurado. A divergência é o diagnóstico.
+   *
+   * Gate de VER (e não de administrar) porque o relatório descreve o conteúdo do
+   * stream. Numa câmera PRIVADA `canViewCamera` é invertido — o admin gerencia
+   * mas não vê —, e essa inversão precisa valer aqui também.
+   */
+  @Roles(UserRole.VIEWER)
+  @Throttle({ default: { limit: 12, ttl: 60000 } })
+  @Get(':id/live-diagnostics')
+  async getLiveDiagnostics(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    await this.accessControlService.assertCanViewCamera(user, id);
+    return this.camerasService.getLiveDiagnostics(id);
+  }
+
+  /**
+   * Confirmação visual na EDIÇÃO: um frame da câmera salva (ou dos novos dados
+   * digitados) antes de gravar a alteração. Devolve imagem — logo, gate de VER.
+   */
+  @Roles(UserRole.VIEWER)
+  @Throttle({ default: { limit: 12, ttl: 60000 } })
+  @Post(':id/preview-frame')
+  async previewFrame(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: CameraPreviewFrameDto,
+    @Req() req: Request,
+  ) {
+    await this.accessControlService.assertCanViewCamera(user, id);
+    const result = await this.camerasService.capturePreviewFrameForCamera(id, dto);
+    await this.auditService.log(
+      user.id,
+      'camera.preview_frame',
+      'Camera',
+      id,
+      { ok: result.ok, source: result.source, bytes: result.bytes },
+      req,
+    );
+    return result;
   }
 
   @Roles(UserRole.VIEWER)

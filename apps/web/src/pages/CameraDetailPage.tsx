@@ -20,6 +20,7 @@ import {
   Radar,
   RotateCcw,
   SlidersHorizontal,
+  Stethoscope,
   Video,
   Volume2,
   VolumeX,
@@ -43,6 +44,20 @@ import {
   type RecordingMode,
   type VideoCodec,
 } from '../lib/camera-format';
+import {
+  diagnosticsTone,
+  orderFindings,
+  parseDiagnosticsReport,
+  reportTone,
+  summarizeTranscode,
+  type CameraDiagnosticsView,
+} from '../lib/camera-diagnostics';
+import {
+  describePreviewSource,
+  describePreviewStream,
+  parsePreviewFrame,
+  type PreviewFrame,
+} from '../lib/camera-preview-frame';
 
 const API_URL = getApiBaseUrl();
 
@@ -315,6 +330,134 @@ function SettingsStat({ label, value, mono = true }: { label: string; value: str
   );
 }
 
+/**
+ * CONFIRMAÇÃO VISUAL na edição: o frame que prova que este IP é a câmera certa.
+ * Metadado (resolução/codec/fps) é idêntico entre câmeras diferentes; a imagem não.
+ */
+function CameraPreviewFrameCard({ frame }: { frame: PreviewFrame }) {
+  const sourceLabel = describePreviewSource(frame.source);
+  const streamLabel = describePreviewStream(frame.stream);
+  return (
+    <div className="rounded-xl border border-border bg-card px-5 py-4 shadow-sm">
+      <div className="flex items-center gap-2">
+        <Camera className="h-4 w-4 text-primary" />
+        <h3 className="text-sm font-semibold text-foreground">Confirmação visual</h3>
+      </div>
+      {frame.ok && frame.imageDataUrl ? (
+        <div className="mt-3 space-y-2">
+          <img
+            src={frame.imageDataUrl}
+            alt="Frame capturado da câmera para conferência"
+            className="max-h-[360px] w-full rounded-lg border border-border bg-black object-contain"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            {[streamLabel, sourceLabel].filter(Boolean).join(' · ') || 'Imagem capturada agora.'}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-[hsl(var(--status-warning))]">
+          Sem imagem para conferir. {frame.reason}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * DIAGNÓSTICO RICO da câmera já salva: DETECTADO agora × CONFIGURADO. A
+ * divergência é o diagnóstico — é ela que evita a volta ao local.
+ */
+function CameraDiagnosticsCard({ report }: { report: CameraDiagnosticsView }) {
+  const tone = reportTone(report);
+  const transcodeLines = summarizeTranscode(report.transcode);
+  return (
+    <div
+      className={cn(
+        'rounded-xl border bg-card px-5 py-4 shadow-sm',
+        tone === 'bad' && 'border-[hsl(var(--destructive)_/_0.4)]',
+        tone === 'warn' && 'border-[hsl(var(--status-warning)_/_0.4)]',
+        tone === 'good' && 'border-[hsl(var(--status-online)_/_0.4)]',
+        tone === 'neutral' && 'border-border',
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Stethoscope className="h-4 w-4 text-primary" />
+          <h3 className="text-sm font-semibold text-foreground">Diagnóstico detalhado</h3>
+        </div>
+        <StatusPill
+          label={report.state === 'ok' ? 'Sem divergência' : report.state === 'diverged' ? 'Divergente' : 'Não confirmado'}
+          tone={tone}
+        />
+      </div>
+      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{report.summary}</p>
+
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[520px] text-left text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              <th className="pb-1.5 pr-3 font-semibold">Item</th>
+              <th className="pb-1.5 pr-3 font-semibold">Configurado</th>
+              <th className="pb-1.5 pr-3 font-semibold">Detectado agora</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orderFindings(report.findings).map((finding) => {
+              const itemTone = diagnosticsTone(finding);
+              return (
+                <tr key={finding.key} className="border-t border-border/60 align-top">
+                  <td className="py-1.5 pr-3 text-foreground">{finding.label}</td>
+                  <td className="py-1.5 pr-3 font-mono text-muted-foreground">{finding.configured ?? '--'}</td>
+                  <td
+                    className={cn(
+                      'py-1.5 pr-3 font-mono',
+                      itemTone === 'bad' && 'text-[hsl(var(--destructive))]',
+                      itemTone === 'warn' && 'text-[hsl(var(--status-warning))]',
+                      itemTone === 'good' && 'text-[hsl(var(--status-online))]',
+                      itemTone === 'neutral' && 'text-muted-foreground',
+                    )}
+                  >
+                    {finding.detected ?? 'não confirmado'}
+                    {finding.state === 'diverged' && finding.message ? (
+                      <span className="mt-0.5 block font-sans text-[11px] leading-relaxed">{finding.message}</span>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-3 rounded-lg border border-border bg-background px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+          Transcodificação
+        </div>
+        {transcodeLines.length ? (
+          <ul className="mt-1 space-y-1 text-xs text-foreground">
+            {transcodeLines.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Nenhum pipeline está transcodificando: live e gravação seguem a fonte original.
+          </p>
+        )}
+      </div>
+
+      {report.error ? (
+        <p className="mt-2 font-mono text-[11px] text-[hsl(var(--status-warning))]">{report.error}</p>
+      ) : null}
+      {report.checkedAt ? (
+        <p className="mt-2 text-[10px] text-muted-foreground">
+          Verificado em {new Date(report.checkedAt).toLocaleString('pt-BR')}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusPill({ label, tone = 'neutral' }: { label: string; tone?: 'neutral' | 'good' | 'warn' | 'bad' }) {
   return (
     <span
@@ -440,6 +583,12 @@ export default function CameraDetailPage() {
   const [triggeringAlarm, setTriggeringAlarm] = useState(false);
   const [ptzDiagnostics, setPtzDiagnostics] = useState<PtzDiagnostics | null>(null);
   const [pipelineSummary, setPipelineSummary] = useState<CameraPipelineSummary | null>(null);
+  // Diagnóstico rico da câmera JÁ SALVA (detectado agora × configurado) e o
+  // frame de conferência. Ambos SOB DEMANDA: cada um custa sonda na câmera.
+  const [liveDiagnostics, setLiveDiagnostics] = useState<CameraDiagnosticsView | null>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [previewFrame, setPreviewFrame] = useState<PreviewFrame | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const initialTabs = useMemo(() => {
     if (typeof window === 'undefined') {
@@ -899,6 +1048,77 @@ export default function CameraDetailPage() {
       });
     } finally {
       setTestingConnection(false);
+    }
+  };
+
+  /**
+   * DIAGNÓSTICO RICO da câmera já salva. Antes disto, depois de cadastrada a
+   * câmera virava três booleanos e diagnosticar uma que ERA boa e degradou
+   * (firmware trocou o perfil, substream sumiu, codec virou H.265) era
+   * adivinhação — e adivinhar errado custa uma volta ao local.
+   */
+  const runLiveDiagnostics = async () => {
+    if (!cam?.id || !accessToken || diagnosticsLoading) return;
+    setDiagnosticsLoading(true);
+    try {
+      const { data } = await axios.get(`${API_URL}/cameras/${cam.id}/live-diagnostics`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const report = parseDiagnosticsReport(data);
+      setLiveDiagnostics(report);
+      if (report && report.state === 'diverged') {
+        toast({
+          title: 'Divergência encontrada',
+          description: report.summary,
+          variant: 'destructive',
+        });
+      }
+    } catch (error) {
+      // A tela NÃO pode quebrar: ela é aberta justamente quando a câmera está ruim.
+      setLiveDiagnostics(null);
+      toast({
+        title: 'Falha ao diagnosticar',
+        description: error instanceof Error ? error.message : 'Não foi possível diagnosticar a câmera.',
+        variant: 'destructive',
+      });
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  };
+
+  /**
+   * Confirmação visual na EDIÇÃO: puxa um frame com os dados que estão NO
+   * FORMULÁRIO (IP recém-digitado inclusive), antes de salvar por cima de um
+   * cadastro que estava certo. Senha em branco reusa a guardada.
+   */
+  const capturePreviewFrame = async () => {
+    if (!cam?.id || !accessToken || previewLoading) return;
+    setPreviewLoading(true);
+    try {
+      const { data } = await axios.post(
+        `${API_URL}/cameras/${cam.id}/preview-frame`,
+        {
+          ip: form.ip.trim() || undefined,
+          rtspPort: form.rtspPort.trim() ? Number(form.rtspPort) : undefined,
+          username: form.username.trim() || undefined,
+          password: form.password || undefined,
+          rtspPath: form.rtspPath.trim() || undefined,
+        },
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      setPreviewFrame(parsePreviewFrame(data));
+    } catch (error) {
+      setPreviewFrame({
+        ok: false,
+        imageDataUrl: null,
+        bytes: 0,
+        capturedAt: null,
+        source: null,
+        stream: null,
+        reason: error instanceof Error ? error.message : 'Não foi possível capturar a imagem da câmera.',
+      });
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -1523,6 +1743,24 @@ export default function CameraDetailPage() {
                     </button>
                     <button
                       type="button"
+                      onClick={() => void runLiveDiagnostics()}
+                      disabled={diagnosticsLoading}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-background px-3.5 text-xs font-semibold transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {diagnosticsLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Stethoscope className="h-3.5 w-3.5" />}
+                      {diagnosticsLoading ? 'Diagnosticando...' : 'Diagnóstico detalhado'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void capturePreviewFrame()}
+                      disabled={previewLoading}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-background px-3.5 text-xs font-semibold transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {previewLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
+                      {previewLoading ? 'Capturando...' : 'Conferir imagem'}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void discoverEndpoints()}
                       disabled={discoveringEndpoints}
                       className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-background px-3.5 text-xs font-semibold transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
@@ -1532,6 +1770,14 @@ export default function CameraDetailPage() {
                     </button>
                   </div>
                 </div>
+
+                {previewFrame && (
+                  <CameraPreviewFrameCard frame={previewFrame} />
+                )}
+
+                {liveDiagnostics && (
+                  <CameraDiagnosticsCard report={liveDiagnostics} />
+                )}
 
                 {/* Stream detectado da câmera */}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

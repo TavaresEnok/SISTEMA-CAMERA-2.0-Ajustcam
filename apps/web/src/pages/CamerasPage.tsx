@@ -31,6 +31,12 @@ import {
   type PreferredLiveProtocol,
   type VideoCodec,
 } from '../lib/camera-format';
+import {
+  describePreviewSource,
+  describePreviewStream,
+  parsePreviewFrame,
+  type PreviewFrame,
+} from '../lib/camera-preview-frame';
 const STATUSES = ['all', 'online', 'recording', 'motion', 'alarm', 'offline', 'no_signal', 'maintenance'] as const;
 const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
   all: 'Todos os status',
@@ -140,12 +146,74 @@ function formatRecordingMode(mode: string) {
 type LocationOption = { id: string; name: string; siteId?: string | null };
 type PosterTokenItem = { cameraId: string; streamToken: string; posterUrl: string };
 
+/**
+ * Painel de CONFIRMAÇÃO VISUAL do assistente: mostra o frame capturado da câmera
+ * antes de salvar. É a única coisa que distingue a câmera do estacionamento da
+ * câmera da recepção — metadado (resolução/codec/fps) é idêntico nas duas.
+ */
+function PreviewFramePanel({
+  frame,
+  loading,
+  onRefresh,
+  disabled,
+}: {
+  frame: PreviewFrame | null;
+  loading: boolean;
+  onRefresh: () => void;
+  disabled?: boolean;
+}) {
+  const sourceLabel = describePreviewSource(frame?.source ?? null);
+  const streamLabel = describePreviewStream(frame?.stream ?? null);
+  return (
+    <div className="rounded border border-border bg-background px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] font-medium text-foreground">Confirmação visual</div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading || disabled}
+          className="inline-flex items-center gap-1.5 rounded border border-border px-2 py-1 text-[10px] transition-colors hover:bg-[hsl(var(--accent))] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <CameraIcon className="h-3 w-3" />
+          {loading ? 'Capturando...' : frame ? 'Atualizar imagem' : 'Ver imagem da câmera'}
+        </button>
+      </div>
+      <p className="mt-1 text-[10px] leading-relaxed text-[hsl(var(--muted-foreground))]">
+        Resolução e codec são iguais em câmeras diferentes. A imagem é o que confirma que este IP é a câmera certa.
+      </p>
+      {loading && !frame && (
+        <div className="mt-2 flex h-40 items-center justify-center rounded border border-dashed border-border text-[11px] text-[hsl(var(--muted-foreground))]">
+          Capturando imagem da câmera...
+        </div>
+      )}
+      {frame?.ok && frame.imageDataUrl && (
+        <div className="mt-2 space-y-1">
+          <img
+            src={frame.imageDataUrl}
+            alt="Frame capturado da câmera para confirmação visual"
+            className="w-full rounded border border-border bg-black object-contain"
+          />
+          <div className="text-[10px] text-[hsl(var(--muted-foreground))]">
+            {[streamLabel, sourceLabel].filter(Boolean).join(' · ') || 'Imagem capturada agora.'}
+          </div>
+        </div>
+      )}
+      {frame && !frame.ok && (
+        <div className="mt-2 rounded border border-[hsl(var(--status-warning)_/_0.3)] bg-[hsl(var(--status-warning)_/_0.1)] px-2.5 py-2 text-[10px] text-[hsl(var(--status-warning))]">
+          Sem imagem para conferir. {frame.reason}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WizardModal({
   onClose,
   sites,
   areas,
   onCreated,
   onTestConnection,
+  onPreviewFrame,
 }: {
   onClose: () => void;
   sites: LocationOption[];
@@ -271,6 +339,15 @@ function WizardModal({
       }>;
     };
   }>;
+  onPreviewFrame: (payload: {
+    ip: string;
+    rtspPort: number;
+    username?: string;
+    password?: string;
+    rtspPath?: string;
+    channel?: number;
+    subtype?: number;
+  }) => Promise<PreviewFrame>;
 }) {
   const [step, setStep] = useState(0);
   const [detectedMax, setDetectedMax] = useState<{
@@ -317,6 +394,8 @@ function WizardModal({
   const [autoProfiles, setAutoProfiles] = useState<Awaited<ReturnType<typeof onTestConnection>>['autoProfiles'] | null>(null);
   const [probeSteps, setProbeSteps] = useState<NonNullable<Awaited<ReturnType<typeof onTestConnection>>['probeSteps']>>([]);
   const [compatibility, setCompatibility] = useState<Awaited<ReturnType<typeof onTestConnection>>['compatibility'] | null>(null);
+  const [previewFrame, setPreviewFrame] = useState<PreviewFrame | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const updateField = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -436,6 +515,38 @@ function WizardModal({
     }
   };
 
+  // Um frame vale mais que a ficha técnica inteira: é o que separa "câmera 7 do
+  // estacionamento" de "câmera 3 da recepção" quando os IPs foram trocados.
+  // Falhar aqui NUNCA trava o cadastro — a confirmação é um a mais, não um gate.
+  const capturePreview = async (overrides?: { rtspPath?: string }) => {
+    if (!form.ip.trim() || !form.port.trim() || !form.username.trim() || !form.password) return;
+    setPreviewLoading(true);
+    try {
+      const frame = await onPreviewFrame({
+        ip: form.ip.trim(),
+        rtspPort: Number(form.port),
+        username: form.username.trim(),
+        password: form.password,
+        rtspPath: overrides?.rtspPath ?? (form.rtspPath.trim() || undefined),
+        channel: Number(form.channel || DEFAULT_CAMERA_CHANNEL),
+        subtype: MAIN_STREAM_SUBTYPE,
+      });
+      setPreviewFrame(frame);
+    } catch (error) {
+      setPreviewFrame({
+        ok: false,
+        imageDataUrl: null,
+        bytes: 0,
+        capturedAt: null,
+        source: null,
+        stream: null,
+        reason: getRequestErrorMessage(error, 'Não foi possível capturar a imagem da câmera.'),
+      });
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const handleTestConnection = async (showResult = true): Promise<boolean> => {
     if (!form.ip.trim() || !form.port.trim()) {
       toast({ title: 'Dados incompletos', description: 'Preencha IP e porta RTSP antes de testar conexão.', variant: 'destructive' });
@@ -489,6 +600,13 @@ function WizardModal({
         } else {
           toast({ title: 'Vídeo não confirmado', description: 'Verifique IP, porta, usuário e senha.', variant: 'destructive' });
         }
+      }
+      // Confirmação visual logo após a detecção: sem esperar o técnico pedir,
+      // porque justamente quem não pede é quem cadastra a câmera errada.
+      if (result.rtspAuthOk) {
+        void capturePreview({
+          rtspPath: result.detectedRtspPath ?? result.suggestedRtspPath ?? (form.rtspPath.trim() || undefined),
+        });
       }
       return true;
     } catch (error) {
@@ -608,6 +726,14 @@ function WizardModal({
                     ))}
                   </div>
                 </details>
+              )}
+              {(detectedMax || previewFrame || previewLoading) && (
+                <PreviewFramePanel
+                  frame={previewFrame}
+                  loading={previewLoading}
+                  onRefresh={() => void capturePreview()}
+                  disabled={isTesting || !form.username.trim() || !form.password}
+                />
               )}
               {detectedMax && (
                 <div className="rounded border border-[hsl(var(--status-online)_/_0.25)] bg-[hsl(var(--status-online)_/_0.1)] px-3 py-2 text-[11px] text-[hsl(var(--status-online))]">
@@ -774,6 +900,14 @@ function WizardModal({
           )}
           {step === 3 && (
             <div className="space-y-3">
+              {/* Última chance de perceber que este IP é a câmera errada — antes
+                  de salvar, e não meses depois quando o cliente pedir a gravação. */}
+              <PreviewFramePanel
+                frame={previewFrame}
+                loading={previewLoading}
+                onRefresh={() => void capturePreview()}
+                disabled={!form.username.trim() || !form.password}
+              />
               <div className="rounded-lg border border-border bg-background p-4 space-y-2 text-xs">
                 <div className="flex justify-between"><span className="text-[hsl(var(--muted-foreground))]">Endereço IP</span><span className="font-mono">{form.ip || '-'}</span></div>
                 <div className="flex justify-between"><span className="text-[hsl(var(--muted-foreground))]">Nome</span><span>{form.name || '-'}</span></div>
@@ -1111,6 +1245,29 @@ export default function CamerasPage() {
         hints: Array<{ code: string; severity: 'info' | 'warning' | 'critical'; title: string; message: string; action?: string }>;
       };
     };
+  };
+
+  /**
+   * CONFIRMAÇÃO VISUAL — pega UM frame da câmera antes de salvar.
+   *
+   * Metadado (1920x1080 · H.264) não distingue a câmera 7 do estacionamento da
+   * câmera 3 da recepção. Com o IP trocado, o erro só aparece quando o cliente
+   * pede a gravação de um evento e alguém precisa VOLTAR AO LOCAL.
+   */
+  const previewFrameDraft = async (payload: {
+    ip: string;
+    rtspPort: number;
+    username?: string;
+    password?: string;
+    rtspPath?: string;
+    channel?: number;
+    subtype?: number;
+  }): Promise<PreviewFrame> => {
+    if (!accessToken) throw new Error('Sessão inválida. Faça login novamente.');
+    const { data } = await axios.post(`${API_URL}/cameras/preview-frame`, payload, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return parsePreviewFrame(data);
   };
 
   const reconnectSingleCamera = async (cameraId: string) => {
@@ -1591,7 +1748,7 @@ export default function CamerasPage() {
         onDeleted={(id) => { if (selectedCam?.id === id) setSelectedCam(null); }}
       />
 
-      {showWizard && <WizardModal onClose={() => setShowWizard(false)} sites={wizardSites} areas={wizardAreas} onCreated={createCamera} onTestConnection={testConnectionDraft} />}
+      {showWizard && <WizardModal onClose={() => setShowWizard(false)} sites={wizardSites} areas={wizardAreas} onCreated={createCamera} onTestConnection={testConnectionDraft} onPreviewFrame={previewFrameDraft} />}
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
         <AlertDialogContent>

@@ -4,7 +4,8 @@ import { CameraStatus, CameraPermissionLevel } from '@prisma/client';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import { promisify } from 'node:util';
 import { isIP } from 'node:net';
 import { statfs } from 'node:fs/promises';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -25,7 +26,22 @@ import {
   sanitizeRtspUrl,
 } from './helpers/rtsp-url.helper';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
+import { envNumber } from '../common/config/env-number.helper';
 import { assessCameraCompatibility } from './helpers/camera-compatibility.helper';
+import {
+  SNAPSHOT_MAX_BYTES,
+  buildSnapshotFailure,
+  buildSnapshotFfmpegArgs,
+  buildSnapshotSuccess,
+  normalizeSnapshotTransport,
+  type SnapshotResult,
+  type SnapshotSource,
+} from './helpers/camera-snapshot.helper';
+import {
+  buildCameraDiagnosticsReport,
+  type CameraDiagnosticsReport,
+  type DiagnosticsStreamFacts,
+} from './helpers/camera-diagnostics-report.helper';
 import {
   GRID_LIVE_MAX_HEIGHT,
   GRID_LIVE_MAX_WIDTH,
@@ -85,11 +101,37 @@ type CameraProfilePayload = {
   recordingBitrateKbps?: number | null;
 };
 
+const execFileAsync = promisify(execFile);
+
 @Injectable()
 export class CamerasService {
   private readonly logger = new Logger(CamerasService.name);
-  private readonly rtspProbeTimeoutMs = Number(process.env.CAMERA_RTSP_PROBE_TIMEOUT_MS ?? 4500);
-  private readonly rtspProbeKillTimeoutMs = Number(process.env.CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS ?? 5500);
+  // ⚠️ Estes três números eram `Number(process.env.X ?? default)`. Com um valor
+  // inválido no .env ("4,5s", "5000ms") o resultado é NaN — e NaN não explode:
+  //   · `setTimeout(kill, NaN)` dispara em ~1ms e MATA toda sonda antes de a
+  //     câmera responder;
+  //   · `index += NaN` encerra o laço de caminhos na primeira volta, então
+  //     NENHUM caminho RTSP chega a ser testado.
+  // Nos dois casos o cadastro de câmera passa a falhar 100% das vezes sem um
+  // único erro no log — o operador jura que a câmera está offline.
+  private readonly rtspProbeTimeoutMs = envNumber('CAMERA_RTSP_PROBE_TIMEOUT_MS', 4500, {
+    min: 500,
+    max: 60_000,
+    integer: true,
+    onInvalid: (message) => this.logger.warn(message),
+  });
+  private readonly rtspProbeKillTimeoutMs = envNumber('CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS', 5500, {
+    min: 500,
+    max: 60_000,
+    integer: true,
+    onInvalid: (message) => this.logger.warn(message),
+  });
+  private readonly snapshotTimeoutMs = envNumber('CAMERA_SNAPSHOT_TIMEOUT_MS', 9000, {
+    min: 2000,
+    max: 60_000,
+    integer: true,
+    onInvalid: (message) => this.logger.warn(message),
+  });
 
   constructor(
     private readonly prisma: PrismaService,
@@ -840,6 +882,250 @@ export class CamerasService {
     };
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // CONFIRMAÇÃO VISUAL — um frame da câmera ANTES de salvar.
+  //
+  // Metadado não distingue "câmera 7 do estacionamento" de "câmera 3 da
+  // recepção": com IP trocado no cadastro, o erro só aparece quando o cliente
+  // pede a gravação de um evento — e aí alguém VOLTA AO LOCAL. Um frame resolve.
+  //
+  // Nunca lança por culpa da câmera: devolve `{ ok: false, reason }`. A tela de
+  // cadastro não pode quebrar porque a câmera está muda.
+  // ───────────────────────────────────────────────────────────────────────────
+  async capturePreviewFrame(
+    input: {
+      ip: string;
+      rtspPort: number;
+      username: string;
+      password: string;
+      rtspPath?: string | null;
+      channel?: number | null;
+      subtype?: number | null;
+      preferredRtspTransport?: string | null;
+    },
+    options?: { targetAlreadyProvisioned?: boolean },
+  ): Promise<SnapshotResult> {
+    // A guarda de IP público existe porque o alvo vem DIGITADO pelo usuário: sem
+    // ela o campo "IP da câmera" vira um scanner da rede interna do servidor
+    // (SSRF). Ela NÃO se aplica ao endereço já gravado de uma câmera existente —
+    // a live e a gravação falam com ele o tempo todo, e aplicá-la ali mataria a
+    // conferência de imagem de toda instalação com câmera em WAN.
+    if (!options?.targetAlreadyProvisioned) {
+      this.assertTestTargetAllowed(input.ip);
+    }
+    const transport = normalizeSnapshotTransport(input.preferredRtspTransport);
+    const capturedAt = new Date().toISOString();
+    const requestedSource: SnapshotSource = {
+      rtspPort: input.rtspPort,
+      rtspPath: input.rtspPath?.trim() || null,
+      transport,
+    };
+
+    if (!input.username || !input.password) {
+      return buildSnapshotFailure({
+        error: 'Informe usuário e senha da câmera para confirmar a imagem.',
+        source: requestedSource,
+        capturedAt,
+      });
+    }
+
+    // Primeiro descobrimos QUAL caminho responde (a mesma sonda do cadastro, que
+    // já devolve o erro sanitizado), depois puxamos o frame só desse caminho.
+    let probe: Awaited<ReturnType<typeof this.probeRtspPaths>>;
+    try {
+      probe = await this.probeRtspPaths({
+        ip: input.ip,
+        rtspPorts: [input.rtspPort],
+        username: input.username,
+        password: input.password,
+        paths: this.buildRtspPathCandidates({
+          channel: input.channel,
+          subtype: input.subtype,
+          customPath: input.rtspPath,
+        }),
+      });
+    } catch (error) {
+      return buildSnapshotFailure({ error, source: requestedSource, capturedAt });
+    }
+
+    if (!probe.ok || !probe.path) {
+      return buildSnapshotFailure({
+        error: probe.error ?? 'A câmera não entregou vídeo no endereço informado.',
+        source: requestedSource,
+        capturedAt,
+      });
+    }
+
+    const source: SnapshotSource = {
+      rtspPort: probe.port ?? input.rtspPort,
+      rtspPath: probe.path,
+      transport,
+    };
+    const url = buildRtspUrl({
+      username: input.username,
+      password: input.password,
+      ip: input.ip,
+      rtspPort: probe.port ?? input.rtspPort,
+      rtspPath: probe.path,
+      channel: input.channel ?? undefined,
+      subtype: input.subtype ?? undefined,
+    });
+
+    try {
+      const { stdout } = await execFileAsync(
+        'ffmpeg',
+        buildSnapshotFfmpegArgs({
+          rtspUrl: url,
+          transport,
+          timeoutUs: this.rtspProbeTimeoutMs * 1000,
+        }),
+        { encoding: 'buffer', maxBuffer: SNAPSHOT_MAX_BYTES, timeout: this.snapshotTimeoutMs },
+      );
+      return buildSnapshotSuccess({
+        buffer: stdout,
+        source,
+        stream: {
+          codec: probe.metadata?.codec ?? null,
+          width: probe.metadata?.width ?? null,
+          height: probe.metadata?.height ?? null,
+          fps: probe.metadata?.fps ?? null,
+        },
+        capturedAt,
+      });
+    } catch (error) {
+      // `error.message` do execFile carrega o stderr CRU do FFmpeg, que imprime a
+      // URL de entrada inteira ("Error opening input file rtsp://user:senha@...").
+      // Sanitizar só a `url` NÃO basta — a credencial vaza pela message, e esta
+      // message vai tanto para o log quanto para a resposta HTTP.
+      this.logger.debug(
+        `Falha na confirmação visual ip=${input.ip} path=${sanitizeRtspUrl(String(probe.path))}: ${sanitizeSensitiveText(error)}`,
+      );
+      return buildSnapshotFailure({ error, source, capturedAt });
+    }
+  }
+
+  /**
+   * Mesma confirmação visual, agora na EDIÇÃO de uma câmera já salva. O campo de
+   * senha da tela de edição vem em branco quando o técnico não quer trocá-la —
+   * nesse caso usamos a senha guardada. Assim ele consegue conferir a imagem
+   * depois de mudar só o IP, ANTES de salvar por cima.
+   */
+  async capturePreviewFrameForCamera(
+    id: string,
+    overrides?: {
+      ip?: string | null;
+      rtspPort?: number | null;
+      username?: string | null;
+      password?: string | null;
+      rtspPath?: string | null;
+      channel?: number | null;
+      subtype?: number | null;
+    },
+  ): Promise<SnapshotResult> {
+    const camera = await this.getCameraOrThrow(id);
+    const liveProfile = resolveLiveRtspProfile(camera);
+    const overridePassword = overrides?.password?.trim();
+    const targetIp = overrides?.ip?.trim() || camera.ip;
+    return this.capturePreviewFrame(
+      {
+        ip: targetIp,
+        rtspPort: Number(overrides?.rtspPort ?? camera.rtspPort),
+        username: overrides?.username?.trim() || camera.username,
+        password: overridePassword || this.cryptoService.decrypt(camera.passwordEncrypted),
+        rtspPath: overrides?.rtspPath?.trim() || camera.rtspPath,
+        channel: overrides?.channel ?? liveProfile.channel,
+        subtype: overrides?.subtype ?? liveProfile.subtype,
+        preferredRtspTransport: camera.preferredRtspTransport,
+      },
+      // Só o endereço JÁ PROVISIONADO dispensa a guarda. Assim que o técnico
+      // digita um IP diferente, o alvo volta a ser entrada do usuário e a
+      // proteção contra SSRF vale de novo.
+      { targetAlreadyProvisioned: targetIp === camera.ip },
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // DIAGNÓSTICO RICO DA CÂMERA JÁ SALVA — sob demanda.
+  //
+  // Depois de salva, a câmera virava três booleanos. Aqui a sonda do cadastro é
+  // reexecutada contra a câmera EM PRODUÇÃO e o resultado é comparado com o que
+  // está gravado: a divergência é o diagnóstico (codec trocado pelo firmware,
+  // substream que sumiu, resolução que despencou).
+  // ───────────────────────────────────────────────────────────────────────────
+  async getLiveDiagnostics(id: string): Promise<CameraDiagnosticsReport & { cameraId: string; cameraName: string }> {
+    const camera = await this.getCameraOrThrow(id);
+    const checkedAt = new Date().toISOString();
+    const liveProfile = resolveLiveRtspProfile(camera);
+    const analyticsProfile = resolveAnalyticsRtspProfile(camera);
+    const rawRecordingMode = String(this.configService.get<string>('recordingCodecMode') ?? 'copy').toLowerCase();
+    const recordingCodecMode = rawRecordingMode === 'h265' || rawRecordingMode === 'h264' ? rawRecordingMode : 'copy';
+
+    const configured = {
+      videoCodec: camera.detectedVideoCodec ?? camera.streamVideoCodec ?? null,
+      width: camera.detectedWidth ?? null,
+      height: camera.detectedHeight ?? null,
+      fps: camera.detectedFps ?? null,
+      rtspPort: camera.rtspPort,
+      rtspPath: camera.rtspPath,
+      audioEnabled: Boolean(camera.audioEnabled),
+      liveSubtype: liveProfile.subtype,
+      analyticsSubtype: analyticsProfile.subtype,
+      recordingCodecMode: recordingCodecMode as 'copy' | 'h265' | 'h264',
+    };
+
+    let detected: {
+      reachable: boolean;
+      main: DiagnosticsStreamFacts | null;
+      sub: DiagnosticsStreamFacts | null;
+      error: string | null;
+    } = { reachable: false, main: null, sub: null, error: null };
+
+    try {
+      const secret = this.cryptoService.decrypt(camera.passwordEncrypted);
+      const probeProfile = async (profile: { channel: number; subtype: number }, customPath: string | null) => {
+        const result = await this.probeRtspPaths({
+          ip: camera.ip,
+          rtspPorts: [camera.rtspPort],
+          username: camera.username,
+          password: secret,
+          paths: this.buildRtspPathCandidates({
+            channel: profile.channel,
+            subtype: profile.subtype,
+            customPath,
+          }),
+        });
+        return result;
+      };
+
+      const [mainProbe, subProbe] = await Promise.all([
+        probeProfile(liveProfile, camera.rtspPath),
+        probeProfile(analyticsProfile, null),
+      ]);
+
+      detected = {
+        reachable: mainProbe.ok,
+        main: mainProbe.ok
+          ? { ...(mainProbe.metadata ?? {}), rtspPort: mainProbe.port, rtspPath: mainProbe.path }
+          : null,
+        sub: subProbe.ok
+          ? { ...(subProbe.metadata ?? {}), rtspPort: subProbe.port, rtspPath: subProbe.path }
+          : null,
+        // O erro já sai sanitizado da sonda; o relatório sanitiza de novo porque
+        // o stderr do ffprobe é a origem clássica de vazamento de credencial.
+        error: mainProbe.ok ? null : mainProbe.error,
+      };
+    } catch (error) {
+      this.logger.warn(`Diagnóstico ao vivo falhou camera=${id}: ${sanitizeSensitiveText(error)}`);
+      detected = { reachable: false, main: null, sub: null, error: sanitizeSensitiveText(error) };
+    }
+
+    return {
+      cameraId: camera.id,
+      cameraName: camera.name,
+      ...buildCameraDiagnosticsReport({ checkedAt, configured, detected }),
+    };
+  }
+
   private buildRtspPathCandidates(input: { channel?: number | null; subtype?: number | null; customPath?: string | null }) {
     const channel = input.channel ?? 1;
     const subtype = input.subtype ?? 0;
@@ -1221,7 +1507,12 @@ export class CamerasService {
       metadata: ProbedStreamMetadata;
       score: number;
     }> = [];
-    const concurrency = Math.max(1, Math.min(6, Number(process.env.CAMERA_RTSP_PROBE_CONCURRENCY ?? 4)));
+    const concurrency = envNumber('CAMERA_RTSP_PROBE_CONCURRENCY', 4, {
+      min: 1,
+      max: 6,
+      integer: true,
+      onInvalid: (message) => this.logger.warn(message),
+    });
     const probePath = async (port: number, path: string) => {
       const url = `rtsp://${encodeURIComponent(input.username)}:${encodeURIComponent(input.password)}@${input.ip}:${port}${path}`;
       const result = await new Promise<{ ok: boolean; error: string | null; metadata: ProbedStreamMetadata | null }>((resolve) => {
