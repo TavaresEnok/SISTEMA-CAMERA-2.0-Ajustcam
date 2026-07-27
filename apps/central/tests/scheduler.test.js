@@ -535,16 +535,21 @@ test('fencing: tokens NUNCA são reaproveitados — nem os de câmeras que saír
 });
 
 // ── 8) FLAG (default DESLIGADO) ─────────────────────────────────────────────
-test('flag: o default é DESLIGADO e só "true"/"1" explícito liga', () => {
-  assert.equal(DEFAULT_SCHEDULER_CONFIG.enabled, false);
-  assert.equal(schedulerConfigFromEnv({}).enabled, false);
-  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: '' }).enabled, false);
-  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'sim' }).enabled, false);
-  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'on' }).enabled, false);
-  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'false' }).enabled, false);
+// REBASELINE consciente: o disjuntor de AMBIENTE passou a nascer LIGADO, porque
+// o scheduler só PLANEJA (sem nós, plano vazio = risco zero) e mantê-lo off
+// obrigaria a editar .env + recriar container só para ver a tela — a dependência
+// de linha de comando que o painel existe para eliminar. Quem escalona de fato é
+// o liga/desliga POR INSTALAÇÃO, que segue nascendo DESLIGADO (teste abaixo).
+test('disjuntor de ambiente: default LIGADO; só "false"/"0"/"off" explícito derruba', () => {
+  assert.equal(DEFAULT_SCHEDULER_CONFIG.enabled, true);
+  assert.equal(schedulerConfigFromEnv({}).enabled, true, 'sem a variável, as rotas existem');
+  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: '' }).enabled, true);
   assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'true' }).enabled, true);
-  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'TRUE' }).enabled, true);
   assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: '1' }).enabled, true);
+  // O kill switch continua funcionando — é o que importa preservar.
+  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'false' }).enabled, false);
+  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: '0' }).enabled, false);
+  assert.equal(schedulerConfigFromEnv({ DRAC_CENTRAL_SCHEDULER_ENABLED: 'off' }).enabled, false);
 });
 
 test('config: valores inválidos caem no default; resolve é idempotente', () => {

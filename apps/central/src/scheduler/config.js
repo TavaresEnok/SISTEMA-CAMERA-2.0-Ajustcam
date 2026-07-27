@@ -2,17 +2,26 @@
 
 // ── Fase 4 — Scheduler multi-nó: CONFIGURAÇÃO + FLAG ─────────────────────────
 //
-// A flag é a coisa mais importante deste módulo. O scheduler nasce DESLIGADO:
-// com `enabled:false` o servidor NEM REGISTRA as rotas, não lê nem escreve nada,
-// e o registro de nós (datastore/compute-nodes.js) continua exatamente tão
-// INERTE quanto é hoje. Produção não pode notar diferença nenhuma.
+// DOIS níveis de liga/desliga, de propósito:
 //
-// Só o valor EXPLÍCITO "true"/"1" liga. Qualquer outra coisa (vazio, "sim",
-// "yes", "on", lixo, variável ausente) é DESLIGADO — um typo no .env não pode
-// ligar um control-plane por acidente.
+//  1. Esta flag de AMBIENTE (`DRAC_CENTRAL_SCHEDULER_ENABLED`) governa a
+//     DISPONIBILIDADE das rotas — é o disjuntor da Central inteira. Nasce LIGADA
+//     porque o scheduler apenas PLANEJA (não executa nada em nó nenhum) e, sem
+//     nós cadastrados, o plano é vazio: risco operacional zero. Deixá-la
+//     desligada obrigaria a editar .env e recriar o container só para ver a tela,
+//     que é exatamente a dependência de linha de comando que queremos eliminar.
+//     Quem quiser sumir com o recurso põe explicitamente "false".
+//
+//  2. O liga/desliga POR INSTALAÇÃO (`schedulerEnabled`, dado no registro da
+//     instalação, editável pelo painel) governa se aquele cliente é de fato
+//     escalonado. Nasce DESLIGADO em toda instalação — nenhuma passa a ser
+//     planejada sem alguém decidir isso na tela.
+//
+// Só o valor EXPLÍCITO "false"/"0"/"off" desliga o nível 1. No nível 2, ao
+// contrário, só "true" liga — um typo nunca escalona um cliente por acidente.
 
 const DEFAULT_SCHEDULER_CONFIG = Object.freeze({
-  enabled: false,
+  enabled: true,
   // Validade do lease de uma atribuição. O nó precisa renovar (fase futura);
   // depois disso a atribuição é considerada expirada por leases.checkFencing.
   leaseTtlSeconds: 120,
@@ -64,7 +73,8 @@ function resolveSchedulerConfig(partial) {
 function schedulerConfigFromEnv(env) {
   const source = env && typeof env === 'object' ? env : process.env;
   return resolveSchedulerConfig({
-    enabled: readBool(source.DRAC_CENTRAL_SCHEDULER_ENABLED, false),
+    // Disjuntor da Central: só um "false"/"0"/"off" EXPLÍCITO derruba as rotas.
+    enabled: readBool(source.DRAC_CENTRAL_SCHEDULER_ENABLED, DEFAULT_SCHEDULER_CONFIG.enabled),
     leaseTtlSeconds: source.DRAC_CENTRAL_SCHEDULER_LEASE_SECONDS,
     nodeDeadAfterSeconds: source.DRAC_CENTRAL_SCHEDULER_NODE_DEAD_SECONDS,
     defaultNodeCapacity: source.DRAC_CENTRAL_SCHEDULER_DEFAULT_CAPACITY,

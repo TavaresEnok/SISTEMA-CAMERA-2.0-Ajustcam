@@ -645,6 +645,10 @@ function publicInstallation(item) {
     app: item.app || null,
     updatedAt: item.updatedAt || null,
     ...(computeNodes.length ? { computeNodes } : {}),
+    // Liga/desliga do scheduler POR INSTALAÇÃO, editável pelo painel. Sempre
+    // presente (booleano) para a tela poder desenhar o estado do interruptor sem
+    // adivinhar; ausente no registro = desligado.
+    schedulerEnabled: item.schedulerEnabled === true,
   };
 }
 
@@ -1437,7 +1441,44 @@ async function handleGetSchedulerPlan(req, res, db, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
   await saveDb(db);
-  return json(req, res, 200, scheduler.planView(item));
+  // O painel precisa saber o estado do interruptor mesmo com ele DESLIGADO (é
+  // como desenha a tela). `enabled` na resposta é o interruptor DESTA instalação
+  // e vem DEPOIS do spread de propósito: o `enabled` do planView significa outra
+  // coisa (recurso disponível na Central — sempre true dentro desta rota) e
+  // sobrescreveria o valor real se viesse por último.
+  return json(req, res, 200, {
+    ...scheduler.planView(item),
+    featureAvailable: true,
+    enabled: item.schedulerEnabled === true,
+  });
+}
+
+/**
+ * Liga/desliga o scheduler DESTA instalação pelo painel — o que tira a operação
+ * de escala da linha de comando (era env + recriar container). Desligar NÃO apaga
+ * os nós nem o plano salvo: só para de escalonar, e religar retoma de onde parou
+ * (o replanejamento minimiza migração a partir do plano anterior).
+ */
+async function handlePatchSchedulerEnabled(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  const body = await readBody(req);
+  if (typeof body.enabled !== 'boolean') {
+    return json(req, res, 400, { error: 'invalid_scheduler_payload', details: ['enabled deve ser boolean'] });
+  }
+  const previous = item.schedulerEnabled === true;
+  item.schedulerEnabled = body.enabled;
+  item.updatedAt = new Date().toISOString();
+  addAuditEvent(db, req, {
+    type: 'installation.scheduler_toggled',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    from: previous,
+    to: body.enabled,
+  });
+  await saveDb(db);
+  return json(req, res, 200, publicInstallation(item));
 }
 
 // POST: força o replanejamento. `previous` é o plano salvo (ou, na primeira vez,
@@ -1948,6 +1989,9 @@ async function route(req, res) {
         const schedulerMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/scheduler$/);
         if (req.method === 'GET' && schedulerMatch) {
           return handleGetSchedulerPlan(req, res, db, decodeURIComponent(schedulerMatch[1]));
+        }
+        if (req.method === 'PATCH' && schedulerMatch) {
+          return handlePatchSchedulerEnabled(req, res, db, actor, decodeURIComponent(schedulerMatch[1]));
         }
         const replanMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/scheduler\/replan$/);
         if (req.method === 'POST' && replanMatch) {

@@ -1551,6 +1551,119 @@
           render();
         }));
       }
+      // ── Escala · nós de computação (Fase 4) ────────────────────────────────
+      // Tira a operação de escala da linha de comando: cadastro de nós e o
+      // liga/desliga do scheduler passam a ser cliques. Degrada com elegância —
+      // se a Central estiver com o recurso derrubado (disjuntor de ambiente em
+      // "false"), a rota 404 e a seção só informa isso, sem quebrar o painel.
+      // TODO dado vindo do servidor passa por escapeHtml (o painel já sofreu XSS
+      // armazenado; host/label de nó são texto livre digitado por humano).
+      async function renderScaleSection(installationId) {
+        const body = document.getElementById('scale-body');
+        if (!body) return;
+        let view = null;
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/scheduler`), { credentials: 'include' });
+          if (res.status === 404) {
+            body.innerHTML = '<div class="empty">Recurso de escala indisponível nesta Central.</div>';
+            return;
+          }
+          if (!res.ok) throw new Error(String(res.status));
+          view = await res.json();
+        } catch {
+          body.innerHTML = '<div class="empty">Não foi possível carregar o estado da escala.</div>';
+          return;
+        }
+
+        const nodes = Array.isArray(view.nodes) ? view.nodes : (selectedItem()?.computeNodes || []);
+        const assignments = Array.isArray(view.plan?.assignments) ? view.plan.assignments : [];
+        const porNo = new Map();
+        for (const a of assignments) {
+          const k = String(a.nodeId ?? '');
+          porNo.set(k, (porNo.get(k) || 0) + 1);
+        }
+
+        const linhas = nodes.length
+          ? nodes.map((n) => `
+              <tr>
+                <td>${escapeHtml(n.label || n.id || '-')}</td>
+                <td>${escapeHtml(n.role || 'worker')}</td>
+                <td>${escapeHtml(String(n.host || '-'))}</td>
+                <td>${fmt.format(number(n.capacity ?? 0))}</td>
+                <td>${fmt.format(porNo.get(String(n.id)) || 0)}</td>
+                <td><button class="ghost scale-del" data-node="${escapeHtml(String(n.id))}">Remover</button></td>
+              </tr>`).join('')
+          : '<tr><td colspan="6" style="opacity:.7">Nenhum nó cadastrado. Enquanto não houver, tudo roda no servidor primário.</td></tr>';
+
+        body.innerHTML = `
+          <div class="kv" style="margin-bottom:10px">
+            <div>Escalonamento</div>
+            <div>
+              <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="scale-toggle" ${view.enabled ? 'checked' : ''} />
+                <span>${view.enabled ? 'Ligado' : 'Desligado'}</span>
+              </label>
+            </div>
+            <div>Câmeras atribuídas</div><div>${fmt.format(assignments.length)}</div>
+            <div>Plano</div><div>${view.stale ? '<span class="badge warn">desatualizado</span>' : (view.planned ? '<span class="badge ok">em dia</span>' : '<span class="badge neutral">não planejado</span>')}</div>
+          </div>
+          <table class="scale-table" style="width:100%;font-size:12px">
+            <thead><tr><th>Nó</th><th>Papel</th><th>Host</th><th>Capacidade</th><th>Câmeras</th><th></th></tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>
+          <div class="license-actions" style="margin-top:10px;flex-wrap:wrap;gap:6px">
+            <input id="scale-label" placeholder="nome do nó" style="max-width:150px" />
+            <input id="scale-host" placeholder="host/IP" style="max-width:150px" />
+            <input id="scale-cap" type="number" min="1" placeholder="capacidade" style="max-width:110px" />
+            <select id="scale-role"><option value="worker">worker</option><option value="primary">primário</option></select>
+            <button id="scale-add" class="primary">Adicionar nó</button>
+            <button id="scale-replan" class="ghost">Replanejar</button>
+          </div>`;
+
+        body.querySelector('#scale-toggle')?.addEventListener('change', async (ev) => {
+          await scaleRequest(installationId, '/scheduler', 'PATCH', { enabled: ev.target.checked });
+        });
+        body.querySelector('#scale-add')?.addEventListener('click', async () => {
+          const label = body.querySelector('#scale-label').value.trim();
+          const host = body.querySelector('#scale-host').value.trim();
+          const capacity = Number(body.querySelector('#scale-cap').value);
+          const role = body.querySelector('#scale-role').value;
+          if (!label && !host) return;
+          const atuais = (selectedItem()?.computeNodes || []).slice();
+          atuais.push({
+            id: (label || host).toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 40) || `no-${atuais.length + 1}`,
+            label: label || host, host, role,
+            ...(Number.isFinite(capacity) && capacity > 0 ? { capacity } : {}),
+          });
+          await scaleRequest(installationId, '/compute-nodes', 'PATCH', { computeNodes: atuais });
+        });
+        body.querySelectorAll('.scale-del').forEach((btn) => btn.addEventListener('click', async () => {
+          const alvo = btn.getAttribute('data-node');
+          const restantes = (selectedItem()?.computeNodes || []).filter((n) => String(n.id) !== alvo);
+          await scaleRequest(installationId, '/compute-nodes', 'PATCH', { computeNodes: restantes });
+        }));
+        body.querySelector('#scale-replan')?.addEventListener('click', async () => {
+          await scaleRequest(installationId, '/scheduler/replan', 'POST', {});
+        });
+      }
+
+      // Chamada + recarga do painel. Falha nunca deixa a seção em estado mentiroso:
+      // recarregamos do servidor em vez de assumir que a escrita deu certo.
+      async function scaleRequest(installationId, suffix, method, payload) {
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}${suffix}`), {
+            method, credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error(String(res.status));
+        } catch {
+          /* estado real vem do reload abaixo */
+        }
+        await load().catch(() => undefined);
+        renderDetail();
+      }
+
       function renderDetail() {
         const item = selectedItem();
         if (!item) {
@@ -1653,7 +1766,12 @@
                 </div>
               </div>
             `}
+            <div class="section" id="scale-section">
+              <div class="section-title">Escala · nós de computação</div>
+              <div id="scale-body"><div class="empty">Carregando…</div></div>
+            </div>
           </div>`;
+        renderScaleSection(item.id);
         els.detail.querySelector('#save-license').addEventListener('click', () => requestContractChange(item.id, els.detail.querySelector('#license-select').value, els.detail.querySelector('#license-message').value.trim()));
         els.detail.querySelector('#suspend-license').addEventListener('click', () => requestContractChange(item.id, 'SUSPENDED', els.detail.querySelector('#license-message').value.trim() || 'Suspensão administrativa.'));
         els.detail.querySelector('#copy-selected-diagnostics')?.addEventListener('click', () => copyDiagnosticsFor(item.id));

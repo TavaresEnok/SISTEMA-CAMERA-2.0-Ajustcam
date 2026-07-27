@@ -16,6 +16,10 @@ const { ADMIN_TOKEN, startCentral } = require('./helpers/central-server');
 
 const admin = (extra = {}) => ({ authorization: `Bearer ${ADMIN_TOKEN}`, 'content-type': 'application/json', ...extra });
 const LIGADO = { DRAC_CENTRAL_SCHEDULER_ENABLED: 'true' };
+// Kill switch EXPLÍCITO: o disjuntor passou a nascer ligado (o painel precisa das
+// rotas para desenhar o interruptor por instalação), então derrubá-lo agora exige
+// dizer 'false'. O que importa preservar é que, dito isso, some tudo.
+const DESLIGADO = { DRAC_CENTRAL_SCHEDULER_ENABLED: 'false' };
 
 const NOS = [
   { id: 'no-a', role: 'primary', capacity: 4, cameras: ['cam-01', 'cam-02'] },
@@ -43,9 +47,9 @@ async function lerRegistro(central, id) {
   return JSON.parse(raw).installations[id];
 }
 
-// ── FLAG DESLIGADA (default) ────────────────────────────────────────────────
-test('flag OFF (default): as rotas do scheduler NÃO existem e nada é gravado', async (t) => {
-  const central = await startCentral();
+// ── KILL SWITCH EXPLÍCITO ───────────────────────────────────────────────────
+test('disjuntor em false: as rotas do scheduler NÃO existem e nada é gravado', async (t) => {
+  const central = await startCentral(DESLIGADO);
   t.after(() => central.stop());
   const id = await preparar(central);
 
@@ -89,7 +93,11 @@ test('flag ON: consultar o plano, forçar replanejamento e persistir o resultado
   const antes = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, { headers: admin() });
   assert.equal(antes.status, 200);
   const viewAntes = await antes.json();
-  assert.equal(viewAntes.enabled, true);
+  // Semântica atual: `featureAvailable` = recurso disponível na Central (disjuntor
+  // de ambiente); `enabled` = ESTA instalação é escalonada (interruptor do painel,
+  // que nasce desligado). Antes os dois eram a mesma coisa e `enabled` era true aqui.
+  assert.equal(viewAntes.featureAvailable, true);
+  assert.equal(viewAntes.enabled, false, 'a instalação ainda não foi ligada no painel');
   assert.equal(viewAntes.planned, false);
   assert.equal(viewAntes.plan, null);
   assert.equal(viewAntes.stale, true);
@@ -259,4 +267,49 @@ test('flag ON: as rotas existentes continuam idênticas (o scheduler não vaza)'
   const registro = await lerRegistro(central, id);
   assert.equal('computeNodes' in registro, false);
   assert.ok(registro.schedulerPlan, 'o plano salvo sobrevive à edição do registro (replanejar é explícito)');
+});
+
+// ── INTERRUPTOR POR INSTALAÇÃO (o que o painel opera) ───────────────────────
+// Tira a operação de escala da linha de comando: era env + recriar container.
+test('interruptor por instalação: nasce DESLIGADO e é ligado/desligado pelo painel', async (t) => {
+  const central = await startCentral(LIGADO);
+  t.after(() => central.stop());
+  const id = await preparar(central);
+
+  const inicial = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, { headers: admin() });
+  assert.equal(inicial.status, 200);
+  assert.equal((await inicial.json()).enabled, false, 'nenhuma instalação é escalonada sem alguém decidir isso');
+
+  const ligar = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, {
+    method: 'PATCH', headers: admin(), body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(ligar.status, 200);
+  assert.equal((await ligar.json()).schedulerEnabled, true);
+
+  const depois = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, { headers: admin() });
+  assert.equal((await depois.json()).enabled, true, 'o estado precisa persistir');
+
+  const desligar = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, {
+    method: 'PATCH', headers: admin(), body: JSON.stringify({ enabled: false }),
+  });
+  assert.equal((await desligar.json()).schedulerEnabled, false);
+
+  // Desligar NÃO pode apagar os nós — religar deve retomar de onde parou.
+  const registro = await lerRegistro(central, id);
+  assert.equal(registro.computeNodes.length, 2, 'desligar o scheduler não descadastra os nós');
+});
+
+test('interruptor: payload sem boolean é 400 e não altera nada', async (t) => {
+  const central = await startCentral(LIGADO);
+  t.after(() => central.stop());
+  const id = await preparar(central);
+
+  for (const corpo of [{}, { enabled: 'true' }, { enabled: 1 }, { ligado: true }]) {
+    const r = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, {
+      method: 'PATCH', headers: admin(), body: JSON.stringify(corpo),
+    });
+    assert.equal(r.status, 400, `corpo ${JSON.stringify(corpo)} deveria ser rejeitado`);
+  }
+  const estado = await fetch(`${central.base}/api/admin/installations/${id}/scheduler`, { headers: admin() });
+  assert.equal((await estado.json()).enabled, false, 'payload inválido não pode ligar por acidente');
 });
