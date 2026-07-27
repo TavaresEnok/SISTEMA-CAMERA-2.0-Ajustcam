@@ -61,6 +61,27 @@ SQL
 )
 assert_eq "SEM RLS -> vaza os 2 tenants (prova que era o RLS que isolava)" 3 "$got"
 
+# FAIL-CLOSED (estado-alvo do rollout): sem o GUC, nega TUDO — esquecer o
+# `SET LOCAL app.current_tenant` vira erro visível, não vazamento entre tenants.
+docker exec -i "$CT" psql -U postgres -d rls -q >/dev/null <<'SQL'
+ALTER TABLE demo ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS drac_tenant_isolation ON demo;
+CREATE POLICY drac_tenant_isolation ON demo
+  USING ("tenantId" = current_setting('app.current_tenant', true));
+SQL
+
+got=$(q <<'SQL'
+SET ROLE app_role; SET app.current_tenant = 'A'; SELECT count(*) FROM demo;
+SQL
+)
+assert_eq "fail-closed: com tenant setado, isola normalmente" 2 "$got"
+
+got=$(q <<'SQL'
+SET ROLE app_role; SELECT count(*) FROM demo;
+SQL
+)
+assert_eq "fail-closed: SEM tenant setado -> NEGA tudo (nao vaza)" 0 "$got"
+
 echo ""
-[ "$fail" = 0 ] && echo "RLS PROVADO: isolamento + backward-compat + dentes." || echo "RLS FALHOU."
+[ "$fail" = 0 ] && echo "RLS PROVADO: isolamento + backward-compat + dentes + fail-closed." || echo "RLS FALHOU."
 exit "$fail"
