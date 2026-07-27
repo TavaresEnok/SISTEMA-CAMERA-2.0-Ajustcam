@@ -53,6 +53,25 @@ import {
   type VodPlaylist,
   type VodPlaylistSegment,
 } from '../lib/vod-continuous';
+import {
+  TIMELINE_MAX_ZOOM,
+  TIMELINE_TOTAL_MINUTES,
+  chunkRanges,
+  computeListWindow,
+  computeVisibleWindow,
+  coverageFromGaps,
+  limitWindowAround,
+  mergeByIdSorted,
+  mergeRanges,
+  orderRangesByDistance,
+  planNextPage,
+  planWindowFetch,
+  selectThumbnailTargets,
+  sliceVisibleSpans,
+  subtractRanges,
+  type PagePlan,
+  type TimeRange,
+} from '../lib/timeline-window';
 
 type TimelineSegment = {
   recordingId?: string;
@@ -147,6 +166,9 @@ type ExportedClip = {
 };
 
 type PlaybackEvent = {
+  // O id vem do feed e serve para deduplicar janelas que se sobrepõem — sem ele,
+  // o mesmo evento entraria duas vezes na régua ao mover a faixa visível.
+  id: string;
   timestamp: string;
   severity: string;
 };
@@ -167,8 +189,42 @@ const API_URL = getApiBaseUrl();
 const SPEEDS = ['0.25x', '0.5x', '1x', '2x', '4x', '8x'];
 // Mesmo limite do backend (tamanho do token JWT na URL do download).
 const ZIP_MAX_RECORDINGS = 50;
-// 192x sobre 24h = janela mínima de 7,5 min na timeline.
-const TIMELINE_MAX_ZOOM = 192;
+
+// ── TIMELINE POR JANELA (ADITIVO) ──────────────────────────────────────────
+// A régua deixa de esperar o DIA INTEIRO: um resumo barato desenha o esqueleto,
+// o detalhe vem só da faixa visível (paginada por CURSOR, não por offset
+// profundo) e o resto do dia entra em segundo plano. Toda a matemática está em
+// ../lib/timeline-window (pura e testada). QUALQUER falha aqui devolve a página
+// ao caminho antigo — o playback não pode ficar pior do que já é.
+const WINDOW_PAGE_SIZE = 200; // teto do backend em GET /recordings
+const EVENTS_PAGE_SIZE = 500; // teto do backend em GET /cameras/events-feed
+const WINDOW_PAD_MINUTES = 30; // margem além da janela visível
+// Gravação que COMEÇOU antes da janela e termina dentro dela: o backend filtra
+// por startedAt, então a consulta precisa recuar ou o trecho some da régua.
+const WINDOW_LOOKBACK_MINUTES = 120;
+// Orçamento de DETALHE por carga. No zoom padrão a janela é o dia inteiro; quem
+// desenha o resto é o esqueleto do resumo, e o detalhe fino (segmento a segmento,
+// com miniatura) vem em volta de onde o operador está.
+const WINDOW_MAX_DETAIL_MINUTES = 240;
+const WINDOW_FETCH_DEBOUNCE_MS = 250;
+const WINDOW_BACKGROUND_CHUNK_MINUTES = 180;
+const WINDOW_MAX_PAGES = 60; // trava do laço de paginação (nunca pendura a página)
+const THUMBNAIL_BATCH = 100; // mesmo lote de /recordings/thumbnail-tokens
+const RECORDING_ROW_HEIGHT_PX = 65; // linha da lista: miniatura 44 + padding 20 + borda
+const RECORDING_LIST_VIRTUALIZE_MIN = 60; // abaixo disso renderiza tudo, como sempre
+
+// Válvula de escape sem redeploy: localStorage 'drac.playback.windowed' = off/on.
+function windowedTimelineEnabled() {
+  try {
+    const flag = typeof window !== 'undefined' ? window.localStorage?.getItem('drac.playback.windowed') : null;
+    if (flag === 'off') return false;
+    if (flag === 'on') return true;
+  } catch {
+    // localStorage bloqueado (modo privado/política): segue o padrão.
+  }
+  return true;
+}
+const WINDOWED_TIMELINE = windowedTimelineEnabled();
 
 // O navegador decodifica H.265/HEVC? (Safari nativamente; Chrome/Edge quando o
 // SO/GPU tem decodificador de HEVC.) Quando sim, tocamos a gravação HEVC DIRETO
@@ -188,7 +244,7 @@ function detectHevcPlayback(): boolean {
   }
 }
 const BROWSER_PLAYS_HEVC = detectHevcPlayback();
-const TOTAL_MINS = 24 * 60;
+const TOTAL_MINS = TIMELINE_TOTAL_MINUTES;
 const API_TIMEOUT_MS = 20000;
 const PLAYBACK_TIMEOUT_DIRECT_MS = 8000;
 const PLAYBACK_TIMEOUT_COMPAT_MS = 150000; // 150s: FFmpeg HEVC→H264 pode levar até 120s na primeira execução
@@ -380,6 +436,34 @@ export default function PlaybackPage() {
   const [clipDownloadReason, setClipDownloadReason] = useState('');
   const lastThumbnailRetryRef = useRef(0);
 
+  // ── TIMELINE POR JANELA (ADITIVO) ─────────────────────────────────────────
+  // `dayCoverage` é o esqueleto vindo do resumo barato do dia (onde HÁ vídeo);
+  // `loadedRanges` são as faixas cujo DETALHE já está em memória. O esqueleto só
+  // aparece onde ainda não há detalhe. `windowedFallback` liga o caminho antigo.
+  const [dayCoverage, setDayCoverage] = useState<TimeRange[]>([]);
+  const [loadedRanges, setLoadedRanges] = useState<TimeRange[]>([]);
+  const [windowedFallback, setWindowedFallback] = useState(!WINDOWED_TIMELINE);
+  const loadKeyRef = useRef('');
+  const recordingsRef = useRef<RecordingItem[]>([]);
+  const playbackEventsRef = useRef<PlaybackEvent[]>([]);
+  // Faixas "reservadas" = já carregadas OU em voo. Evita pedir duas vezes o mesmo
+  // pedaço quando a carga de segundo plano e a panorâmica do operador se cruzam.
+  const reservedRangesRef = useRef<TimeRange[]>([]);
+  const loadedRangesRef = useRef<TimeRange[]>([]);
+  const reservedEventRangesRef = useRef<TimeRange[]>([]);
+  const loadedEventRangesRef = useRef<TimeRange[]>([]);
+  const zoomRef = useRef(1);
+  // Último recurso dos eventos: se a busca por janela falhar, cai no dia inteiro.
+  const eventsFallbackRef = useRef<(() => void) | null>(null);
+  // Quando cada token de miniatura foi emitido (para reemitir só o que venceu).
+  const thumbnailIssuedAtRef = useRef<Record<string, number>>({});
+  // Gravações cujo diagnóstico já foi pedido (o endpoint dispara ffprobe: nunca
+  // peça duas vezes o mesmo id).
+  const diagnosticsRequestedRef = useRef<Set<string>>(new Set());
+  const recordingListRef = useRef<HTMLDivElement | null>(null);
+  const listScrollFrameRef = useRef<number | null>(null);
+  const [listMetrics, setListMetrics] = useState({ scrollTopPx: 0, viewportHeightPx: 0 });
+
   // ── VOD CONTÍNUO (ADITIVO) ────────────────────────────────────────────────
   // UMA playlist por câmera+dia (GET /recordings/vod.m3u8?format=json) descreve o
   // dia inteiro: ordem dos segmentos, duração real, offset acumulado e um token
@@ -524,22 +608,160 @@ export default function PlaybackPage() {
     };
   }, [accessToken, client, requestedAt, selectedCamId]);
 
+  // ── CARGA POR JANELA ──────────────────────────────────────────────────────
+  // Busca UMA faixa de tempo paginando por CURSOR (o carimbo do último item),
+  // em vez de offset profundo. A trava de páginas fecha o laço mesmo se o
+  // backend responder algo inesperado — a página nunca fica pendurada.
+  const fetchRangeItems = useCallback(async <T,>(
+    path: string,
+    params: Record<string, string | number>,
+    range: TimeRange,
+    dayStartMs: number,
+    pageSize: number,
+    getTimestamp: (item: T) => string | null,
+    direction: 'asc' | 'desc',
+  ): Promise<T[]> => {
+    const dayEndMs = dayStartMs + TOTAL_MINS * 60_000 - 1;
+    const toIso = (minute: number) => new Date(Math.min(dayStartMs + minute * 60_000, dayEndMs)).toISOString();
+    let plan: PagePlan | null = { from: toIso(range.start), to: toIso(range.end), offset: 0 };
+    const collected: T[] = [];
+    for (let page = 0; plan && page < WINDOW_MAX_PAGES; page += 1) {
+      const { data } = await client.get<PaginatedResponse<T>>(path, {
+        params: { ...params, from: plan.from, to: plan.to, limit: pageSize, offset: plan.offset },
+        timeout: API_TIMEOUT_MS,
+      });
+      const items = Array.isArray(data?.items) ? data.items : [];
+      collected.push(...items);
+      const lastTimestamp = items.length ? getTimestamp(items[items.length - 1]) : null;
+      plan = planNextPage({ plan, pageLength: items.length, pageSize, lastTimestamp, direction });
+    }
+    return collected;
+  }, [client]);
+
+  // Carrega faixas de GRAVAÇÃO e funde no que já existe. Cada faixa que chega já
+  // aparece na régua (não espera as outras). Falha devolve a reserva para que a
+  // faixa possa ser tentada de novo.
+  const loadRecordingRanges = useCallback(async (
+    ranges: TimeRange[],
+    key: string,
+    dayStartMs: number,
+    cameraId: string,
+  ) => {
+    if (!ranges.length) return;
+    reservedRangesRef.current = mergeRanges([...reservedRangesRef.current, ...ranges]);
+    try {
+      for (const range of ranges) {
+        const items = await fetchRangeItems<RecordingItem>(
+          '/recordings',
+          { cameraId, sort: 'asc' },
+          range,
+          dayStartMs,
+          WINDOW_PAGE_SIZE,
+          (item) => item.startedAt,
+          'asc',
+        );
+        if (loadKeyRef.current !== key) return;
+        recordingsRef.current = mergeByIdSorted(recordingsRef.current, items, (item) => item.id, (item) => item.startedAt);
+        setRecordings(recordingsRef.current);
+        loadedRangesRef.current = mergeRanges([...loadedRangesRef.current, range]);
+        setLoadedRanges(loadedRangesRef.current);
+      }
+    } catch (error) {
+      if (loadKeyRef.current === key) reservedRangesRef.current = [...loadedRangesRef.current];
+      throw error;
+    }
+  }, [fetchRangeItems]);
+
+  // Eventos (marcadores de movimento/alarme na régua). São PONTOS no tempo, então
+  // não precisam de recuo. Falhar aqui é cosmético: a régua fica sem marcador
+  // naquela faixa, nunca sem gravação.
+  const loadEventRanges = useCallback(async (
+    ranges: TimeRange[],
+    key: string,
+    dayStartMs: number,
+    cameraId: string,
+  ) => {
+    if (!ranges.length) return;
+    reservedEventRangesRef.current = mergeRanges([...reservedEventRangesRef.current, ...ranges]);
+    try {
+      for (const range of ranges) {
+        const items = await fetchRangeItems<{ id: string; occurredAt: string; severity?: string }>(
+          '/cameras/events-feed',
+          { cameraId },
+          range,
+          dayStartMs,
+          EVENTS_PAGE_SIZE,
+          (item) => item.occurredAt,
+          'desc',
+        );
+        if (loadKeyRef.current !== key) return;
+        playbackEventsRef.current = mergeByIdSorted(
+          playbackEventsRef.current,
+          items.map((event) => ({
+            id: String(event.id),
+            timestamp: event.occurredAt,
+            severity: String(event.severity ?? 'info').toLowerCase(),
+          })),
+          (event) => event.id,
+          (event) => event.timestamp,
+        );
+        setPlaybackEvents(playbackEventsRef.current);
+        loadedEventRangesRef.current = mergeRanges([...loadedEventRangesRef.current, range]);
+      }
+    } catch (error) {
+      if (loadKeyRef.current === key) reservedEventRangesRef.current = [...loadedEventRangesRef.current];
+      throw error;
+    }
+  }, [fetchRangeItems]);
+
   useEffect(() => {
     if (!accessToken || !selectedCamId || !selectedDate) return;
     let cancelled = false;
+    const key = `${selectedCamId}|${selectedDate}`;
+    loadKeyRef.current = key;
+    recordingsRef.current = [];
+    reservedRangesRef.current = [];
+    loadedRangesRef.current = [];
+    setLoadedRanges([]);
+    setDayCoverage([]);
+    setWindowedFallback(!WINDOWED_TIMELINE);
     setLoadingRecordings(true);
     setLastExportedClip(null);
     setDiagnosticsByRecordingId({});
 
     const range = localDayRange(selectedDate);
-    void fetchAllPages<RecordingItem>(client, '/recordings', {
+    const dayStartMs = new Date(`${selectedDate}T00:00:00`).getTime();
+
+    // Regra de posicionamento inicial — a MESMA de sempre: o instante pedido
+    // (?at= / fila de Revisão) manda; senão, a última gravação do dia.
+    const applyInitialPlayhead = (items: RecordingItem[]) => {
+      const requestedTarget = requestedAt ? new Date(requestedAt) : null;
+      const useRequestedTarget = requestedTarget
+        && !Number.isNaN(requestedTarget.getTime())
+        && format(requestedTarget, 'yyyy-MM-dd') === selectedDate;
+      const minute = clamp(
+        useRequestedTarget ? minuteOfDay(requestedTarget) : minuteOfDay(items[items.length - 1].startedAt),
+        0,
+        TOTAL_MINS,
+      );
+      setPlayhead(minute);
+      setViewCenter(minute);
+    };
+
+    // Caminho ANTIGO, intacto: dia inteiro de uma vez. É para onde qualquer
+    // falha do caminho por janela cai.
+    const loadWholeDay = () => fetchAllPages<RecordingItem>(client, '/recordings', {
       cameraId: selectedCamId,
       from: range.from,
       to: range.to,
       sort: 'asc',
     }, 200)
       .then((items) => {
-        if (cancelled) return;
+        if (cancelled || loadKeyRef.current !== key) return;
+        recordingsRef.current = items;
+        loadedRangesRef.current = [{ start: 0, end: TOTAL_MINS }];
+        reservedRangesRef.current = [...loadedRangesRef.current];
+        setLoadedRanges(loadedRangesRef.current);
         setRecordings(items);
         if (!items.length) {
           setSelectedRecordingId(null);
@@ -553,15 +775,12 @@ export default function PlaybackPage() {
           setVideoError('As gravações deste dia foram listadas, mas os arquivos estão ausentes, vazios ou incompletos no disco.');
           return;
         }
-        const requestedTarget = requestedAt ? new Date(requestedAt) : null;
-        const useRequestedTarget = requestedTarget
-          && !Number.isNaN(requestedTarget.getTime())
-          && format(requestedTarget, 'yyyy-MM-dd') === selectedDate;
-        setPlayhead(clamp(useRequestedTarget ? minuteOfDay(requestedTarget) : minuteOfDay(items[items.length - 1].startedAt), 0, TOTAL_MINS));
+        applyInitialPlayhead(items);
       })
       .catch((error) => {
-        if (cancelled) return;
+        if (cancelled || loadKeyRef.current !== key) return;
         setRecordings([]);
+        recordingsRef.current = [];
         toast({
           title: 'Falha ao carregar gravações',
           description: error instanceof Error ? error.message : 'Não foi possível carregar as gravações desta câmera.',
@@ -569,101 +788,180 @@ export default function PlaybackPage() {
         });
       })
       .finally(() => {
-        if (!cancelled) setLoadingRecordings(false);
+        if (!cancelled && loadKeyRef.current === key) setLoadingRecordings(false);
       });
+
+    if (!WINDOWED_TIMELINE) {
+      void loadWholeDay();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      try {
+        // 1) Resumo BARATO do dia (1 requisição): onde há vídeo, para desenhar a
+        //    régua antes de qualquer detalhe chegar.
+        const { data } = await client.get<{
+          gaps?: Array<{ startAt: string; endAt: string }>;
+          totalGaps?: number;
+        }>('/recordings/gaps-report', {
+          params: { cameraId: selectedCamId, date: selectedDate },
+          timeout: API_TIMEOUT_MS,
+        });
+        if (cancelled || loadKeyRef.current !== key) return;
+        const gaps = Array.isArray(data?.gaps) ? data.gaps : [];
+        const totalGaps = Number(data?.totalGaps ?? gaps.length);
+        const coverage = coverageFromGaps({
+          gaps,
+          dayStartMs,
+          truncated: Number.isFinite(totalGaps) && gaps.length < totalGaps,
+        });
+        if (!coverage.spans.length || coverage.lastCoveredMinute == null) {
+          // Resumo sem cobertura utilizável (dia vazio, fuso divergente, endpoint
+          // antigo): não dá para confiar nele — vai pelo caminho antigo.
+          throw new Error('resumo do dia sem cobertura utilizável');
+        }
+        setDayCoverage(coverage.spans);
+
+        // 2) Detalhe SÓ da faixa onde o operador vai cair.
+        const requestedTarget = requestedAt ? new Date(requestedAt) : null;
+        const useRequestedTarget = requestedTarget
+          && !Number.isNaN(requestedTarget.getTime())
+          && format(requestedTarget, 'yyyy-MM-dd') === selectedDate;
+        const center = clamp(
+          useRequestedTarget ? minuteOfDay(requestedTarget) : coverage.lastCoveredMinute,
+          0,
+          TOTAL_MINS,
+        );
+        setViewCenter(center);
+        const firstWindow = limitWindowAround({
+          window: computeVisibleWindow({ zoom: zoomRef.current, viewCenter: center }),
+          center,
+          maxMinutes: WINDOW_MAX_DETAIL_MINUTES,
+        });
+        await loadRecordingRanges(
+          planWindowFetch({
+            window: firstWindow,
+            loaded: [],
+            padMinutes: WINDOW_PAD_MINUTES,
+            lookbackMinutes: WINDOW_LOOKBACK_MINUTES,
+          }),
+          key,
+          dayStartMs,
+          selectedCamId,
+        );
+        if (cancelled || loadKeyRef.current !== key) return;
+        if (!recordingsRef.current.length) {
+          // O resumo prometeu vídeo e a consulta detalhada não trouxe nada: não
+          // deixe o operador com régua vazia — refaz pelo caminho antigo.
+          throw new Error('janela inicial vazia apesar do resumo');
+        }
+        applyInitialPlayhead(recordingsRef.current);
+        setLoadingRecordings(false);
+
+        // 3) Resto do dia em SEGUNDO PLANO, do mais perto da janela para o mais
+        //    longe. O estado final é idêntico ao de hoje (lista completa para
+        //    ZIP, seleção de segmento, comparação) — só que depois do 1º pixel.
+        void loadRecordingRanges(
+          orderRangesByDistance(
+            chunkRanges(
+              subtractRanges({ start: 0, end: TOTAL_MINS }, reservedRangesRef.current),
+              WINDOW_BACKGROUND_CHUNK_MINUTES,
+            ),
+            center,
+          ),
+          key,
+          dayStartMs,
+          selectedCamId,
+        ).catch(() => {
+          // Segundo plano: a janela do operador já está desenhada. O que faltar
+          // é buscado de novo quando ele mover a régua para lá.
+        });
+      } catch {
+        if (cancelled || loadKeyRef.current !== key) return;
+        setWindowedFallback(true);
+        setDayCoverage([]);
+        void loadWholeDay();
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [accessToken, client, requestedAt, selectedCamId, selectedDate]);
+  }, [accessToken, client, loadRecordingRanges, requestedAt, selectedCamId, selectedDate]);
 
   useEffect(() => {
     if (!accessToken || !selectedCamId || !selectedDate) {
       setPlaybackEvents([]);
+      playbackEventsRef.current = [];
       return;
     }
     let cancelled = false;
+    const key = `${selectedCamId}|${selectedDate}`;
+    playbackEventsRef.current = [];
+    reservedEventRangesRef.current = [];
+    loadedEventRangesRef.current = [];
+    setPlaybackEvents([]);
     const range = localDayRange(selectedDate);
-    void fetchAllPages<any>(client, '/cameras/events-feed', {
+
+    // Caminho antigo: o dia inteiro de eventos de uma vez.
+    const loadWholeDayEvents = () => fetchAllPages<any>(client, '/cameras/events-feed', {
       cameraId: selectedCamId,
       from: range.from,
       to: range.to,
-    }, 500)
+    }, EVENTS_PAGE_SIZE)
       .then((items) => {
-        if (cancelled) return;
-        setPlaybackEvents(items.map((event) => ({
+        if (cancelled || loadKeyRef.current !== key) return;
+        playbackEventsRef.current = items.map((event) => ({
+          id: String(event.id ?? event.occurredAt),
           timestamp: event.occurredAt,
           severity: String(event.severity ?? 'info').toLowerCase(),
-        })));
+        }));
+        setPlaybackEvents(playbackEventsRef.current);
+        loadedEventRangesRef.current = [{ start: 0, end: TOTAL_MINS }];
+        reservedEventRangesRef.current = [...loadedEventRangesRef.current];
       })
       .catch(() => {
-        if (!cancelled) setPlaybackEvents([]);
+        if (!cancelled) setPlaybackEvents(playbackEventsRef.current);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, client, selectedCamId, selectedDate]);
 
-  useEffect(() => {
-    if (!accessToken || !recordings.length) {
-      setDiagnosticsByRecordingId({});
-      return;
-    }
-    const ids = recordings.slice(0, 80).map((item) => item.id);
-    let cancelled = false;
-    void client.post<{ items: RecordingDiagnosticsSummary[] }>('/recordings/diagnostics/bulk', { recordingIds: ids, includeIntegrity: false })
-      .then(({ data }) => {
-        if (cancelled) return;
-        const map: Record<string, RecordingDiagnostics> = {};
-        for (const entry of Array.isArray(data.items) ? data.items : []) {
-          if (entry?.recordingId && entry?.diagnostics) {
-            map[entry.recordingId] = entry.diagnostics;
-          }
-        }
-        setDiagnosticsByRecordingId(map);
-      })
-      .catch(() => {
-        if (!cancelled) setDiagnosticsByRecordingId({});
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, client, recordings]);
-
-  useEffect(() => {
-    if (!accessToken || !recordings.length) {
-      setThumbnailUrls({});
-      setThumbnailTokens({});
-      return;
+    if (!WINDOWED_TIMELINE || windowedFallback) {
+      void loadWholeDayEvents();
+      return () => {
+        cancelled = true;
+      };
     }
 
-    let cancelled = false;
-    const ids = recordings.map((item) => item.id);
-    const batches: string[][] = [];
-    for (let index = 0; index < ids.length; index += 100) batches.push(ids.slice(index, index + 100));
-
-    void Promise.all(
-      batches.map((recordingIds) => client.post<Record<string, string>>('/recordings/thumbnail-tokens', { recordingIds })),
-    )
-      .then((responses) => {
-        if (cancelled) return;
-        const tokens: Record<string, string> = Object.assign({}, ...responses.map((response) => response.data));
-        const urls: Record<string, string> = {};
-        for (const [recordingId, token] of Object.entries(tokens)) {
-          urls[recordingId] = `${API_URL}/recordings/${encodeURIComponent(recordingId)}/thumbnail?token=${encodeURIComponent(token)}`;
-        }
-        setThumbnailUrls(urls);
-        setThumbnailTokens(tokens);
-      })
-      .catch(() => {
-        // Mantém as URLs anteriores durante falhas transitórias. Se expirarem, o
-        // onError abaixo agenda uma nova emissão de tokens.
-      });
+    // Marcador de evento só é DESENHADO dentro da janela: buscar o dia inteiro é
+    // trabalho jogado fora. Quem pede a faixa visível (e as seguintes, conforme o
+    // operador move a régua) é o efeito de janela mais abaixo.
+    eventsFallbackRef.current = () => {
+      if (!cancelled) void loadWholeDayEvents();
+    };
 
     return () => {
       cancelled = true;
     };
-  }, [accessToken, client, recordings, thumbnailRefreshNonce]);
+  }, [accessToken, client, selectedCamId, selectedDate, windowedFallback]);
+
+  // O diagnóstico em lote também virou por JANELA — procure por "DIAGNÓSTICO".
+  // (Ele dispara ffprobe no servidor para o que ainda não está em cache: pedir a
+  // lista inteira a cada pedaço de dia que chega seria uma enxurrada.)
+  useEffect(() => {
+    setDiagnosticsByRecordingId({});
+    diagnosticsRequestedRef.current = new Set();
+  }, [selectedCamId, selectedDate]);
+
+  // A emissão de token de miniatura mora mais abaixo (precisa saber o que está
+  // VISÍVEL na régua e na lista) — procure por "TOKEN DE MINIATURA".
+  useEffect(() => {
+    // Troca de câmera/data zera as miniaturas: token de gravação de outra câmera
+    // não serve, e o mapa antigo esconderia que a nova ainda não carregou.
+    setThumbnailUrls({});
+    setThumbnailTokens({});
+    thumbnailIssuedAtRef.current = {};
+  }, [selectedCamId, selectedDate]);
 
   useEffect(() => {
     if (!accessToken || !recordings.length) return;
@@ -684,6 +982,9 @@ export default function PlaybackPage() {
     const now = Date.now();
     if (now - lastThumbnailRetryRef.current < 5_000) return;
     lastThumbnailRetryRef.current = now;
+    // Miniatura quebrada = token vencido. Esquecer a hora de emissão força a
+    // reemissão de TODOS os visíveis (era o que o caminho antigo fazia).
+    thumbnailIssuedAtRef.current = {};
     setThumbnailRefreshNonce((value) => value + 1);
   }, []);
 
@@ -1214,9 +1515,73 @@ export default function PlaybackPage() {
   // A janela visível da timeline é independente do playhead: centrada em viewCenter,
   // que o usuário controla (scroll = zoom ancorado no cursor, arrastar = mover) e que
   // volta a seguir o playhead quando ele sai da área visível.
-  const zoomedWindow = TOTAL_MINS / zoom;
-  const viewStart = clamp(viewCenter - zoomedWindow / 2, 0, TOTAL_MINS - zoomedWindow);
-  const viewEnd = viewStart + zoomedWindow;
+  // Mesma conta de sempre, agora em ../lib/timeline-window (pura e testada): é
+  // ela que define o que a régua desenha E o que a página precisa buscar.
+  const visibleWindow = computeVisibleWindow({ zoom, viewCenter });
+  const zoomedWindow = visibleWindow.windowMins;
+  const viewStart = visibleWindow.start;
+  const viewEnd = visibleWindow.end;
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  // A janela mudou (zoom/panorâmica/salto): busca o DETALHE do que falta nela.
+  // Debounce para o arraste não pedir dados a cada pixel; faixa já carregada ou
+  // em voo não é pedida de novo. Falhar aqui não estraga a régua — o esqueleto
+  // do resumo continua desenhado e a próxima mexida tenta outra vez.
+  useEffect(() => {
+    if (!WINDOWED_TIMELINE || windowedFallback) return;
+    if (!accessToken || !selectedCamId || !selectedDate) return;
+    // Enquanto a carga inicial do dia não terminou, quem manda é ela (senão
+    // pediríamos a janela da câmera ANTERIOR, que ainda está na tela).
+    if (loadingRecordings || !dayCoverage.length) return;
+    const key = `${selectedCamId}|${selectedDate}`;
+    if (loadKeyRef.current !== key) return;
+    const dayStartMs = new Date(`${selectedDate}T00:00:00`).getTime();
+    // O detalhe segue o CENTRO do que está na tela, com orçamento — numa visão de
+    // 24h ninguém distingue segmento de 5 min, e o esqueleto já mostra onde há vídeo.
+    const visible = limitWindowAround({
+      window: { start: viewStart, end: viewEnd },
+      center: (viewStart + viewEnd) / 2,
+      maxMinutes: WINDOW_MAX_DETAIL_MINUTES,
+    });
+    const timer = globalThis.setTimeout(() => {
+      const recordingPlan = planWindowFetch({
+        window: visible,
+        loaded: reservedRangesRef.current,
+        padMinutes: WINDOW_PAD_MINUTES,
+        lookbackMinutes: WINDOW_LOOKBACK_MINUTES,
+      });
+      if (recordingPlan.length) {
+        void loadRecordingRanges(recordingPlan, key, dayStartMs, selectedCamId).catch(() => {
+          // A faixa volta a ficar livre; o operador tenta de novo só mexendo a régua.
+        });
+      }
+      const eventPlan = planWindowFetch({
+        window: visible,
+        loaded: reservedEventRangesRef.current,
+        padMinutes: WINDOW_PAD_MINUTES,
+      });
+      if (eventPlan.length) {
+        void loadEventRanges(eventPlan, key, dayStartMs, selectedCamId).catch(() => {
+          eventsFallbackRef.current?.();
+        });
+      }
+    }, WINDOW_FETCH_DEBOUNCE_MS);
+    return () => globalThis.clearTimeout(timer);
+  }, [
+    accessToken,
+    dayCoverage.length,
+    loadEventRanges,
+    loadRecordingRanges,
+    loadingRecordings,
+    selectedCamId,
+    selectedDate,
+    viewEnd,
+    viewStart,
+    windowedFallback,
+  ]);
 
   useEffect(() => {
     setViewCenter((center) => {
@@ -1358,6 +1723,166 @@ export default function PlaybackPage() {
     const url = `${API_URL}/recordings/${encodeURIComponent(recordingId)}/preview-sprite?token=${encodeURIComponent(token)}`;
     return { backgroundImage: `url(${url})`, backgroundSize, backgroundPosition, backgroundRepeat: 'no-repeat' as const };
   }, [timelineHover, previewMetaByRecordingId, thumbnailTokens, recordings]);
+
+  // VIRTUALIZAÇÃO DA RÉGUA: só os trechos que caem na janela vão para o DOM.
+  // Trecho PARCIALMENTE visível ENTRA (a lib garante) — sumir com gravação da
+  // linha do tempo esconderia prova.
+  const visibleTimelineSegments = useMemo(
+    () => sliceVisibleSpans(timelineSegments, { start: viewStart, end: viewEnd }),
+    [timelineSegments, viewStart, viewEnd],
+  );
+
+  // ESQUELETO: onde o resumo do dia diz que HÁ vídeo mas o detalhe ainda não
+  // chegou. Desenhado apagado, sem captura de clique (o clique na faixa continua
+  // sendo "posicionar aqui"). Sem resumo utilizável, a lista é vazia e a régua
+  // fica exatamente como era.
+  const skeletonSpans = useMemo(() => {
+    if (!WINDOWED_TIMELINE || windowedFallback || !dayCoverage.length) return [];
+    const pending = dayCoverage
+      .flatMap((span) => subtractRanges(span, loadedRanges))
+      .sort((a, b) => a.start - b.start);
+    return sliceVisibleSpans(pending, { start: viewStart, end: viewEnd }).items;
+  }, [dayCoverage, loadedRanges, viewEnd, viewStart, windowedFallback]);
+
+  // VIRTUALIZAÇÃO DA LISTA (painel da direita): linhas de altura fixa, só as que
+  // cabem na área rolável vão para o DOM. Abaixo do limiar (ou enquanto a altura
+  // não foi medida) a lib devolve a lista inteira — o render de hoje.
+  const orderedRecordings = useMemo(() => [...recordings].reverse(), [recordings]);
+  const listWindow = useMemo(() => computeListWindow({
+    itemCount: orderedRecordings.length,
+    rowHeightPx: RECORDING_ROW_HEIGHT_PX,
+    scrollTopPx: listMetrics.scrollTopPx,
+    viewportHeightPx: listMetrics.viewportHeightPx,
+    overscanRows: 6,
+    minItemsToVirtualize: RECORDING_LIST_VIRTUALIZE_MIN,
+  }), [listMetrics.scrollTopPx, listMetrics.viewportHeightPx, orderedRecordings.length]);
+  const visibleRecordingRows = useMemo(
+    () => orderedRecordings.slice(listWindow.startIndex, listWindow.endIndex),
+    [listWindow.endIndex, listWindow.startIndex, orderedRecordings],
+  );
+
+  const syncRecordingListMetrics = useCallback(() => {
+    const element = recordingListRef.current;
+    if (!element) return;
+    setListMetrics((current) => (
+      current.scrollTopPx === element.scrollTop && current.viewportHeightPx === element.clientHeight
+        ? current
+        : { scrollTopPx: element.scrollTop, viewportHeightPx: element.clientHeight }
+    ));
+  }, []);
+
+  // A rolagem dispara dezenas de eventos por segundo: mede uma vez por quadro
+  // (mesma disciplina do virtualizador do Frigate).
+  const onRecordingListScroll = useCallback(() => {
+    if (listScrollFrameRef.current != null) return;
+    listScrollFrameRef.current = window.requestAnimationFrame(() => {
+      listScrollFrameRef.current = null;
+      syncRecordingListMetrics();
+    });
+  }, [syncRecordingListMetrics]);
+
+  useEffect(() => {
+    syncRecordingListMetrics();
+    window.addEventListener('resize', syncRecordingListMetrics);
+    return () => {
+      window.removeEventListener('resize', syncRecordingListMetrics);
+      if (listScrollFrameRef.current != null) {
+        window.cancelAnimationFrame(listScrollFrameRef.current);
+        listScrollFrameRef.current = null;
+      }
+    };
+  }, [orderedRecordings.length, syncRecordingListMetrics]);
+
+  // ── TOKEN DE MINIATURA (só para o que está visível) ───────────────────────
+  // Antes a página emitia token para TODAS as gravações do dia (lotes de 100)
+  // antes de mostrar qualquer coisa. Agora: régua visível + lista visível + os
+  // fixos (selecionada, última do dia para o pôster, a que está sob o cursor).
+  const thumbnailCandidateIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const segment of visibleTimelineSegments.items) {
+      if (segment.recordingId) ids.push(segment.recordingId);
+    }
+    for (const item of visibleRecordingRows) ids.push(item.id);
+    if (selectedRecordingId) ids.push(selectedRecordingId);
+    if (timelineHover?.recordingId) ids.push(timelineHover.recordingId);
+    const lastOfDay = recordings.length ? recordings[recordings.length - 1].id : null;
+    if (lastOfDay) ids.push(lastOfDay);
+    return [...new Set(ids)];
+  }, [recordings, selectedRecordingId, timelineHover?.recordingId, visibleRecordingRows, visibleTimelineSegments]);
+
+  useEffect(() => {
+    if (!accessToken || !thumbnailCandidateIds.length) return;
+    let cancelled = false;
+    // Debounce: durante o arraste da régua o conjunto visível muda a cada quadro;
+    // sem isso sairia um POST por pixel.
+    const timer = globalThis.setTimeout(() => {
+      const targets = selectThumbnailTargets({
+        visibleIds: thumbnailCandidateIds,
+        issuedAtMs: thumbnailIssuedAtRef.current,
+        nowMs: Date.now(),
+        max: THUMBNAIL_BATCH,
+      });
+      if (!targets.length) return;
+      void client.post<Record<string, string>>('/recordings/thumbnail-tokens', { recordingIds: targets })
+        .then(({ data }) => {
+          if (cancelled) return;
+          const tokens = data && typeof data === 'object' ? data : {};
+          const issuedAt = Date.now();
+          const nextIssued = { ...thumbnailIssuedAtRef.current };
+          const urls: Record<string, string> = {};
+          for (const [recordingId, token] of Object.entries(tokens)) {
+            urls[recordingId] = `${API_URL}/recordings/${encodeURIComponent(recordingId)}/thumbnail?token=${encodeURIComponent(token)}`;
+            nextIssued[recordingId] = issuedAt;
+          }
+          thumbnailIssuedAtRef.current = nextIssued;
+          // Funde: quem já tinha miniatura não a perde ao sair da janela.
+          setThumbnailTokens((current) => ({ ...current, ...tokens }));
+          setThumbnailUrls((current) => ({ ...current, ...urls }));
+        })
+        .catch(() => {
+          // Mantém as URLs anteriores durante falhas transitórias. Se expirarem,
+          // o onError da <img> agenda uma nova emissão.
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      globalThis.clearTimeout(timer);
+    };
+  }, [accessToken, client, thumbnailCandidateIds, thumbnailRefreshNonce]);
+
+  // ── DIAGNÓSTICO (só do que está visível, e uma vez por gravação) ──────────
+  // Serve para dois cliques: o segmento na régua e a linha na lista — os dois só
+  // acontecem sobre item VISÍVEL. Antes pedia as 80 PRIMEIRAS gravações do dia,
+  // que numa câmera movimentada nem eram as que o operador estava vendo.
+  useEffect(() => {
+    if (!accessToken || !thumbnailCandidateIds.length) return;
+    const pending = thumbnailCandidateIds.filter((id) => !diagnosticsRequestedRef.current.has(id)).slice(0, 80);
+    if (!pending.length) return;
+    let cancelled = false;
+    const timer = globalThis.setTimeout(() => {
+      for (const id of pending) diagnosticsRequestedRef.current.add(id);
+      void client.post<{ items: RecordingDiagnosticsSummary[] }>('/recordings/diagnostics/bulk', { recordingIds: pending, includeIntegrity: false })
+        .then(({ data }) => {
+          if (cancelled) return;
+          const map: Record<string, RecordingDiagnostics> = {};
+          for (const entry of Array.isArray(data.items) ? data.items : []) {
+            if (entry?.recordingId && entry?.diagnostics) {
+              map[entry.recordingId] = entry.diagnostics;
+            }
+          }
+          setDiagnosticsByRecordingId((current) => ({ ...current, ...map }));
+        })
+        .catch(() => {
+          // Sem diagnóstico o playback segue: o modo compatível ainda é ligado
+          // pelo fallback automático de erro/timeout do player.
+          for (const id of pending) diagnosticsRequestedRef.current.delete(id);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      globalThis.clearTimeout(timer);
+    };
+  }, [accessToken, client, thumbnailCandidateIds]);
 
   const getSegmentColor = (type: TimelineSegment['type']) => {
     if (type === 'recorded') return 'hsl(150,60%,32%)';
@@ -2025,7 +2550,7 @@ export default function PlaybackPage() {
                   <span className={`rounded px-2 py-1 text-[10px] ${current ? 'bg-[hsl(var(--status-online)_/_0.1)] text-[hsl(var(--status-online))]' : 'bg-white/5 text-[hsl(var(--muted-foreground))]'}`}>{current ? 'Disponível' : 'Vazio'}</span>
                 </div>
                 <div className="relative h-8 overflow-hidden rounded bg-[hsl(var(--muted))]" onClick={(event) => onTimelineClick(event.clientX, event.currentTarget.getBoundingClientRect())}>
-                  {segments.filter((segment) => segment.end >= viewStart && segment.start <= viewEnd).map((segment, index) => {
+                  {sliceVisibleSpans(segments, { start: viewStart, end: viewEnd }).items.map((segment, index) => {
                     const segStart = Math.max(segment.start, viewStart);
                     const segEnd = Math.min(segment.end, viewEnd);
                     const windowSize = viewEnd - viewStart;
@@ -2205,7 +2730,30 @@ export default function PlaybackPage() {
               onMouseLeave={() => setTimelineHover(null)}
               onClick={(event) => onTimelineClick(event.clientX, event.currentTarget.getBoundingClientRect())}
             >
-              {timelineSegments.filter((segment) => segment.end >= viewStart && segment.start <= viewEnd).map((segment, index) => {
+              {skeletonSpans.map((span, index) => {
+                const spanStart = Math.max(span.start, viewStart);
+                const spanEnd = Math.min(span.end, viewEnd);
+                const windowSize = viewEnd - viewStart;
+                return (
+                  <div
+                    key={`skeleton-${index}-${spanStart}`}
+                    className="pointer-events-none absolute top-0 h-full opacity-35"
+                    title="Há vídeo neste trecho — carregando o detalhe"
+                    style={{
+                      left: `${((spanStart - viewStart) / windowSize) * 100}%`,
+                      width: `${((spanEnd - spanStart) / windowSize) * 100}%`,
+                      background: getSegmentColor('recorded'),
+                      // Acima do "sem gravação" (z=1) — enquanto o detalhe não
+                      // chega, o buraco desenhado ali é ignorância, não ausência
+                      // de vídeo. Marcadores de evento (z=2, desenhados depois)
+                      // continuam por cima.
+                      zIndex: 2,
+                    }}
+                  />
+                );
+              })}
+              {visibleTimelineSegments.items.map((segment, visibleIndex) => {
+                const index = visibleTimelineSegments.indices[visibleIndex];
                 const segStart = Math.max(segment.start, viewStart);
                 const segEnd = Math.min(segment.end, viewEnd);
                 const windowSize = viewEnd - viewStart;
@@ -2459,8 +3007,18 @@ export default function PlaybackPage() {
               </button>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto divide-y divide-border">
-            {recordings.length ? [...recordings].reverse().map((item) => {
+          <div
+            ref={recordingListRef}
+            onScroll={onRecordingListScroll}
+            className="relative flex-1 overflow-y-auto"
+          >
+            {orderedRecordings.length ? (
+              <div
+                className="relative"
+                style={listWindow.virtualized ? { height: `${listWindow.totalHeightPx}px` } : undefined}
+              >
+            {visibleRecordingRows.map((item, rowOffset) => {
+              const rowIndex = listWindow.startIndex + rowOffset;
               const isSelected = item.id === selectedRecordingId;
               const usable = item.fileUsable ?? item.fileExists;
               const startLabel = format(new Date(item.startedAt), 'HH:mm:ss');
@@ -2476,13 +3034,20 @@ export default function PlaybackPage() {
                     setPendingSeekSeconds(0);
                     setPlayheadFromMinute(minuteOfDay(item.startedAt));
                   }}
-                  className={`w-full px-3 py-2.5 text-left transition-colors ${
+                  className={`w-full px-3 py-2.5 text-left transition-colors ${rowIndex > 0 ? 'border-t border-border' : ''} ${
                     !usable ? 'cursor-not-allowed opacity-45' : 'cursor-pointer'
                   } ${
                     isSelected
                       ? 'bg-[hsl(var(--primary)_/_0.1)]'
                       : 'hover:bg-[hsl(var(--accent))]'
                   }`}
+                  style={listWindow.virtualized ? {
+                    position: 'absolute',
+                    top: `${rowIndex * RECORDING_ROW_HEIGHT_PX}px`,
+                    left: 0,
+                    right: 0,
+                    height: `${RECORDING_ROW_HEIGHT_PX}px`,
+                  } : undefined}
                 >
                   <div className="flex items-center gap-2.5">
                     <input
@@ -2531,7 +3096,9 @@ export default function PlaybackPage() {
                   </div>
                 </div>
               );
-            }) : (
+            })}
+              </div>
+            ) : (
               <div className="px-4 py-8 text-center text-xs text-[hsl(var(--muted-foreground))]">
                 Sem gravações nesta data.
               </div>
