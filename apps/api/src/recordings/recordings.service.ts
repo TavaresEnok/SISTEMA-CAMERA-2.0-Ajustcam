@@ -28,6 +28,7 @@ import {
   buildTimelinePreviewArgs,
   type TimelinePreviewPlan,
 } from './helpers/timeline-preview.helper';
+import { planVodPlaylist, renderVodPlaylist, type VodSourceSegment } from './helpers/vod-playlist.helper';
 import archiver from 'archiver';
 
 const execFileAsync = promisify(execFile);
@@ -1462,6 +1463,126 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         passPlaybackFindsFiles,
         passWorkerPlaybackFindsFiles,
       },
+    };
+  }
+
+  /**
+   * VOD CONTÍNUO — monta UMA playlist HLS (VOD) cobrindo o intervalo pedido.
+   *
+   * ADITIVO: o playback atual (um arquivo por vez, `/recordings/:id/play`)
+   * continua exatamente como está. Aqui apenas LISTAMOS os segmentos que já
+   * existem, apontando para esse MESMO endpoint com o MESMO token de playback
+   * (nenhuma autenticação nova). O gate de conteúdo por câmera (invariante da
+   * câmera privada) é aplicado pelo controller ANTES de chegar aqui.
+   *
+   * Cuidados desta camada (o helper é puro):
+   *  - janela limitada (`VOD_PLAYLIST_MAX_HOURS`, padrão 24h) e teto de segmentos;
+   *  - lookback na consulta para pegar o segmento que COMEÇA antes de `from` e
+   *    cruza a borda (senão o começo do intervalo ficaria de fora);
+   *  - só entra segmento cujo arquivo EXISTE e tem tamanho plausível — um 404 no
+   *    meio da playlist trava o player;
+   *  - codec vem do cache de diagnóstico já gravado (sem ffprobe novo): quando
+   *    conhecido, a troca de codec vira `#EXT-X-DISCONTINUITY`.
+   */
+  async buildVodPlaylist(
+    user: AuthUser,
+    params: { cameraId: string; from?: string; to?: string; maxSegments?: number },
+  ) {
+    const cameraId = String(params.cameraId ?? '').trim();
+    if (!cameraId) throw new BadRequestException('cameraId é obrigatório.');
+
+    const fromDate = params.from ? new Date(params.from) : null;
+    const toDate = params.to ? new Date(params.to) : null;
+    if (!fromDate || Number.isNaN(fromDate.getTime())) {
+      throw new BadRequestException('Parâmetro "from" (ISO) é obrigatório e deve ser uma data válida.');
+    }
+    if (!toDate || Number.isNaN(toDate.getTime())) {
+      throw new BadRequestException('Parâmetro "to" (ISO) é obrigatório e deve ser uma data válida.');
+    }
+    if (toDate.getTime() <= fromDate.getTime()) {
+      throw new BadRequestException('Intervalo inválido: "to" precisa ser depois de "from".');
+    }
+    const maxHours = Math.max(1, Math.min(72, Number(process.env.VOD_PLAYLIST_MAX_HOURS ?? 24)));
+    if (toDate.getTime() - fromDate.getTime() > maxHours * 60 * 60 * 1000) {
+      throw new BadRequestException(`Intervalo máximo da playlist VOD é de ${maxHours}h.`);
+    }
+
+    // Defesa em profundidade (mesmo princípio de createThumbnailTokens): quem
+    // EMITE token de conteúdo confere o gate por conta própria — a playlist gera
+    // N tokens de uma vez, então não pode depender de o chamador ter conferido.
+    await this.accessControlService.assertCanViewCamera(user, cameraId);
+
+    const maxSegments = Math.max(1, Math.min(2_000, Number(params.maxSegments ?? process.env.VOD_PLAYLIST_MAX_SEGMENTS ?? 720)));
+    const lookbackMinutes = Math.max(1, Math.min(360, Number(process.env.VOD_PLAYLIST_LOOKBACK_MINUTES ?? 60)));
+    const lookbackStart = new Date(fromDate.getTime() - lookbackMinutes * 60 * 1000);
+
+    const records = await this.prisma.recording.findMany({
+      where: {
+        cameraId,
+        startedAt: { gte: lookbackStart, lte: toDate },
+        // fechada terminando depois do início pedido OU ainda aberta (gravando)
+        OR: [{ endedAt: { gte: fromDate } }, { endedAt: null }],
+      },
+      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true },
+      orderBy: { startedAt: 'asc' },
+      take: 5_000,
+    });
+
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const diagnosticsCache = this.readDiagnosticsCache();
+    const sources: VodSourceSegment[] = [];
+    for (const record of records) {
+      let sizeBytes = 0;
+      try {
+        const absolutePath = ensureFileUnderRoot(recordingsRoot, record.filePath);
+        if (!existsSync(absolutePath)) continue;
+        sizeBytes = statSync(absolutePath).size;
+      } catch {
+        continue;
+      }
+      if (sizeBytes <= 1024) continue;
+      const cached = diagnosticsCache[record.id]?.diagnostics as { video?: { codec?: string | null } } | undefined;
+      sources.push({
+        id: record.id,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+        durationSeconds: record.durationSeconds,
+        codec: cached?.video?.codec ?? null,
+      });
+    }
+
+    const plan = planVodPlaylist({ segments: sources, from: fromDate, to: toDate, maxSegments });
+    if (!plan.segments.length) {
+      throw new NotFoundException('Nenhuma gravação reproduzível neste intervalo.');
+    }
+
+    // Token de playback JÁ EXISTENTE, um por segmento — o mesmo que /play,
+    // /thumbnail e /preview-sprite verificam. Nada de autenticação nova.
+    const tokenByRecording = new Map<string, string>();
+    for (const segment of plan.segments) {
+      const token = await this.authService.createPlaybackToken(user.id, segment.recordingId);
+      tokenByRecording.set(segment.recordingId, token.playToken);
+    }
+    // `.mp4` ANTES da query não é enfeite: player baseado em ffmpeg >= 7 recusa
+    // segmento de HLS sem extensão de mídia na URL (allowed_segment_extensions).
+    // O alias `/recordings/:id/play.mp4` cai no MESMO handler de `/play`.
+    const buildSegmentUrl = (segment: { recordingId: string }) =>
+      `/recordings/${segment.recordingId}/play.mp4?token=${encodeURIComponent(tokenByRecording.get(segment.recordingId) ?? '')}`;
+
+    return {
+      cameraId,
+      from: plan.from,
+      to: plan.to,
+      playlist: renderVodPlaylist(plan, buildSegmentUrl),
+      segmentCount: plan.segments.length,
+      startOffsetSeconds: plan.startOffsetSeconds,
+      totalDurationSeconds: plan.totalDurationSeconds,
+      targetDurationSeconds: plan.targetDurationSeconds,
+      discontinuities: plan.discontinuities,
+      truncated: plan.truncated,
+      skipped: plan.skipped,
+      coverage: plan.coverage,
+      segments: plan.segments.map((segment) => ({ ...segment, playUrl: buildSegmentUrl(segment) })),
     };
   }
 

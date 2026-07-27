@@ -379,6 +379,52 @@ export class RecordingsController {
     });
   }
 
+  // VOD CONTÍNUO (ADITIVO) — UMA playlist HLS por INTERVALO, listando os vários
+  // segmentos já gravados, para o player ver um vídeo contínuo em vez de trocar
+  // de arquivo (e recarregar) a cada gravação. O playback atual continua igual:
+  // este endpoint só ACRESCENTA uma forma de consumir os MESMOS arquivos, pelo
+  // MESMO `/recordings/:id/play` e com o MESMO token de playback.
+  //
+  // O gate de conteúdo da câmera (invariante 1.2.i — câmera privada: admin
+  // gerencia mas NÃO vê) é aplicado ANTES de montar qualquer coisa.
+  @Roles(UserRole.VIEWER)
+  @RequirePermission('playback')
+  @Get(['recordings/vod.m3u8', 'recordings/vod'])
+  async getVodPlaylist(
+    @CurrentUser() user: AuthUser,
+    @Query('cameraId') cameraId: string | undefined,
+    @Query('from') from: string | undefined,
+    @Query('to') to: string | undefined,
+    @Query('format') format: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    if (!cameraId) {
+      throw new BadRequestException('cameraId é obrigatório.');
+    }
+    await this.accessControlService.assertCanViewCamera(user, cameraId);
+    const result = await this.recordingsService.buildVodPlaylist(user, { cameraId, from, to });
+    await this.auditService.log(user.id, 'playback.vod.playlist', 'Camera', cameraId, {
+      from: result.from,
+      to: result.to,
+      segments: result.segmentCount,
+      discontinuities: result.discontinuities,
+      truncated: result.truncated,
+    }, req);
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Drac-Vod-Start-Offset-Seconds', String(result.startOffsetSeconds));
+    res.setHeader('X-Drac-Vod-Total-Duration-Seconds', String(result.totalDurationSeconds));
+    res.setHeader('X-Drac-Vod-Segments', String(result.segmentCount));
+    if (String(format ?? '').toLowerCase() === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      const { playlist: _playlist, ...plan } = result;
+      return res.json(plan);
+    }
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    return res.send(result.playlist);
+  }
+
   @Roles(UserRole.VIEWER)
   @RequirePermission('playback')
   @Post('recordings/:id/play-token')
@@ -515,6 +561,26 @@ export class RecordingsController {
       return this.recordingsService.streamRecordingCompatible(id, res);
     }
     return this.recordingsService.streamRecording(id, res, { allowAutoCompat: !forceDirectFlag });
+  }
+
+  // ALIAS ADITIVO de `/recordings/:id/play` com sufixo `.mp4` — MESMO handler,
+  // MESMO token, MESMO gate (a rota original continua intacta).
+  //
+  // MOTIVO REAL, MEDIDO (ffprobe 8.0.1): player baseado em ffmpeg >= 7 RECUSA um
+  // segmento de HLS cuja URL não termine em extensão de mídia conhecida —
+  // "URL ... is not in allowed_segment_extensions". Sem este alias a playlist VOD
+  // só tocaria no hls.js do navegador; com ele toca também em VLC/mpv/ffmpeg.
+  @Public()
+  @Get('recordings/:id/play.mp4')
+  async playRecordingAsMp4(
+    @Param('id') id: string,
+    @Query('token') token: string | undefined,
+    @Query('compatible') compatible: string | undefined,
+    @Query('forceDirect') forceDirect: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.playRecording(id, token, compatible, forceDirect, req, res);
   }
 
   @Roles(UserRole.OPERATOR)
