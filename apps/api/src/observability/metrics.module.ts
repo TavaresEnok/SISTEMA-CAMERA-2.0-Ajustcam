@@ -5,6 +5,7 @@ import { CameraMetricsService, cameraMetrics } from './camera-metrics.service';
 import { CameraObservabilityService } from './camera-observability.service';
 import { MetricsController } from './metrics.controller';
 import { ObservabilityController } from './observability.controller';
+import { ProcessUsageCollector } from './process-usage.collector';
 
 @Module({
   imports: [RecordingsModule, PrismaModule],
@@ -15,6 +16,10 @@ import { ObservabilityController } from './observability.controller';
     // instanciasse uma classe NOVA, a API leria um registro sempre vazio.
     { provide: CameraMetricsService, useValue: cameraMetrics },
     CameraObservabilityService,
+    // Amostra /proc dos PIDs registrados no singleton acima. Sem provider de
+    // ProcessUsageSampler: o coletor cria o dele (o @Optional() existe só para
+    // o teste injetar um amostrador falso).
+    ProcessUsageCollector,
   ],
   exports: [CameraMetricsService],
 })

@@ -1,7 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
-import { CameraMetricsService } from './camera-metrics.service';
+import {
+  CameraMetricsService,
+  type CameraProcessUsage,
+  type HostProcessUsage,
+  type TrackedProcessKind,
+} from './camera-metrics.service';
 import {
   isRecordingStalled,
   normalizeCameraStatus,
@@ -38,12 +43,33 @@ export type CameraHealthItem = {
     recoveriesLastHour: number;
     lastRecoveryAt: string | null;
   };
+  /**
+   * Custo desta câmera no host. Aqui PODE ter detalhe por processo (pid/kind) —
+   * a rota é autenticada; no /metrics público só sai a soma com camera_id.
+   */
+  processes: {
+    cpuPercent: number;
+    memoryBytes: number;
+    count: number;
+    items: Array<{
+      pid: number;
+      kind: TrackedProcessKind;
+      cpuPercent: number | null;
+      memoryBytes: number | null;
+    }>;
+  };
 };
 
 export type CameraHealthReport = {
   generatedAt: string;
   cameras: CameraHealthItem[];
   totals: { cameras: number; recordingActive: number; stalled: number; offline: number };
+  /**
+   * Custo agregado + a resposta de "quantas câmeras ainda cabem neste host".
+   * Separado de `totals` de propósito: `totals` é contrato antigo e continua
+   * com exatamente os quatro campos que já tinha.
+   */
+  host: HostProcessUsage;
   /**
    * Limiar de estagnação REALMENTE em uso (derivado de RECORDING_SEGMENT_SECONDS).
    * Vai no payload para o cliente não precisar adivinhar a duração do segmento:
@@ -55,6 +81,22 @@ export type CameraHealthReport = {
 
 /** Idade máxima do último segmento para inferir "gravando" sem processo local. */
 const WORKER_RECENT_SEGMENT_SECONDS = 15 * 60;
+
+/** Câmera sem processo rastreado devolve bloco VAZIO, não ausente. */
+function toProcessBlock(usage: CameraProcessUsage | undefined): CameraHealthItem['processes'] {
+  if (!usage) return { cpuPercent: 0, memoryBytes: 0, count: 0, items: [] };
+  return {
+    cpuPercent: usage.cpuPercent,
+    memoryBytes: usage.memoryBytes,
+    count: usage.processes,
+    items: usage.details.map((detail) => ({
+      pid: detail.pid,
+      kind: detail.kind,
+      cpuPercent: detail.cpuPercent,
+      memoryBytes: detail.memoryBytes,
+    })),
+  };
+}
 
 @Injectable()
 export class CameraObservabilityService {
@@ -90,12 +132,16 @@ export class CameraObservabilityService {
         generatedAt,
         cameras: [],
         totals: { cameras: 0, recordingActive: 0, stalled: 0, offline: 0 },
+        host: this.hostUsage(),
         staleThresholdSeconds: this.recordings.getRecordingStaleThresholdSeconds(),
       };
     }
 
     // UMA agregação para a frota inteira (o índice [cameraId, startedAt] cobre).
     const lastSegmentByCamera = await this.loadLastSegmentByCamera();
+
+    // UMA passada sobre o registro de processos para a frota inteira.
+    const usageByCamera = this.processUsageByCamera();
 
     const runtime = this.recordings.getRuntimeSummary();
     const activeLocal = new Set<string>(runtime.activeCameraIds ?? []);
@@ -152,6 +198,7 @@ export class CameraObservabilityService {
           recoveriesLastHour: snapshot.recoveriesLastHour,
           lastRecoveryAt: snapshot.lastRecoveryAt ? snapshot.lastRecoveryAt.toISOString() : null,
         },
+        processes: toProcessBlock(usageByCamera.get(camera.id)),
       };
     });
 
@@ -159,8 +206,38 @@ export class CameraObservabilityService {
       generatedAt,
       cameras: items,
       totals: { cameras: items.length, recordingActive, stalled: stalledCount, offline: offlineCount },
+      host: this.hostUsage(),
       staleThresholdSeconds,
     };
+  }
+
+  /** Índice cameraId → custo. Falha de observabilidade vira mapa vazio. */
+  private processUsageByCamera(): Map<string, CameraProcessUsage> {
+    const map = new Map<string, CameraProcessUsage>();
+    try {
+      for (const usage of this.cameraMetrics.processUsageByCamera()) map.set(usage.cameraId, usage);
+    } catch {
+      /* sem custo é melhor que sem relatório */
+    }
+    return map;
+  }
+
+  private hostUsage(): HostProcessUsage {
+    try {
+      return this.cameraMetrics.processUsageTotals();
+    } catch {
+      return {
+        cpuPercent: 0,
+        memoryBytes: 0,
+        processes: 0,
+        measuredProcesses: 0,
+        cameras: 0,
+        cpuBudgetCores: 0,
+        cpuPercentPerCamera: null,
+        cpuSaturation: null,
+        estimatedCameraCapacity: null,
+      };
+    }
   }
 
   /** groupBy ÚNICO: cameraId → instante do último segmento (ms). */

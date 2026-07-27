@@ -2,7 +2,7 @@ import { Controller, Get, Header } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
 import { CameraMetricsService } from './camera-metrics.service';
-import { buildCameraSeries } from './camera-prometheus.helper';
+import { buildCameraSeries, buildProcessSeries } from './camera-prometheus.helper';
 import { formatPrometheus, type Metric } from './prometheus.helper';
 
 // /metrics no formato Prometheus. As séries AGREGADAS seguem sem qualquer rótulo;
@@ -36,7 +36,21 @@ export class MetricsController {
     // ADITIVO: as séries por câmera entram DEPOIS das agregadas, que continuam
     // byte-a-byte como estavam (dashboards/alertas existentes não quebram).
     metrics.push(...this.buildCameraMetrics());
+    // Custo (CPU/RSS) por câmera + agregado do host. Em bloco próprio: se a
+    // amostragem de /proc falhar, ela some sozinha e o resto do /metrics fica.
+    metrics.push(...this.buildProcessMetrics());
     return formatPrometheus(metrics);
+  }
+
+  private buildProcessMetrics(): Metric[] {
+    try {
+      return buildProcessSeries({
+        usages: this.cameraMetrics.processUsageByCamera(),
+        totals: this.cameraMetrics.processUsageTotals(),
+      });
+    } catch {
+      return [];
+    }
   }
 
   private buildCameraMetrics(): Metric[] {

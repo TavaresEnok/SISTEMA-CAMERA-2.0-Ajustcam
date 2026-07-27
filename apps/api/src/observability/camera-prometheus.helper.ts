@@ -1,4 +1,8 @@
-import { type CameraMetricsSnapshot } from './camera-metrics.service';
+import {
+  type CameraMetricsSnapshot,
+  type CameraProcessUsage,
+  type HostProcessUsage,
+} from './camera-metrics.service';
 import { type Metric } from './prometheus.helper';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,4 +111,107 @@ export function buildCameraSeries(input: CameraSeriesInput): Metric[] {
   // Agrupadas por NOME: o formato exige as amostras de uma métrica contíguas
   // (HELP/TYPE únicos, emitidos pelo formatPrometheus na primeira amostra).
   return [...recordingActive, ...secondsSince, ...restarts, ...recoveries, ...brakes];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTO (CPU/memória) por câmera e agregado do host.
+//
+// Mesma regra de privacidade do topo do arquivo, com um agravante: o PID e o
+// `kind` do processo NÃO viram rótulo. O PID porque é alta cardinalidade que
+// muda a cada reinício de FFmpeg (série nova a cada queda de câmera = TSDB
+// inchado sem informação nova); o detalhe por processo vive na rota AUTENTICADA
+// GET /observability/cameras. E NADA que descreva o processo (nome do binário,
+// cmdline) chega aqui — a linha de comando do FFmpeg de gravação carrega a URL
+// RTSP com senha.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ProcessSeriesInput = {
+  usages: CameraProcessUsage[];
+  totals: HostProcessUsage;
+};
+
+export function buildProcessSeries(input: ProcessSeriesInput): Metric[] {
+  const usages = (input?.usages ?? [])
+    .filter((usage) => isPublishableCameraId(usage?.cameraId))
+    .sort((a, b) => a.cameraId.localeCompare(b.cameraId))
+    .slice(0, CAMERA_SERIES_LIMIT);
+
+  const cpu: Metric[] = [];
+  const memory: Metric[] = [];
+  const count: Metric[] = [];
+
+  for (const usage of usages) {
+    // Um rótulo. Só um.
+    const labels = { camera_id: usage.cameraId };
+    cpu.push({
+      name: 'drac_camera_process_cpu_percent',
+      help: 'CPU somada dos processos desta câmera (100 = um núcleo saturado)',
+      type: 'gauge',
+      value: usage.cpuPercent,
+      labels,
+    });
+    memory.push({
+      name: 'drac_camera_process_memory_bytes',
+      help: 'Memória residente somada dos processos desta câmera',
+      type: 'gauge',
+      value: usage.memoryBytes,
+      labels,
+    });
+    count.push({
+      name: 'drac_camera_process_count',
+      help: 'Processos rastreados desta câmera (gravação, pré-buffer, transcode)',
+      type: 'gauge',
+      value: usage.processes,
+      labels,
+    });
+  }
+
+  const totals = input?.totals;
+  const host: Metric[] = [];
+  if (totals) {
+    host.push({
+      name: 'drac_host_camera_process_cpu_percent',
+      help: 'CPU do host atribuída a câmeras (100 = um núcleo saturado)',
+      type: 'gauge',
+      value: totals.cpuPercent,
+    });
+    host.push({
+      name: 'drac_host_camera_process_memory_bytes',
+      help: 'Memória residente do host atribuída a câmeras',
+      type: 'gauge',
+      value: totals.memoryBytes,
+    });
+    host.push({
+      name: 'drac_host_cpu_budget_cores',
+      help: 'Núcleos REALMENTE disponíveis (cota do cgroup quando há container)',
+      type: 'gauge',
+      value: totals.cpuBudgetCores,
+    });
+    host.push({
+      name: 'drac_host_camera_process_cameras',
+      help: 'Câmeras com custo medido neste host',
+      type: 'gauge',
+      value: totals.cameras,
+    });
+    // Este é o número de alerta: >0.8 sustentado = o host está no limite.
+    if (totals.cpuSaturation != null) {
+      host.push({
+        name: 'drac_host_camera_process_cpu_saturation',
+        help: 'Fração do orçamento de CPU consumida pelas câmeras (1 = esgotado)',
+        type: 'gauge',
+        value: totals.cpuSaturation,
+      });
+    }
+    // Extrapolação da média medida com 20% de folga. Só existe com base real.
+    if (totals.estimatedCameraCapacity != null) {
+      host.push({
+        name: 'drac_host_camera_capacity_estimate',
+        help: 'Câmeras que este host suporta pela média medida (20% de folga reservada)',
+        type: 'gauge',
+        value: totals.estimatedCameraCapacity,
+      });
+    }
+  }
+
+  return [...cpu, ...memory, ...count, ...host];
 }
