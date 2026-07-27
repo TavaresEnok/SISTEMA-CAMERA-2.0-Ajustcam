@@ -30,6 +30,11 @@ import {
 } from './helpers/timeline-preview.helper';
 import { planVodPlaylist, renderVodPlaylist, type VodSourceSegment } from './helpers/vod-playlist.helper';
 import {
+  isMissingCommandError,
+  markNiceUnavailable,
+  planLowPriorityCommand,
+} from './helpers/ffmpeg-priority.helper';
+import {
   buildCompatibleTranscodeArgs,
   detectTranscodeHwaccel,
   reportHwaccelFailure,
@@ -447,9 +452,47 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     return detectTranscodeHwaccel();
   }
 
+  // ── PRIORIDADE DOS FFMPEG AUXILIARES ────────────────────────────────────────
+  // Um cliente clicando "exportar 1 hora" dispara um libx264 que rouba CPU da
+  // GRAVAÇÃO de todas as câmeras do host. O modo de falha não é a exportação
+  // lenta — é a gravação furar. Por isso TODO ffmpeg pesado e não-crítico daqui
+  // (transcode de playback, exportação de clipe, thumbnail/sprite, varredura de
+  // integridade) roda com prioridade rebaixada. A gravação, que fica no
+  // recording-process-manager, continua em prioridade NORMAL.
+  //
+  // Fica de fora de propósito: `ffprobe` (barato) e o snapshot de UM frame (o
+  // usuário está parado na tela esperando aquela imagem).
+
+  /** Seam de processo: existe para o teste observar o comando REALMENTE executado. */
+  private runExecFile(command: string, args: string[], options: Record<string, unknown>): Promise<{ stdout: any; stderr: any }> {
+    return (execFileAsync as any)(command, args, options);
+  }
+
+  /**
+   * Executa um ffmpeg NÃO-CRÍTICO cedendo CPU para a gravação.
+   * Rebaixar é BÔNUS: sem `nice` no sistema (ou se ele sumir do PATH na hora H),
+   * o comando roda igual. Nenhuma exportação pode falhar por causa de prioridade.
+   */
+  private async execFfmpegLowPriority(
+    args: string[],
+    options: Record<string, unknown> = {},
+  ): Promise<{ stdout: any; stderr: any }> {
+    const plan = planLowPriorityCommand('ffmpeg', args);
+    try {
+      return await this.runExecFile(plan.command, plan.args, options);
+    } catch (error) {
+      if (plan.lowered && isMissingCommandError(error)) {
+        markNiceUnavailable();
+        this.logger.warn('`nice` indisponível neste sistema — seguindo sem rebaixar a prioridade do ffmpeg auxiliar.');
+        return await this.runExecFile('ffmpeg', args, options);
+      }
+      throw error;
+    }
+  }
+
   /** Seam única para executar o ffmpeg do transcode compatível. */
   private async runTranscodeAttempt(args: string[]): Promise<void> {
-    await execFileAsync('ffmpeg', args, {
+    await this.execFfmpegLowPriority(args, {
       timeout: 300000, // 5 min max for large files
       maxBuffer: 8 * 1024 * 1024,
     });
@@ -861,8 +904,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
           for (const second of [...new Set([seekSeconds, 0])]) {
             await rm(temporaryPath, { force: true }).catch(() => undefined);
             try {
-              await execFileAsync(
-                'ffmpeg',
+              await this.execFfmpegLowPriority(
                 [
                   '-hide_banner',
                   '-loglevel',
@@ -977,8 +1019,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         const temporaryPath = `${outputPath}.${process.pid}.${Date.now()}.tmp.jpg`;
         try {
           await rm(temporaryPath, { force: true }).catch(() => undefined);
-          await execFileAsync(
-            'ffmpeg',
+          await this.execFfmpegLowPriority(
             buildTimelinePreviewArgs(inputPath, temporaryPath, plan),
             { timeout: 60_000, maxBuffer: 1024 * 1024 },
           );
@@ -1182,7 +1223,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await execFileAsync('ffmpeg', [
+      // Decodifica o arquivo INTEIRO: é o auxiliar mais pesado que existe aqui e
+      // roda em varredura de fundo — jamais pode competir com a gravação.
+      await this.execFfmpegLowPriority([
         '-v',
         'error',
         '-i',
@@ -1794,7 +1837,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
   private async runClipExport(inputPath: string, outputPath: string, startSeconds: number, durationSeconds: number) {
     try {
-      await execFileAsync('ffmpeg', [
+      await this.execFfmpegLowPriority([
         '-y',
         '-ss',
         String(startSeconds),
@@ -1811,7 +1854,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       return;
     } catch {
       try {
-        await execFileAsync('ffmpeg', [
+        await this.execFfmpegLowPriority([
           '-y',
           '-ss',
           String(startSeconds),
@@ -1840,7 +1883,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
   private async transcodeClipForCompatibility(inputPath: string, outputPath: string, startSeconds: number, durationSeconds: number) {
     try {
-      await execFileAsync('ffmpeg', [
+      await this.execFfmpegLowPriority([
         '-y',
         '-ss',
         String(startSeconds),

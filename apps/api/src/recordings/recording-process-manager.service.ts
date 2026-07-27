@@ -30,6 +30,13 @@ import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper'
 // observabilidade JAMAIS pode derrubar uma gravação.
 import { cameraMetrics } from '../observability/camera-metrics.service';
 import { buildRecordingOutputDir, buildRecordingOutputPattern } from './helpers/recording-path.helper';
+import {
+  appendStderrChunk,
+  createStderrRing,
+  drainStderrRing,
+  DEFAULT_STDERR_RING_LINES,
+  type FfmpegStderrRing,
+} from './helpers/ffmpeg-stderr-ring.helper';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
 
 const execFileAsync = promisify(execFile);
@@ -60,6 +67,12 @@ export type RecordingProcessState = {
    * preenchida quando alguém consulta o progresso.
    */
   writeSample?: { filePath: string; sizeBytes: number; mtimeMs: number; observedAtMs: number };
+  /**
+   * Últimas N linhas do stderr deste processo (teto rígido). Só é despejado no
+   * log quando o processo morre ANORMALMENTE — em saída normal, nada é logado.
+   * Opcional porque estados antigos/sintéticos podem não ter ring.
+   */
+  stderrRing?: FfmpegStderrRing;
 };
 
 /**
@@ -131,6 +144,17 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
    * mapa é limitado ao punhado de segmentos falhando agora.
    */
   private readonly segmentRemuxFailures = new Map<string, number>();
+  // ── Reinício imediato após queda do FFmpeg de gravação ──────────────────────
+  // Histórico de reinícios por câmera (janela DESLIZANTE) e o timer do reinício
+  // agendado. `shuttingDown` impede que o desligamento da API dispare gravações.
+  private readonly restartAttempts = new Map<string, number[]>();
+  private readonly restartTimers = new Map<string, NodeJS.Timeout>();
+  private shuttingDown = false;
+  /** Freio anti-tempestade, mesmo espírito dos BRAKE_ do mediamtx-proxy. */
+  private static readonly RESTART_BRAKE_MAX_ATTEMPTS = 5;
+  private static readonly RESTART_BRAKE_WINDOW_MS = 10 * 60_000;
+  private static readonly RESTART_BASE_DELAY_MS = 1_000;
+  private static readonly RESTART_MAX_DELAY_MS = 30_000;
 
   constructor(
     private readonly configService: ConfigService,
@@ -1413,20 +1437,216 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   private finalizeRecordingState(cameraId: string, state: RecordingProcessState, exitCode?: number | null) {
     if (state.finalizePromise) return state.finalizePromise;
-    // Métrica (aditiva): o processo morreu SEM que a parada tenha sido pedida —
-    // é queda/reinício. Depois do guard acima, então cada morte conta uma vez.
-    if (!state.stopRequested) {
+    // A morte foi ANORMAL (queda) ou a parada foi PEDIDA (stop/post-roll/
+    // shutdown/rollback)? Tudo que é reação a queda pendura aqui — e só aqui,
+    // depois do guard acima, então cada morte é tratada UMA vez.
+    const abnormal = !state.stopRequested;
+    if (abnormal) {
+      // Métrica (aditiva).
       try {
         cameraMetrics.recordRecordingRestart(cameraId);
       } catch { /* observabilidade nunca interrompe a finalização */ }
+      // Diagnóstico: despeja o stderr acumulado deste processo, de uma vez.
+      this.dumpStderrRing(cameraId, state, exitCode ?? null);
     }
     state.finalizePromise = (async () => {
       clearInterval(state.watcher);
       await this.scanAndRegister(state, true);
       if (this.active.get(cameraId) === state) this.active.delete(cameraId);
       this.logger.log(`Gravação encerrada camera=${cameraId} code=${exitCode ?? 'null'}`);
+      // Depois de soltar a câmera do mapa `active`: quem for reiniciar precisa
+      // enxergar que não há mais gravação de pé.
+      if (abnormal) this.scheduleRecordingRestart(cameraId, state, exitCode ?? null);
     })();
     return state.finalizePromise;
+  }
+
+  /**
+   * Despeja no log as últimas linhas de stderr do processo que MORREU.
+   * Só na morte anormal (o chamador garante) e uma única vez (o ring esvazia).
+   * Já vem sanitizado do ring; sanitiza o bloco de novo por garantia — este
+   * texto vem do FFmpeg e carrega a URL RTSP com a senha da câmera.
+   */
+  private dumpStderrRing(cameraId: string, state: RecordingProcessState, exitCode: number | null) {
+    try {
+      const ring = state.stderrRing;
+      if (!ring) return;
+      const lines = drainStderrRing(ring);
+      if (!lines.length) return;
+      this.logger.error(
+        `FFmpeg de gravação MORREU camera=${cameraId} code=${exitCode ?? 'null'} — `
+        + `últimas ${lines.length} linha(s) de stderr:\n${sanitizeSensitiveText(lines.join('\n'))}`,
+      );
+    } catch { /* diagnóstico JAMAIS derruba a finalização da gravação */ }
+  }
+
+  // ── REINÍCIO IMEDIATO DA GRAVAÇÃO MORTA ─────────────────────────────────────
+  // Antes: a morte do processo só era notada pelo health-check (limiar de
+  // estagnação + cron de 60s) — até ~7 MINUTOS de gravação perdida por câmera,
+  // por morte. O Frigate supervisiona DENTRO do processo, num laço de 1s
+  // (frigate/video/ffmpeg.py: `if not self.capture_thread.is_alive()` →
+  // `reset_capture_thread()`, com pacing por `last_restart_time`). Aqui o
+  // gatilho é a própria saída do processo, então a detecção é instantânea.
+  //
+  // O health-check CONTINUA existindo como rede de segurança (ele cobre o caso
+  // "processo vivo mas parado de escrever", que este caminho não vê).
+
+  private isAutoRestartEnabled(): boolean {
+    return String(process.env.RECORDING_AUTO_RESTART_ENABLED ?? 'true') !== 'false';
+  }
+
+  private nowMs(): number {
+    return Date.now();
+  }
+
+  private readEnvNumber(nome: string, padrao: number, minimo: number): number {
+    const bruto = Number(process.env[nome] ?? padrao);
+    return Number.isFinite(bruto) && bruto >= minimo ? Math.floor(bruto) : padrao;
+  }
+
+  private getRestartMaxAttempts(): number {
+    return this.readEnvNumber(
+      'RECORDING_AUTO_RESTART_MAX_ATTEMPTS',
+      RecordingProcessManagerService.RESTART_BRAKE_MAX_ATTEMPTS,
+      1,
+    );
+  }
+
+  private getRestartWindowMs(): number {
+    return this.readEnvNumber(
+      'RECORDING_AUTO_RESTART_WINDOW_MS',
+      RecordingProcessManagerService.RESTART_BRAKE_WINDOW_MS,
+      1_000,
+    );
+  }
+
+  private getRestartBaseDelayMs(): number {
+    return this.readEnvNumber(
+      'RECORDING_AUTO_RESTART_BASE_DELAY_MS',
+      RecordingProcessManagerService.RESTART_BASE_DELAY_MS,
+      1,
+    );
+  }
+
+  private getRestartMaxDelayMs(): number {
+    return this.readEnvNumber(
+      'RECORDING_AUTO_RESTART_MAX_DELAY_MS',
+      RecordingProcessManagerService.RESTART_MAX_DELAY_MS,
+      1,
+    );
+  }
+
+  /**
+   * Decide SE e QUANDO reiniciar. Backoff exponencial (1s, 2s, 4s… até o teto) e
+   * janela DESLIZANTE: quedas antigas não contam, senão uma câmera que oscila de
+   * vez em quando acabaria freada para sempre.
+   */
+  private planRecordingRestart(cameraId: string) {
+    const now = this.nowMs();
+    const windowMs = this.getRestartWindowMs();
+    const maxAttempts = this.getRestartMaxAttempts();
+    const previous = (this.restartAttempts.get(cameraId) ?? []).filter((at) => at > now - windowMs);
+
+    if (previous.length >= maxAttempts) {
+      this.restartAttempts.set(cameraId, previous);
+      return { allowed: false, attempt: previous.length, delayMs: 0, maxAttempts, windowMs };
+    }
+
+    const delayMs = Math.min(this.getRestartMaxDelayMs(), this.getRestartBaseDelayMs() * 2 ** previous.length);
+    previous.push(now);
+    this.restartAttempts.set(cameraId, previous);
+    return { allowed: true, attempt: previous.length, delayMs, maxAttempts, windowMs };
+  }
+
+  /**
+   * Cancela o reinício pendente e zera o histórico (o desejado mudou).
+   * NUNCA lança: a contabilidade do reinício não pode impedir uma PARADA.
+   */
+  private cancelPendingRestart(cameraId: string) {
+    try {
+      const timer = this.restartTimers?.get(cameraId);
+      if (timer) {
+        clearTimeout(timer);
+        this.restartTimers.delete(cameraId);
+      }
+      this.restartAttempts?.delete(cameraId);
+    } catch { /* parar a gravação vem antes de qualquer bookkeeping */ }
+  }
+
+  private scheduleRecordingRestart(cameraId: string, state: RecordingProcessState, exitCode: number | null) {
+    try {
+      // INVARIANTE: parada PEDIDA (stop, post-roll de movimento, shutdown,
+      // rollback do start) JAMAIS reinicia. Reiniciar o que o operador mandou
+      // parar seria pior que o bug original.
+      if (state.stopRequested) return;
+      if (this.shuttingDown) return;
+      if (this.controlMode !== 'local') return;
+      if (!this.isAutoRestartEnabled()) return;
+      if (this.restartTimers.has(cameraId)) return; // já há um reinício no forno
+      if (this.active.has(cameraId)) return; // outra gravação já assumiu a câmera
+
+      const plan = this.planRecordingRestart(cameraId);
+      if (!plan.allowed) {
+        this.logger.error(
+          `Gravação camera=${cameraId} caiu de novo (code=${exitCode ?? 'null'}) e o FREIO ANTI-TEMPESTADE está armado: `
+          + `${plan.maxAttempts} reinícios em ${Math.round(plan.windowMs / 60_000)} min sem estabilizar. `
+          + 'Novas tentativas automáticas ficam suspensas até a janela deslizar — o health-check segue como rede de '
+          + 'segurança. A câmera provavelmente está offline de verdade: verifique link/energia/credenciais no local.',
+        );
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        void this.restartRecordingAfterCrash(cameraId, state.segmentSeconds, plan.attempt, plan.maxAttempts);
+      }, plan.delayMs);
+      timer.unref?.();
+      this.restartTimers.set(cameraId, timer);
+      this.logger.warn(
+        `Gravação camera=${cameraId} MORREU sem pedido de parada (code=${exitCode ?? 'null'}). `
+        + `Reiniciando em ${plan.delayMs}ms (tentativa ${plan.attempt}/${plan.maxAttempts}).`,
+      );
+    } catch (error) {
+      // Agendar reinício é melhoria: se falhar, o health-check continua sendo a
+      // rede de segurança — mas nunca pode derrubar a finalização.
+      this.logger.warn(`Falha ao agendar reinício da gravação camera=${cameraId}: ${sanitizeSensitiveText(error)}`);
+    }
+  }
+
+  private async restartRecordingAfterCrash(
+    cameraId: string,
+    segmentSeconds: number,
+    attempt: number,
+    maxAttempts: number,
+  ) {
+    try {
+      this.restartTimers.delete(cameraId);
+      if (this.shuttingDown) return;
+      if (this.active.has(cameraId)) return; // alguém já retomou (health-check/operador)
+
+      // SEGUNDA barreira contra ressuscitar parada pedida: o estado DESEJADO
+      // mora no banco. `stop()` (e o post-roll de movimento, que passa por ele)
+      // grava recordingEnabled=false ANTES de matar o processo.
+      const camera = await this.prisma.camera.findUnique({
+        where: { id: cameraId },
+        select: { recordingEnabled: true, enabled: true },
+      });
+      if (!camera || camera.recordingEnabled !== true || camera.enabled === false) {
+        this.logger.log(`Reinício de gravação camera=${cameraId} cancelado: o estado desejado não é gravar.`);
+        return;
+      }
+
+      const seconds = Number.isFinite(segmentSeconds) && segmentSeconds > 0
+        ? segmentSeconds
+        : Math.max(1, Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300));
+      await this.start(cameraId, seconds);
+      this.logger.log(`Gravação camera=${cameraId} REINICIADA após queda (tentativa ${attempt}/${maxAttempts}).`);
+    } catch (error) {
+      // Não reagenda aqui de propósito: `start()` só lança por motivo
+      // ESTRUTURAL (disco cheio, política comercial, câmera sumida) — insistir
+      // em ciclo seria a tempestade que o freio existe para evitar. Se o ffmpeg
+      // subir e morrer de novo, o caminho normal de queda cuida do resto.
+      this.logger.error(`Falha ao reiniciar gravação camera=${cameraId} após queda: ${sanitizeSensitiveText(error)}`);
+    }
   }
 
   private async stopProcessAndWait(state: RecordingProcessState) {
@@ -1544,10 +1764,22 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       : `copy-${resolvedOutput.outputIsHevc ? 'hevc' : sourceCodec ?? 'source'}`;
     this.logger.log(`Iniciando gravação camera=${cameraId} mode=${this.recordingCodecMode} sourceCodec=${sourceCodec ?? 'unknown'} output=${outputVideoCodec} rtsp=${this.sanitizeRtspUrl(rtspUrl)}`);
 
+    // A GRAVAÇÃO é o caminho crítico: spawn DIRETO do ffmpeg, em prioridade
+    // NORMAL. Quem cede a vez (nice) são os ffmpeg auxiliares do recordings.service.
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let state: RecordingProcessState | null = null;
+    // Ring do stderr: teto rígido de linhas, despejado só se o processo MORRER
+    // anormalmente. Em produção o nível DEBUG abaixo fica desligado — sem o ring
+    // não sobra nada para responder "por que a câmera parou de gravar às 3h?".
+    const stderrRing = createStderrRing(
+      Number(process.env.RECORDING_STDERR_RING_LINES ?? DEFAULT_STDERR_RING_LINES),
+    );
     proc.stderr.on('data', (chunk) => {
-      const msg = sanitizeSensitiveText(chunk.toString().trim());
+      const text = chunk.toString();
+      try {
+        appendStderrChunk(stderrRing, text);
+      } catch { /* diagnóstico nunca atrapalha a captura */ }
+      const msg = sanitizeSensitiveText(text.trim());
       if (msg) this.logger.debug(`FFmpeg REC camera=${cameraId}: ${msg}`);
     });
 
@@ -1588,6 +1820,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       knownFiles: new Set<string>(),
       scanInFlight: null,
       finalizePromise: null,
+      stderrRing,
     };
 
     this.active.set(cameraId, state);
@@ -1638,6 +1871,10 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       where: { id: cameraId },
       data: { recordingEnabled: false, ...(await this.resolveRecordingModeUpdate(cameraId, options?.recordingMode)) },
     });
+
+    // O desejado agora é NÃO gravar: mata qualquer reinício automático que tenha
+    // sido agendado por uma queda anterior (a parada vence a corrida).
+    this.cancelPendingRestart(cameraId);
 
     const state = this.active.get(cameraId);
     if (!state) {
@@ -1839,6 +2076,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   async onApplicationShutdown() {
+    // ANTES de qualquer kill: desligar a API não pode disparar gravação nova.
+    this.shuttingDown = true;
+    for (const cameraId of [...this.restartTimers.keys()]) {
+      this.cancelPendingRestart(cameraId);
+    }
     for (const timer of this.motionStopTimers.values()) {
       clearTimeout(timer);
     }
