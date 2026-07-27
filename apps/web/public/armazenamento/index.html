@@ -294,7 +294,7 @@
       </div>
       <div class="quick-cell">
         <p class="quick-k">A mesma, por movimento</p>
-        <div class="quick-v">2 a 15 <span class="u">GB/dia</span></div>
+        <div class="quick-v">0,7 a 15 <span class="u">GB/dia</span></div>
         <p class="quick-note">Depende do movimento da cena</p>
       </div>
       <div class="quick-cell">
@@ -331,7 +331,7 @@
         <h2><span class="num">01</span>A regra de ouro</h2>
         <p class="sub">Se você levar só uma ideia deste guia, que seja esta.</p>
 
-        <p>O espaço que uma câmera ocupa <strong>não depende da resolução sozinha</strong> — depende do <strong>bitrate</strong>, que é a quantidade de dados que a câmera produz por segundo. Duas câmeras 1080p podem consumir o dobro uma da outra, se estiverem configuradas com bitrates diferentes.</p>
+        <p>O espaço que uma câmera ocupa <strong>não depende da resolução sozinha</strong> — depende do <strong>bitrate</strong>, que é a quantidade de dados que a câmera produz por segundo. Duas câmeras 1080p podem ter consumos bem diferentes, dependendo do bitrate configurado em cada uma.</p>
 
         <div class="formula">
           Espaço por dia = <b>bitrate</b> ÷ 8 × 86.400 segundos<br>
@@ -349,7 +349,7 @@
           <div class="card">
             <div class="icon">H.265</div>
             <h4>O codec muda tudo</h4>
-            <p>H.265 entrega a mesma imagem com cerca de metade do bitrate do H.264. Uma câmera 1080p em H.265 pode ocupar menos que uma 720p em H.264.</p>
+            <p>H.265 entrega a mesma imagem com cerca de metade do bitrate do H.264. Na prática: uma 1080p em H.265 ocupa metade do disco de uma 1080p em H.264.</p>
           </div>
           <div class="card">
             <div class="icon">%</div>
@@ -365,7 +365,7 @@
 
         <div class="tw">
           <table>
-            <caption>Valores em GB decimais (1 GB = 1.000 MB). Ferramentas de disco do Linux mostram GiB, cerca de 7% menor para o mesmo arquivo.</caption>
+            <caption>Valores em GB decimal (1 GB = 1.000 MB). Ferramentas de disco do Linux mostram GiB, unidade cerca de 7% menor para o mesmo arquivo.</caption>
             <thead>
               <tr>
                 <th scope="col">Qualidade</th>
@@ -423,7 +423,7 @@
 
         <div class="note">
           <span class="tag">Repare</span>
-          <p>Uma câmera <strong>1080p em H.265</strong> (22,2 GB/dia) consome <strong>metade</strong> de uma 1080p em H.264 (43,2 GB/dia) — mesma imagem, mesmo tamanho de tela. É a decisão de configuração com maior impacto no custo de armazenamento.</p>
+          <p>Uma câmera <strong>1080p em H.265</strong> (22,2 GB/dia) ocupa <strong>metade do disco</strong> de uma 1080p em H.264 (43,2 GB/dia) — mesma imagem, mesmo tamanho de tela. É a decisão de configuração com maior impacto no custo de armazenamento.</p>
         </div>
       </section>
 
@@ -495,7 +495,7 @@
 
         <div class="note">
           <span class="tag">Ponto de decisão</span>
-          <p>Quando a cena é muito movimentada, o modo por movimento economiza pouco (33% no caso intenso acima) e ainda corre o risco de perder trechos entre eventos. <strong>Acima de ~60% de atividade, a gravação contínua costuma ser a escolha melhor</strong> — mais simples, sem lacunas e com custo previsível.</p>
+          <p>Quando a cena é muito movimentada, o modo por movimento economiza pouco (33% no caso intenso acima) e ainda corre o risco de perder trechos entre eventos. <strong>Acima de ~60% de atividade, a gravação contínua costuma ser a melhor escolha</strong> — mais simples, sem lacunas e com custo previsível.</p>
         </div>
       </section>
 
@@ -588,13 +588,13 @@
               <tr>
                 <td class="name">Bitrate dos fluxos secundários<span class="sub2">8 câmeras, usados no mosaico</span></td>
                 <td class="n">1,06 Mbps</td>
-                <td>Contadores de tráfego do servidor de mídia, amostrados em intervalo</td>
+                <td>Contadores de tráfego do servidor de mídia, lidos duas vezes com 20 segundos de intervalo</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-        <p>A consistência entre esses números é o que dá confiança ao guia: a câmera medida gravou <strong>14,9 GB</strong> em um dia; a conta teórica para 66,7% de um dia a 2,06 Mbps dá <strong>14,8 GB</strong>. A diferença fica dentro do arredondamento — ou seja, <strong>a fórmula da Seção 01 descreve corretamente o comportamento real do sistema</strong>.</p>
+        <p>Esses números calibram todas as tabelas deste guia — e trazem uma lição prática: a câmera medida vigia uma cena bem movimentada e gravou <strong>66,7% do dia</strong>, confirmando com dado real que, <strong>em cena agitada, o modo por movimento economiza pouco</strong> (Seção 03). Em cenas calmas, o mesmo mecanismo economiza 90% ou mais.</p>
       </section>
 
       <section id="economia">
@@ -605,7 +605,7 @@
           <div class="card">
             <div class="icon">1:1</div>
             <h4>Gravação em cópia</h4>
-            <p>O vídeo é salvo exatamente como a câmera enviou, sem recompressão. Preserva 100% da qualidade original e não gasta processador — outros sistemas recomprimem e perdem qualidade a cada gravação.</p>
+            <p>O vídeo é salvo exatamente como a câmera enviou, sem recompressão. Preserva 100% da qualidade original e não gasta processador — muitos sistemas recomprimem e perdem qualidade nesse processo.</p>
           </div>
           <div class="card">
             <div class="icon">↓</div>
@@ -620,7 +620,7 @@
           <div class="card">
             <div class="icon">92%</div>
             <h4>Proteção de disco</h4>
-            <p>Se o armazenamento passar de 92% de uso, o sistema interrompe a gravação automaticamente. É uma trava de segurança: um disco 100% cheio derruba o servidor inteiro.</p>
+            <p>Se o armazenamento passar de 92% de uso, o sistema interrompe a gravação automaticamente. É uma trava de segurança: um disco 100% cheio pode travar o servidor inteiro.</p>
           </div>
         </div>
       </section>
@@ -632,9 +632,9 @@
         <ul>
           <li><strong>Cada 1 Mbps ≈ 11 GB por dia.</strong> É a única conta que precisa ser memorizada. Multiplique pelo número de câmeras e pelos dias de retenção.</li>
           <li><strong>Prefira H.265 sempre que a câmera suportar.</strong> Corta o armazenamento pela metade com a mesma qualidade de imagem. É a economia mais barata que existe.</li>
-          <li><strong>Cena movimentada? Grave contínuo.</strong> Acima de ~60% de atividade o modo por movimento economiza pouco e ainda arrisca perder trechos entre eventos.</li>
+          <li><strong>Cena movimentada? Grave no modo contínuo.</strong> Acima de ~60% de atividade o modo por movimento economiza pouco e ainda arrisca perder trechos entre eventos.</li>
           <li><strong>Cena parada? Grave por movimento.</strong> Em depósitos, salas técnicas e áreas restritas a economia chega a 90% ou mais.</li>
-          <li><strong>Resolução alta só onde a imagem precisa ser lida.</strong> 4K faz sentido para ler placa e reconhecer rosto à distância — custa quatro vezes o disco de um 1080p. Numa visão geral de pátio, é dinheiro em disco sem ganho de evidência.</li>
+          <li><strong>Resolução alta só onde a imagem precisa ser lida.</strong> 4K faz sentido para ler placa e reconhecer rosto à distância — custa cerca de quatro vezes o disco de uma câmera 1080p. Numa visão geral de pátio, é dinheiro em disco sem ganho de evidência.</li>
           <li><strong>Retenção é a variável mais cara.</strong> Dobrar os dias guardados dobra o disco. Antes de comprar armazenamento, verifique quantos dias de fato precisam ser mantidos — obrigação legal, contrato ou apenas hábito.</li>
           <li><strong>Deixe 20% a 30% de folga.</strong> A conta da tabela é o mínimo, não o recomendado.</li>
         </ul>
