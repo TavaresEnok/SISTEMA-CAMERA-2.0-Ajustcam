@@ -72,6 +72,28 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   private static readonly WATCHDOG_BAD_TICKS = 3; // 3 × 20s = ~60s antes de agir
   private readonly recoveringPaths = new Set<string>();
 
+  // ── FREIO ANTI-TEMPESTADE ──────────────────────────────────────────────────
+  // Técnica derivada do Frigate (MIT) — Copyright (c) Frigate, Inc.
+  // (frigate/watchdog.py: MAX_RESTARTS / RESTART_WINDOW_S + is_restarting_too_fast).
+  //
+  // Sem ele, câmera MORTA (fonte offline, link caído, obra na rua) = ciclo eterno:
+  // a cada ~80s o watchdog apaga e recria o path, roda ffprobe e sobe FFmpeg de
+  // novo — CPU queimada 24/7 por uma fonte que não vai voltar sozinha, e log
+  // inundado justamente quando alguém precisa ler o log.
+  //
+  // Diferença deliberada do Frigate: aqui o freio só arma quando a recuperação é
+  // FÚTIL. Se o path volta a progredir (bytes crescendo com espectador), a janela
+  // é ZERADA em clearRecoveryBrake — câmera que realmente se recupera nunca é
+  // freada. Falso positivo que deixa câmera boa sem live é pior que o sintoma.
+  //
+  // Sob freio o watchdog NÃO desiste: espera o resfriamento (crescente) e volta a
+  // tentar. Nada é apagado, nada é desabilitado — só espaçamos as tentativas.
+  private static readonly BRAKE_MAX_RECOVERIES = 5;
+  private static readonly BRAKE_WINDOW_MS = 10 * 60_000;
+  private static readonly BRAKE_BASE_COOLDOWN_MS = 2 * 60_000;
+  private static readonly BRAKE_MAX_COOLDOWN_MS = 30 * 60_000;
+  private readonly recoveryBrake = new Map<string, { attempts: number[]; cooldownUntil: number; level: number }>();
+
   constructor(
     private readonly configService: ConfigService,
     private readonly camerasService: CamerasService,
@@ -187,6 +209,13 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       const badTicks = noProgress ? prev.badTicks + 1 : 0;
       this.watchdogState.set(name, { lastBytes: bytes, badTicks });
 
+      // PROVA de saúde (bytes novos com fonte pronta): a recuperação anterior
+      // funcionou de verdade, então a janela do freio é zerada. Sem isto, uma
+      // câmera intermitente porém CURÁVEL acabaria freada por acumular resets.
+      if (prev.lastBytes >= 0 && ready && bytes > prev.lastBytes) {
+        this.clearRecoveryBrake(name);
+      }
+
       if (badTicks >= MediamtxProxyService.WATCHDOG_BAD_TICKS) {
         this.watchdogState.delete(name);
         stuck.push({ name, ready, readers });
@@ -200,6 +229,78 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     for (const key of [...this.watchdogState.keys()]) {
       if (!seen.has(key)) this.watchdogState.delete(key);
     }
+    // Idem para o freio: path que sumiu do MediaMTX não pode deixar estado para
+    // trás (a API roda meses sem reiniciar — Map sem poda é vazamento).
+    for (const key of [...this.recoveryBrake.keys()]) {
+      if (!seen.has(key)) this.recoveryBrake.delete(key);
+    }
+  }
+
+  /** Relógio do freio — costura de teste (produção usa o relógio do sistema). */
+  private nowMs(): number {
+    return Date.now();
+  }
+
+  /**
+   * true → este path está em RESFRIAMENTO: não tentar recuperar agora.
+   * Ao vencer o resfriamento, libera com a janela limpa (mas guarda o NÍVEL: se
+   * a fonte continuar morta, o próximo freio é mais longo).
+   */
+  private isRecoveryBraked(pathName: string): boolean {
+    const entry = this.recoveryBrake.get(pathName);
+    if (!entry || entry.cooldownUntil <= 0) return false;
+    const now = this.nowMs();
+    if (now < entry.cooldownUntil) return true;
+    entry.cooldownUntil = 0;
+    entry.attempts.length = 0;
+    this.logger.warn(`Watchdog: resfriamento de ${pathName} terminou — voltando a tentar recuperar.`);
+    return false;
+  }
+
+  /**
+   * Registra a tentativa e ARMA o freio quando N recuperações caem na janela.
+   * Equivale ao deque(maxlen) + popleft do Frigate: a janela desliza, tentativas
+   * antigas não contam.
+   */
+  private noteRecoveryAttempt(pathName: string, cameraId: string): void {
+    const now = this.nowMs();
+    const entry = this.recoveryBrake.get(pathName) ?? { attempts: [], cooldownUntil: 0, level: 0 };
+    this.recoveryBrake.set(pathName, entry);
+
+    // Janela DESLIZANTE: descarta tentativas mais velhas que a janela antes de
+    // contar. Sem isto, uma câmera que cai de vez em quando acumularia tentativas
+    // para sempre e acabaria freada — e armar o freio dispara alerta ("a fonte não
+    // volta sozinha, manda alguém no local"). Chamado falso destrói a confiança no
+    // alerta, então intermitente NÃO pode ser confundida com fonte morta.
+    // Equivale ao deque(maxlen)+popleft do Frigate (watchdog.py).
+    const janelaInicio = now - MediamtxProxyService.BRAKE_WINDOW_MS;
+    entry.attempts = entry.attempts.filter((at) => at > janelaInicio);
+
+    entry.attempts.push(now);
+    if (entry.attempts.length < MediamtxProxyService.BRAKE_MAX_RECOVERIES) return;
+
+    entry.level += 1;
+    const cooldownMs = Math.min(
+      MediamtxProxyService.BRAKE_MAX_COOLDOWN_MS,
+      MediamtxProxyService.BRAKE_BASE_COOLDOWN_MS * 2 ** (entry.level - 1),
+    );
+    entry.cooldownUntil = now + cooldownMs;
+    entry.attempts.length = 0;
+
+    this.logger.error(
+      `Watchdog: FREIO ANTI-TEMPESTADE em ${pathName} — ${MediamtxProxyService.BRAKE_MAX_RECOVERIES} recuperações ` +
+        `em ${Math.round(MediamtxProxyService.BRAKE_WINDOW_MS / 60_000)} min sem a fonte voltar. Pausando novas ` +
+        `tentativas por ${Math.round(cooldownMs / 1000)}s (nível ${entry.level}). A câmera provavelmente está ` +
+        `offline de verdade: verifique link/energia no local. Gravação e demais câmeras seguem intactas.`,
+    );
+    try {
+      cameraMetrics.recordStreamRecoveryBrake(cameraId);
+    } catch { /* observabilidade nunca interrompe o watchdog */ }
+  }
+
+  /** Path provado saudável (ou inexistente): zera janela E escalonamento. */
+  private clearRecoveryBrake(pathName: string): void {
+    this.recoveryBrake.delete(pathName);
   }
 
   private async recoverStuckPaths(stuck: Array<{ name: string; ready: boolean; readers: number }>) {
@@ -220,6 +321,13 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // Guard POR-PATH: evita recuperar o MESMO path duas vezes em paralelo (entre
     // ticks). Paths DIFERENTES recuperam concorrentemente (ver recoverStuckPaths).
     if (this.recoveringPaths.has(pathName)) return;
+    // Freio anti-tempestade: em resfriamento, nem tenta (o log do freio já
+    // explicou o porquê; aqui seria só ruído a cada tick).
+    if (this.isRecoveryBraked(pathName)) {
+      this.logger.debug?.(`Watchdog: ${pathName} em resfriamento do freio anti-tempestade — pulando.`);
+      return;
+    }
+    this.noteRecoveryAttempt(pathName, parsed.cameraId);
     this.recoveringPaths.add(pathName);
     this.logger.warn(
       `Watchdog: path travado ${pathName} (ready=${ready}, readers=${readers}, sem progresso) — forçando reset.`,
@@ -299,6 +407,18 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // Público para o Source Gateway: consumidores precisam saber o NOME do path
   // interno daquela câmera/perfil para pedir a URL republicada. Só leitura — a
   // função é pura (deriva o nome do id), não cria nem altera path nenhum.
+  /**
+   * O container que executa o FFmpeg do publisher tem NVENC?
+   *
+   * `GPU_TRANSCODE_AVAILABLE=true` é setado quando o stack sobe com a imagem
+   * `mediamtx-nvenc`. Sem esse sinal assumimos CPU — falso negativo custa
+   * desempenho; falso positivo custa a LIVE, então erramos para o lado seguro.
+   */
+  private transcodePipelineHasNvenc(): boolean {
+    const raw = this.configService.get<string>('gpuTranscodeAvailable') ?? process.env.GPU_TRANSCODE_AVAILABLE ?? '';
+    return String(raw).trim().toLowerCase() === 'true';
+  }
+
   pathNameFromCameraId(cameraId: string, deliveryMode: LiveViewMode = 'selected') {
     const base = `cam_${cameraId.replace(/[^a-zA-Z0-9]/g, '')}`;
     // 'original' tem path PRÓPRIO (_orig): se compartilhasse o base com 'selected',
@@ -1031,7 +1151,14 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       // (h264_nvenc), mantendo o mesmo bitrate/GOP. O decode/scale segue na CPU
       // (compatível com qualquer driver); o ganho está no encode, que é a parte
       // mais cara quando há muitas câmeras. Exige imagem do MediaMTX com NVENC.
-      const useNvenc = gpuAccel;
+      // ⚠️ NÃO basta a configuração estar ligada: o encode roda no container do
+      // MediaMTX, e emitir `-c:v h264_nvenc` num ffmpeg SEM NVENC faz o publisher
+      // morrer na largada — com runOnDemandRestart=false, sem retry e sem
+      // fallback, o que derruba a live daquela câmera. Isso era alcançável por um
+      // admin clicando "Ativar GPU" num host INTEL (o hardware mais comum aqui),
+      // porque o portão do painel aceitava vaapi/qsv mas o publisher só sabe NVENC.
+      // Agora exigimos o sinal explícito de que o pipeline de transcode TEM NVENC.
+      const useNvenc = gpuAccel && this.transcodePipelineHasNvenc();
       const videoArgs = sanitizeGridSource
         ? '-c:v copy'
         : useNvenc

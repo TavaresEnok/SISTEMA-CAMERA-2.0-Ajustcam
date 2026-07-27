@@ -9,7 +9,12 @@
 ARG CUDA_TAG=12.4.1-runtime-ubuntu22.04
 FROM nvidia/cuda:${CUDA_TAG}
 
-ARG MEDIAMTX_VERSION=v1.9.3
+# ⚠️ TEM de acompanhar a versão do MediaMTX de PRODUÇÃO (bluenviron/mediamtx:1-ffmpeg).
+# A v1.9.3 que ficou aqui REJEITA o infra/mediamtx.yml atual (`hlsAllowOrigins`,
+# linha 19, é chave mais nova): o container subia e morria, então ligar a GPU
+# derrubava a live de TODAS as câmeras. Ao atualizar a imagem de produção,
+# atualize esta linha junto — o gpu-setup.sh tem um smoke test que pega isso.
+ARG MEDIAMTX_VERSION=v1.18.2
 ARG TARGETARCH=amd64
 
 # ffmpeg do Ubuntu 22.04 já traz h264_nvenc/hevc_nvenc (carrega libnvidia-encode
