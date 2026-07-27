@@ -34,13 +34,24 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Instala as MESMAS versões pinadas de opencv/numpy do serviço, para que os
-      # testes que dependem de cv2 (MOG2 em detectors/motion.py) rodem DE VERDADE
-      # no CI — não só a lógica pura. (item 0.3 do docs/PLANO-EVOLUCAO-DRAC.md)
-      - name: Install ai-service test deps (cv2/numpy pinados)
+      # Instala a stack ML COMPLETA (versões pinadas do serviço). Instalar só
+      # opencv+numpy deixava supervision/onnxruntime/requests de fora, então os
+      # testes de object_detector (tracker ByteTrack, item 2.5) e de logging do
+      # stream ficavam `skipped` e o unittest reportava OK — exatamente o
+      # falso-verde que o item 0.3 se propôs a matar.
+      - name: Install ai-service test deps (stack ML pinada)
         run: |
           pip install "$(grep -E '^opencv-python-headless==' services/ai-service-python/requirements.txt)" \
-                      "$(grep -E '^numpy==' services/ai-service-python/requirements.txt)"
+                      "$(grep -E '^numpy==' services/ai-service-python/requirements.txt)" \
+                      "$(grep -E '^requests==' services/ai-service-python/requirements.txt)" \
+                      "$(grep -E '^onnxruntime==' services/ai-service-python/requirements.txt)" \
+                      "$(grep -E '^supervision==' services/ai-service-python/requirements.txt)"
+
+      # Dentes do gate: se qualquer dependência da stack faltar, os testes que
+      # dependem dela se auto-pulam e o job passaria VERDE sem cobrir nada.
+      # Aqui o job FALHA em vez de mascarar.
+      - name: Exigir a stack ML presente (sem skip silencioso)
+        run: python3 -c "import cv2, numpy, requests, onnxruntime, supervision; print('stack ML completa OK')"
 
       - name: Run ai-service unit tests
         run: python3 -m unittest discover -s services/ai-service-python/tests -t services/ai-service-python -v
