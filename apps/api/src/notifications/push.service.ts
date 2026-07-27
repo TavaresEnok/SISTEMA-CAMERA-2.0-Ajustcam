@@ -95,14 +95,22 @@ export class PushService {
    * aparecem aqui, não no ticket. Idealmente chamado ~15min após o envio (job).
    * Devolve os tokens a remover — falha de rede não remove nada (pode reprocessar).
    */
-  async fetchReceipts(receiptIdToToken: Record<string, string>): Promise<{ invalidTokens: string[] }> {
+  async fetchReceipts(
+    receiptIdToToken: Record<string, string>,
+  ): Promise<{ invalidTokens: string[]; failedChunks: number; lastError: string | null; okCount: number; errorCount: number }> {
     const ids = Object.keys(receiptIdToToken);
-    if (!ids.length) return { invalidTokens: [] };
+    if (!ids.length) return { invalidTokens: [], failedChunks: 0, lastError: null, okCount: 0, errorCount: 0 };
     const accessToken = String(this.configService.get<string>('expoAccessToken') ?? '').trim();
     const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
     const invalidTokens: string[] = [];
+    let failedChunks = 0;
+    let lastError: string | null = null;
+    // Contagem por desfecho: é o que PROVA a entrega (ou a nega) para promover o
+    // status do alarme de ACCEPTED para DELIVERED/FAILED.
+    let okCount = 0;
+    let errorCount = 0;
     for (let i = 0; i < ids.length; i += PushService.CHUNK) {
       const chunk = ids.slice(i, i + PushService.CHUNK);
       try {
@@ -112,13 +120,23 @@ export class PushService {
           { headers, timeout: 10_000 },
         );
         const idToToken = Object.fromEntries(chunk.map((id) => [id, receiptIdToToken[id]]));
-        const { invalidTokens: dead, errors } = invalidTokensFromReceipts(res.data?.data ?? {}, idToToken);
+        const receipts = res.data?.data ?? {};
+        for (const receipt of Object.values(receipts)) {
+          if (receipt?.status === 'error') errorCount += 1;
+          else okCount += 1;
+        }
+        const { invalidTokens: dead, errors } = invalidTokensFromReceipts(receipts, idToToken);
         invalidTokens.push(...dead);
         for (const e of errors) this.logger.warn(`Expo receipt error token=${e.token.slice(0, 24)}… error=${e.error}`);
       } catch (error) {
-        this.logger.warn(`Falha ao consultar receipts do Expo: ${error instanceof Error ? error.message : 'unknown'}`);
+        // Falha de rede/HTTP NÃO remove token (pode ser transitória), mas também
+        // não pode ser engolida: o job precisa saber para RETENTAR. Seguimos os
+        // demais chunks para não perder o progresso já obtido.
+        failedChunks += 1;
+        lastError = error instanceof Error ? error.message : 'unknown';
+        this.logger.warn(`Falha ao consultar receipts do Expo: ${lastError}`);
       }
     }
-    return { invalidTokens };
+    return { invalidTokens, failedChunks, lastError, okCount, errorCount };
   }
 }

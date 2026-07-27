@@ -246,7 +246,7 @@ export class AlarmNotificationProcessor extends WorkerHost {
       try {
         await this.pushReceiptsQueue.add(
           'fetch-receipts',
-          { receiptIds },
+          { receiptIds, alarmId: alarm.id },
           {
             delay: pushReceiptsDelayMs(),
             attempts: 3,
@@ -281,10 +281,14 @@ export class AlarmNotificationProcessor extends WorkerHost {
           : channel === 'email'
             ? await this.notifyEmail(alarm, rule, payload)
             : await this.notifyPush(alarm);
+        // Push só é ACCEPTED aqui: o Expo aceitou o TICKET, o que não prova entrega.
+        // A promoção para DELIVERED/FAILED vem do job de receipts (estágio 2).
+        // Email/webhook continuam DELIVERED (a resposta do provedor é a confirmação).
+        const okStatus = channel === 'push' ? 'ACCEPTED' : 'DELIVERED';
         await this.appendDelivery(alarm.id, {
           at: new Date().toISOString(),
           channel,
-          status: result.skipped ? 'SKIPPED' : 'DELIVERED',
+          status: result.skipped ? 'SKIPPED' : okStatus,
           reason: result.skipped ? result.reason : null,
           jobId: job.id,
           attempt: job.attemptsMade + 1,
@@ -296,7 +300,7 @@ export class AlarmNotificationProcessor extends WorkerHost {
           alarm.id,
           {
             channel,
-            status: result.skipped ? 'SKIPPED' : 'DELIVERED',
+            status: result.skipped ? 'SKIPPED' : okStatus,
             reason: result.skipped ? result.reason : null,
             attempt: job.attemptsMade + 1,
             jobId: String(job.id ?? ''),

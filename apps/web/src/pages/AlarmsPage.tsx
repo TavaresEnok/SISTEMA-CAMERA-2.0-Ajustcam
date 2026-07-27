@@ -201,7 +201,11 @@ function AlarmCard({ alarm, onAck, onResolve, onAddNote }: { alarm: Alarm; onAck
                   ))}
                 </div>
               )}
-              {alarm.lastNotificationStatus && alarm.lastNotificationStatus !== 'DELIVERED' && (
+              {/* ACCEPTED = push aceito pelo Expo, aguardando o receipt (estágio 2).
+                  NÃO é falha — só ainda não é entrega provada. */}
+              {alarm.lastNotificationStatus
+                && alarm.lastNotificationStatus !== 'DELIVERED'
+                && alarm.lastNotificationStatus !== 'ACCEPTED' && (
                 <div className="rounded border border-[hsl(354_52%_52%_/_0.35)] bg-[hsl(354_52%_52%_/_0.10)] px-3 py-2">
                   <p className="text-[10px] font-semibold text-[hsl(354,52%,65%)] uppercase tracking-wider">Notificação com falha</p>
                   <p className="text-[11px] text-[hsl(354,52%,72%)] mt-1">
@@ -221,7 +225,9 @@ function AlarmCard({ alarm, onAck, onResolve, onAddNote }: { alarm: Alarm; onAck
                       const attempt = typeof delivery?.attempt === 'number' ? delivery.attempt : null;
                       const tone = status === 'DELIVERED'
                         ? 'border-[hsl(var(--status-online)_/_0.3)] bg-[hsl(var(--status-online)_/_0.1)] text-[hsl(var(--status-online))]'
-                        : status === 'SKIPPED'
+                        : status === 'ACCEPTED'
+                          ? 'border-border bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]'
+                          : status === 'SKIPPED'
                           ? 'border-[hsl(var(--status-warning)_/_0.3)] bg-[hsl(var(--status-warning)_/_0.1)] text-[hsl(var(--status-warning))]'
                           : 'border-[hsl(var(--destructive)_/_0.3)] bg-[hsl(var(--destructive)_/_0.1)] text-[hsl(var(--destructive))]';
                       return (
