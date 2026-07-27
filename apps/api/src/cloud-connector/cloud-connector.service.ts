@@ -671,13 +671,46 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    if (restrictions.aiAdvanced === false) {
-      try {
-        const aiService = this.moduleRef.get(AiService, { strict: false });
-        await aiService.stopAll();
-      } catch (error) {
-        this.logger.warn(`Falha ao parar IA por restricao comercial: ${error instanceof Error ? error.message : String(error)}`);
+    await this.enforceAiRestrictions(restrictions);
+  }
+
+  /**
+   * Aplica a política de IA vinda da Central.
+   *
+   * ⚠️ ARMADILHA que este método existe para evitar: antes, QUALQUER
+   * `aiAdvanced:false` derrubava TODA a IA via stopAll(). Com a política
+   * granular, "somente movimento" (o estado desejado e mais comum) produz
+   * `aiAdvanced:false` — e o stopAll cego mataria também o MOG2, que é o que ARMA
+   * a gravação por movimento. Resultado: câmeras armadas parariam de gravar
+   * silenciosamente. Por isso a decisão é tomada por CAPACIDADE, não pelo campo
+   * legado.
+   *
+   * COMPATIBILIDADE: uma Central antiga não envia as chaves granulares. Nesse
+   * caso preservamos o comportamento histórico (aiAdvanced:false ⇒ para tudo),
+   * senão uma restrição comercial legítima deixaria de ser aplicada.
+   */
+  private async enforceAiRestrictions(restrictions: Record<string, unknown>) {
+    const hasGranular = 'aiMotion' in restrictions || 'aiObject' in restrictions || 'aiFace' in restrictions;
+
+    const mustStopEverything = hasGranular
+      // Movimento é a base: sem ele, nenhuma análise deve rodar.
+      ? restrictions.aiMotion === false
+      // Central antiga: comportamento histórico.
+      : restrictions.aiAdvanced === false;
+
+    if (!mustStopEverything) {
+      if (hasGranular && restrictions.aiObject !== true && restrictions.aiFace !== true) {
+        this.logger.log('Política da Central: somente detecção de MOVIMENTO habilitada (objeto/face desligados).');
       }
+      return;
+    }
+
+    try {
+      const aiService = this.moduleRef.get(AiService, { strict: false });
+      await aiService.stopAll();
+      this.logger.warn('Toda a IA foi parada por política da Central (movimento desabilitado).');
+    } catch (error) {
+      this.logger.warn(`Falha ao parar IA por restricao comercial: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

@@ -1551,6 +1551,76 @@
           render();
         }));
       }
+      // ── Inteligência artificial por instalação ─────────────────────────────
+      // Quais IAs aquela instalação pode rodar, decidido AQUI e empurrado no
+      // heartbeat (restrictions). MOVIMENTO é essencial: é ele que arma a
+      // gravação por movimento, então desligá-lo tem aviso explícito. Objeto e
+      // face são pesadas e nascem desligadas. A LICENÇA é teto: instalação
+      // restrita não ganha IA avançada por clique aqui — o servidor rebaixa.
+      const AI_CAPS = [
+        { key: 'motion', nome: 'Movimento (MOG2)', desc: 'Essencial — arma a gravação por movimento. Leve (~2% CPU/câmera).' },
+        { key: 'object', nome: 'Detecção de objeto', desc: 'Pesada. Reconhece pessoa, carro, moto…' },
+        { key: 'face', nome: 'Reconhecimento facial', desc: 'Pesada e sensível (LGPD).' },
+      ];
+
+      function renderAiSection(item) {
+        const body = document.getElementById('ai-body');
+        if (!body) return;
+        const pol = item.aiPolicy || { motion: true, object: false, face: false };
+        const avancadaBloqueada = item.restrictions && item.restrictions.aiAdvanced === false;
+
+        body.innerHTML = `
+          ${avancadaBloqueada ? '<div class="alert-item"><span class="badge warn">Contrato</span><div style="margin-top:6px">O contrato desta instalação não permite IA avançada; objeto e face ficam indisponíveis mesmo se marcados.</div></div>' : ''}
+          <div class="ai-caps">
+            ${AI_CAPS.map((cap) => `
+              <label class="ai-cap" style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);cursor:pointer">
+                <input type="checkbox" class="ai-toggle" data-cap="${escapeHtml(cap.key)}" ${pol[cap.key] ? 'checked' : ''} ${cap.key !== 'motion' && avancadaBloqueada ? 'disabled' : ''} />
+                <span>
+                  <strong>${escapeHtml(cap.nome)}</strong>
+                  <div style="opacity:.7;font-size:11px;margin-top:2px">${escapeHtml(cap.desc)}</div>
+                </span>
+              </label>`).join('')}
+          </div>
+          <div class="license-actions" style="margin-top:10px">
+            <button id="ai-only-motion" class="primary">Somente movimento</button>
+            <button id="ai-none" class="ghost">Desativar todas</button>
+          </div>
+          <div style="opacity:.7;font-size:11px;margin-top:8px">A mudança é aplicada na instalação no próximo sinal (até 60s).</div>`;
+
+        body.querySelectorAll('.ai-toggle').forEach((el) => el.addEventListener('change', async () => {
+          const cap = el.getAttribute('data-cap');
+          if (cap === 'motion' && !el.checked
+            && !confirm('Desligar o MOVIMENTO faz as câmeras armadas PARAREM de gravar por movimento. Confirmar?')) {
+            el.checked = true;
+            return;
+          }
+          await aiPolicyRequest(item.id, { [cap]: el.checked });
+        }));
+        body.querySelector('#ai-only-motion')?.addEventListener('click', () => aiPolicyRequest(item.id, { motion: true, object: false, face: false }));
+        body.querySelector('#ai-none')?.addEventListener('click', () => {
+          if (confirm('Desativar TODAS as IAs desta instalação? As câmeras armadas param de gravar por movimento.')) {
+            aiPolicyRequest(item.id, { motion: false, object: false, face: false });
+          }
+        });
+      }
+
+      // O estado real vem do servidor (que aplica o teto da licença), nunca do
+      // que a tela achou que iria gravar.
+      async function aiPolicyRequest(installationId, aiPolicy) {
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/ai-policy`), {
+            method: 'PATCH', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ aiPolicy }),
+          });
+          if (!res.ok) throw new Error(String(res.status));
+        } catch {
+          /* o reload abaixo revela o estado verdadeiro */
+        }
+        await load().catch(() => undefined);
+        renderDetail();
+      }
+
       // ── Escala · nós de computação (Fase 4) ────────────────────────────────
       // Tira a operação de escala da linha de comando: cadastro de nós e o
       // liga/desliga do scheduler passam a ser cliques. Degrada com elegância —
@@ -1766,11 +1836,16 @@
                 </div>
               </div>
             `}
+            <div class="section" id="ai-section">
+              <div class="section-title">Inteligência artificial</div>
+              <div id="ai-body"><div class="empty">Carregando…</div></div>
+            </div>
             <div class="section" id="scale-section">
               <div class="section-title">Escala · nós de computação</div>
               <div id="scale-body"><div class="empty">Carregando…</div></div>
             </div>
           </div>`;
+        renderAiSection(item);
         renderScaleSection(item.id);
         els.detail.querySelector('#save-license').addEventListener('click', () => requestContractChange(item.id, els.detail.querySelector('#license-select').value, els.detail.querySelector('#license-message').value.trim()));
         els.detail.querySelector('#suspend-license').addEventListener('click', () => requestContractChange(item.id, 'SUSPENDED', els.detail.querySelector('#license-message').value.trim() || 'Suspensão administrativa.'));

@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
 const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
+const { normalizeAiPolicy, validateAiPolicy, applyAiPolicyToRestrictions, describeAiPolicy } = require('./ai-policy');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
 
@@ -649,6 +650,9 @@ function publicInstallation(item) {
     // presente (booleano) para a tela poder desenhar o estado do interruptor sem
     // adivinhar; ausente no registro = desligado.
     schedulerEnabled: item.schedulerEnabled === true,
+    // Política de IA sempre presente (normalizada) para a tela desenhar os
+    // interruptores sem adivinhar o que "ausente" significa.
+    aiPolicy: normalizeAiPolicy(item.aiPolicy),
   };
 }
 
@@ -922,7 +926,8 @@ function licenseResponse(item) {
   return {
     licenseStatus: status,
     licenseMessage: item.licenseMessage || null,
-    restrictions,
+    // A política de IA do painel restringe ABAIXO do teto da licença (nunca acima).
+    restrictions: applyAiPolicyToRestrictions(restrictions, item.aiPolicy),
   };
 }
 
@@ -1437,6 +1442,39 @@ async function handlePatchComputeNodes(req, res, db, actor, installationId) {
 // GET: devolve o plano SALVO como está. Não replaneja e não escreve nada — um
 // GET que replanejasse trocaria tokens (e migraria câmeras) a cada refresh do
 // painel.
+
+/**
+ * Define QUAIS IAs a instalação pode rodar — pelo painel, não por linha de comando.
+ * Movimento (MOG2) é o essencial: ele ARMA a gravação por movimento, então
+ * desligá-lo faz câmeras armadas pararem de gravar (avisado na tela). Objeto e
+ * face são pesadas e nascem desligadas. A licença continua sendo o TETO: uma
+ * instalação restrita não ganha IA avançada por causa de um clique aqui.
+ */
+async function handlePatchAiPolicy(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  const body = await readBody(req);
+  const payload = body && typeof body === 'object' ? body.aiPolicy : null;
+  const validation = validateAiPolicy(payload);
+  if (!validation.valid) {
+    return json(req, res, 400, { error: 'invalid_ai_policy', details: validation.errors });
+  }
+  const previous = normalizeAiPolicy(item.aiPolicy);
+  const next = normalizeAiPolicy({ ...previous, ...payload });
+  item.aiPolicy = next;
+  item.updatedAt = new Date().toISOString();
+  addAuditEvent(db, req, {
+    type: 'installation.ai_policy_changed',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    from: describeAiPolicy(previous),
+    to: describeAiPolicy(next),
+  });
+  await saveDb(db);
+  return json(req, res, 200, publicInstallation(item));
+}
+
 async function handleGetSchedulerPlan(req, res, db, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
@@ -1977,6 +2015,11 @@ async function route(req, res) {
       }
 
       // ── Nós de computação por instalação (item 3.2) ────────────────────────
+      const aiPolicyMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/ai-policy$/);
+      if (req.method === 'PATCH' && aiPolicyMatch) {
+        return handlePatchAiPolicy(req, res, db, actor, decodeURIComponent(aiPolicyMatch[1]));
+      }
+
       const computeNodesMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/compute-nodes$/);
       if (req.method === 'PATCH' && computeNodesMatch) {
         return handlePatchComputeNodes(req, res, db, actor, decodeURIComponent(computeNodesMatch[1]));

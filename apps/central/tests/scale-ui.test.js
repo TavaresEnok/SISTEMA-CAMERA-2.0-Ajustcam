@@ -72,3 +72,42 @@ test('o id do nó é derivado de forma segura (sem quebrar a validação do serv
   assert.equal(derive('Nó #2 (São Paulo)'), 'n-2-s-o-paulo-');
   assert.match(PANEL, /replace\(\/\[\^a-z0-9-\]\+\/g, '-'\)/, 'a derivação precisa estar no painel');
 });
+
+// ── Tela de IA por instalação ───────────────────────────────────────────────
+test('IA: a seção existe e é renderizada a partir do detalhe', () => {
+  assert.match(PANEL, /id="ai-section"/);
+  assert.match(PANEL, /renderAiSection\(item\)/);
+  assert.match(PANEL, /async function aiPolicyRequest\(/);
+});
+
+test('IA: as três capacidades aparecem, com movimento marcado como essencial', () => {
+  assert.match(PANEL, /Movimento \(MOG2\)/);
+  assert.match(PANEL, /Detecção de objeto/);
+  assert.match(PANEL, /Reconhecimento facial/);
+  assert.match(PANEL, /Essencial — arma a gravação por movimento/);
+});
+
+test('IA: desligar movimento e desativar todas EXIGEM confirmação (param a gravação)', () => {
+  const i = PANEL.indexOf('function renderAiSection(');
+  const corpo = PANEL.slice(i, PANEL.indexOf('async function aiPolicyRequest('));
+  assert.match(corpo, /cap === 'motion' && !el\.checked/, 'desligar movimento é o caso perigoso');
+  assert.match(corpo, /confirm\(/, 'precisa confirmar antes de parar a gravação por movimento');
+  assert.match(corpo, /PARAREM de gravar/, 'o aviso precisa dizer a consequência real');
+  assert.match(corpo, /Desativar TODAS as IAs/);
+});
+
+test('IA: contrato sem IA avançada desabilita objeto/face na tela', () => {
+  const i = PANEL.indexOf('function renderAiSection(');
+  const corpo = PANEL.slice(i, PANEL.indexOf('async function aiPolicyRequest('));
+  assert.match(corpo, /avancadaBloqueada/);
+  assert.match(corpo, /cap\.key !== 'motion' && avancadaBloqueada \? 'disabled' : ''/, 'movimento nunca é bloqueado pelo contrato');
+});
+
+test('IA: dado do servidor escapado e estado recarregado do servidor', () => {
+  const i = PANEL.indexOf('function renderAiSection(');
+  const corpo = PANEL.slice(i, PANEL.indexOf('async function aiPolicyRequest('));
+  assert.match(corpo, /escapeHtml\(cap\.nome\)/);
+  assert.match(corpo, /escapeHtml\(cap\.desc\)/);
+  const req = PANEL.slice(PANEL.indexOf('async function aiPolicyRequest('), PANEL.indexOf('async function aiPolicyRequest(') + 800);
+  assert.match(req, /await load\(\)/, 'o teto da licença é aplicado no servidor: recarregue');
+});
