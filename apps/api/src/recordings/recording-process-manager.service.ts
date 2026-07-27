@@ -23,6 +23,7 @@ import { CommercialPolicyService } from '../commercial-policy/commercial-policy.
 import { buildRtspUrl, resolveRecordingRtspProfile } from '../cameras/helpers/rtsp-url.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { envNumber } from '../common/config/env-number.helper';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 // Registro de métricas por câmera. Importado como SINGLETON de módulo (e não por
 // DI) de propósito: instrumentar não pode exigir mexer no construtor deste
@@ -201,7 +202,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     const diskGuardEnabled = String(process.env.RECORDING_DISK_GUARD_ENABLED ?? 'true') !== 'false';
     if (diskGuardEnabled) {
-      const intervalMs = Math.max(10_000, Number(process.env.RECORDING_DISK_GUARD_INTERVAL_MS ?? 30000));
+      const intervalMs = envNumber('RECORDING_DISK_GUARD_INTERVAL_MS', 30_000, {
+        min: 10_000,
+        integer: true,
+        onInvalid: (m) => this.logger.warn(m),
+      });
       this.diskGuardTimer = setInterval(() => void this.enforceDiskGuard(), intervalMs);
       if (typeof this.diskGuardTimer.unref === 'function') this.diskGuardTimer.unref();
     }
@@ -292,7 +297,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     try {
       const { freeBytes, freePercent, usedPercent } = await this.getStorageUsage();
-      const maxUsedPercent = Number(process.env.RECORDING_DISK_GUARD_MAX_USED_PERCENT ?? 92);
+      // NaN aqui DESARMAVA a guarda (o isFinite abaixo virava false) e o disco
+      // enchia a 100% com todas as câmeras parando, sem erro nenhum no log.
+      const maxUsedPercent = envNumber('RECORDING_DISK_GUARD_MAX_USED_PERCENT', 92, {
+        min: 1,
+        max: 100,
+        onInvalid: (m) => this.logger.warn(m),
+      });
       const critical =
         freeBytes < this.minFreeBytes ||
         freePercent < this.minFreePercent ||

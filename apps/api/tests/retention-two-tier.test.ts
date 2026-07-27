@@ -57,9 +57,15 @@ type Harness = {
 };
 
 /**
- * Fake do Prisma modelado no schema REAL:
- *  · `recording.findMany({ include: { camera } })` devolve os escalares + a
- *    relação, ordenado por `startedAt asc` (como a query real);
+ * Fake do Prisma modelado no schema REAL e nas queries que o serviço emite
+ * depois que a expiração passou a ser feita em LOTES, com filtro de data no
+ * BANCO (antes ela hidratava o acervo inteiro e decidia em memória):
+ *  · `camera.findMany({ select: { id, retentionDays } })` — o agrupamento por
+ *    corte de retenção;
+ *  · `recording.findMany` com `where` (cameraId in/notIn, startedAt lt/gte, OR),
+ *    `orderBy [startedAt asc, id asc]`, `skip`/`take` e `select`;
+ *  · `recording.count` para o que a retenção em dois níveis RETEVE;
+ *  · `recording.fields` — como o cliente gerado anuncia as colunas que conhece;
  *  · `recording.delete` explode quando o id não existe (P2025) e faz o CASCADE
  *    de `ExportedClip.sourceRecording` (onDelete: Cascade no schema);
  *  · toda forma de query NÃO modelada explode — um fake que responde a
@@ -135,7 +141,48 @@ function buildHarness(seed: SeedRecording[], options: HarnessOptions = {}): Harn
     return out;
   };
 
+  const matchesDate = (value: Date, filter: any) => {
+    if (filter === undefined) return true;
+    if (filter.lt !== undefined && !(value.getTime() < filter.lt.getTime())) return false;
+    if (filter.gte !== undefined && !(value.getTime() >= filter.gte.getTime())) return false;
+    for (const key of Object.keys(filter)) {
+      if (key !== 'lt' && key !== 'gte') throw new Error(`fake: filtro de data não modelado: ${key}`);
+    }
+    return true;
+  };
+  const matchesCameraId = (cameraId: string, filter: any) => {
+    if (filter === undefined) return true;
+    if (filter.in) return filter.in.includes(cameraId);
+    if (filter.notIn) return !filter.notIn.includes(cameraId);
+    throw new Error(`fake: filtro de cameraId não modelado: ${JSON.stringify(filter)}`);
+  };
+  const matchesRecording = (row: any, where: any = {}): boolean => {
+    for (const key of Object.keys(where)) {
+      if (!['cameraId', 'startedAt', 'motionScore', 'OR', 'NOT', 'id'].includes(key)) {
+        throw new Error(`fake: campo de where não modelado em recording: ${key}`);
+      }
+    }
+    if (!matchesCameraId(row.cameraId, where.cameraId)) return false;
+    if (!matchesDate(row.startedAt, where.startedAt)) return false;
+    if (where.motionScore !== undefined && row.motionScore !== where.motionScore) return false;
+    if (where.id?.notIn && where.id.notIn.includes(row.id)) return false;
+    if (where.NOT !== undefined) {
+      if (where.NOT.motionScore === undefined) throw new Error('fake: NOT não modelado');
+      if (row.motionScore === where.NOT.motionScore) return false;
+    }
+    if (where.OR !== undefined && !where.OR.some((clause: any) => matchesRecording(row, clause))) return false;
+    return true;
+  };
+
   const prisma = {
+    camera: {
+      findMany: async (args: any) => {
+        if (!args?.select?.id || !args?.select?.retentionDays) {
+          throw new Error(`fake camera.findMany não modelado: ${JSON.stringify(args)}`);
+        }
+        return [...cameras.entries()].map(([id, camera]) => ({ id, retentionDays: camera.retentionDays }));
+      },
+    },
     investigationItem: {
       findMany: async (args: any) => {
         if (args?.where?.type === 'legal_hold') return holdRows.map((r) => ({ ...r }));
@@ -155,18 +202,19 @@ function buildHarness(seed: SeedRecording[], options: HarnessOptions = {}): Harn
             .filter((c) => args.where.id.in.includes(c.id))
             .map((c) => ({ sourceRecordingId: c.sourceRecordingId }));
         }
-        if (!args?.where && args?.include?.sourceRecording) {
-          return clips
-            .map((c) => {
+        if (args?.where?.startedAt && args?.orderBy) {
+          const rows = clips
+            .filter((c) => {
+              if (!matchesDate(c.startedAt, args.where.startedAt)) return false;
               const source = store.get(c.sourceRecordingId);
-              return {
-                ...c,
-                sourceRecording: source
-                  ? { ...source, camera: cameras.get(source.cameraId) }
-                  : null,
-              };
+              // Relação obrigatória no schema: sem origem, a linha não existiria.
+              if (!source) return false;
+              return matchesCameraId(source.cameraId, args.where.sourceRecording?.cameraId);
             })
-            .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+            .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime() || a.id.localeCompare(b.id));
+          const skip = args.skip ?? 0;
+          const page = rows.slice(skip, skip + (args.take ?? rows.length));
+          return page.map((c) => (args.select ? project(c, args.select) : { ...c }));
         }
         throw new Error(`fake exportedClip.findMany não modelado: ${JSON.stringify(args)}`);
       },
@@ -180,19 +228,34 @@ function buildHarness(seed: SeedRecording[], options: HarnessOptions = {}): Harn
       },
     },
     recording: {
+      // Field refs do cliente gerado: é assim que o serviço descobre se a coluna
+      // `motionScore` já existe (cliente pré-migração não a traz).
+      fields: { id: {}, cameraId: {}, filePath: {}, startedAt: {}, sizeBytes: {}, motionScore: {} },
+      count: async (args: any) => [...store.values()].filter((r) => matchesRecording(r, args?.where ?? {})).length,
       findMany: async (args: any) => {
-        let rows = sorted();
-        const notIn = args?.where?.id?.notIn;
-        if (notIn) rows = rows.filter((r) => !notIn.includes(r.id));
-        else if (args?.where && Object.keys(args.where).length) {
-          throw new Error(`fake recording.findMany where não modelado: ${JSON.stringify(args.where)}`);
+        // Varredura de derivados órfãos: lê só os campos de caminho, sem where.
+        if (args?.select && !args?.where && !args?.orderBy) {
+          return sorted().map((r) => project(r, args.select));
         }
-        if (typeof args?.take === 'number') rows = rows.slice(0, args.take);
-        if (args?.select) return rows.map((r) => project(r, args.select));
-        if (args?.include?.camera) {
-          return rows.map((r) => ({ ...r, camera: { ...cameras.get(r.cameraId) } }));
+        // Guardião de disco: as mais antigas sem hold.
+        if (args?.orderBy && JSON.stringify(args.orderBy) === JSON.stringify({ startedAt: 'asc' })) {
+          const rows = sorted()
+            .filter((r) => matchesRecording(r, args.where ?? {}))
+            .slice(0, args.take ?? undefined);
+          return rows.map((r) => (args.select ? project(r, args.select) : { ...r }));
         }
-        throw new Error(`fake recording.findMany não modelado: ${JSON.stringify(args)}`);
+        // Expiração em lotes: exige ordem TOTAL (sem desempate por id, skip/take
+        // pode pular ou repetir linha quando dois segmentos empatam no startedAt).
+        const esperado = JSON.stringify([{ startedAt: 'asc' }, { id: 'asc' }]);
+        if (JSON.stringify(args?.orderBy) !== esperado) {
+          throw new Error(`fake recording.findMany não modelado: ${JSON.stringify(args)}`);
+        }
+        if (!args?.select) throw new Error('fake: a expiração não pode hidratar a linha inteira (use select)');
+        const rows = [...store.values()]
+          .filter((r) => matchesRecording(r, args.where ?? {}))
+          .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime() || a.id.localeCompare(b.id));
+        const skip = args.skip ?? 0;
+        return rows.slice(skip, skip + (args.take ?? rows.length)).map((r) => project(r, args.select));
       },
       delete: async (args: any) => {
         const id = args?.where?.id;
@@ -610,8 +673,11 @@ test('regra pura: a janela e o veredito por gravação', () => {
 
 test('política: lida do ambiente, desligada e em dry-run por padrão', () => {
   const svc: any = Object.create(RetentionService.prototype);
+  const avisos: string[] = [];
+  svc.logger = { log() {}, warn: (m: string) => avisos.push(m), error() {} };
   clearPolicyEnv();
   assert.deepEqual(svc.readTwoTierPolicy(), { enabled: false, dryRun: true, allDays: 0, motionDays: 0 });
+  assert.deepEqual(avisos, [], 'ambiente vazio é o caso normal: nada de ruído no boot');
 
   setPolicyEnv({
     RETENTION_TWO_TIER_ENABLED: 'true',
@@ -622,10 +688,18 @@ test('política: lida do ambiente, desligada e em dry-run por padrão', () => {
   assert.deepEqual(svc.readTwoTierPolicy(), { enabled: true, dryRun: false, allDays: 3, motionDays: 45 });
 
   setPolicyEnv({ RETENTION_TWO_TIER_ENABLED: 'sim', RETENTION_ALL_DAYS: 'abc', RETENTION_MOTION_DAYS: '-9' });
+  avisos.length = 0;
   assert.deepEqual(
     svc.readTwoTierPolicy(),
     { enabled: false, dryRun: true, allDays: 0, motionDays: 0 },
     'lixo no ambiente cai no lado seguro: desligado',
   );
+  // Cair no lado seguro EM SILÊNCIO é como o operador descobre pelo cliente, e
+  // não pelo log, que a feature nunca ligou.
+  assert.ok(
+    avisos.some((m) => m.includes('RETENTION_TWO_TIER_ENABLED')),
+    `"sim" não é booleano reconhecido e precisa avisar: ${JSON.stringify(avisos)}`,
+  );
+  assert.ok(avisos.some((m) => m.includes('RETENTION_ALL_DAYS')), 'dias inválidos precisam avisar');
   clearPolicyEnv();
 });
