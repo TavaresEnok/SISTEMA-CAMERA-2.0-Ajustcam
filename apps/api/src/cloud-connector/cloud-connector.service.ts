@@ -9,6 +9,13 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { AiService } from '../ai/ai.service';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
 import { StreamResourceAdvisorService } from '../camera-stream/stream-resource-advisor.service';
+import { CameraObservabilityService } from '../observability/camera-observability.service';
+import {
+  buildHeartbeatCameras,
+  HEARTBEAT_CAMERA_LIMIT_DEFAULT,
+  type HeartbeatAlert,
+  type HeartbeatCamerasBlock,
+} from './heartbeat-cameras.helper';
 
 type LicenseStatus = 'UNKNOWN' | 'ACTIVE' | 'GRACE' | 'RESTRICTED' | 'SUSPENDED';
 
@@ -191,7 +198,7 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     const launchProfile = this.getLaunchProfile();
 
-    const [disk, cameraCounts, cameraOperational, streamPerformance, recordings, recentRecordings, activeRecordings, openAlarms, activeUsers] = await Promise.all([
+    const [disk, cameraCounts, cameraOperational, streamPerformance, recordings, recentRecordings, activeRecordings, openAlarms, activeUsers, cameraHealth] = await Promise.all([
       this.getDiskStats(recordingsRoot),
       this.getCameraCounts(),
       this.getCameraOperationalStats(),
@@ -207,6 +214,7 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       this.prisma.recording.count({ where: { endedAt: null } }),
       this.prisma.alarmInstance.count({ where: { status: AlarmStatus.OPEN } }),
       this.prisma.user.count({ where: { isActive: true } }),
+      this.getCameraHealthForHeartbeat(),
     ]);
 
     const alerts: Array<{ level: 'warning' | 'critical'; code: string; message: string }> = [];
@@ -273,6 +281,11 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         message: `Storage apertado para ${recordingCapacity.retentionDays}d de retencao: estimado ${recordingCapacity.estimatedRequiredGb}GB, capacidade segura ${recordingCapacity.safeCapacityGb}GB.`,
       });
     }
+    // Saúde POR CÂMERA → alerts derivados (mesmo esquema level/code/message).
+    // Se a observabilidade falhou, `cameraHealth` é null e o heartbeat segue
+    // exatamente como antes: métrica nova não pode custar o heartbeat.
+    if (cameraHealth) alerts.push(...cameraHealth.alerts);
+
     // Saúde de INFRA do watchdog → vira alerts (a Central já os exibe/historia).
     const infraHealth = await this.getInfraWatchdogHealth(recordingsRoot);
     if (infraHealth) {
@@ -358,6 +371,10 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         recordingsRoot,
         disk,
       },
+      // Bloco novo: saúde por câmera para o painel de frota da Central. Sai do
+      // payload por completo quando indisponível (a Central trata como "esta
+      // instalação ainda não reporta por câmera", não como frota vazia).
+      ...(cameraHealth ? { cameras: cameraHealth.cameras } : {}),
       production: {
         launchProfile,
         readiness: {
@@ -413,6 +430,28 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     return counts;
+  }
+
+  /**
+   * Saúde por câmera para o heartbeat. NUNCA lança: a Central dá por morta a
+   * instalação que para de bater, então uma falha aqui (banco lento, serviço
+   * ausente no container) só pode custar o bloco novo — jamais o heartbeat.
+   */
+  private async getCameraHealthForHeartbeat(): Promise<{ cameras: HeartbeatCamerasBlock; alerts: HeartbeatAlert[] } | null> {
+    try {
+      const observability = this.moduleRef.get(CameraObservabilityService, { strict: false });
+      const report = await observability.getCamerasHealth();
+      return buildHeartbeatCameras(report, this.getHeartbeatCameraLimit());
+    } catch (error) {
+      this.logger.warn(
+        `Heartbeat sem bloco de saude por camera: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private getHeartbeatCameraLimit() {
+    return this.getPositiveInt(process.env.CLOUD_HEARTBEAT_CAMERA_LIMIT, HEARTBEAT_CAMERA_LIMIT_DEFAULT);
   }
 
   private getRecordingRuntimeSummary() {
