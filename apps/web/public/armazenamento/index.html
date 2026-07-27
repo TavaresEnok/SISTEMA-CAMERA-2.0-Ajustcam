@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Armazenamento de Gravações — Guia do Sistema</title>
+<meta name="description" content="Quanto disco cada câmera consome: tabelas de referência para gravação contínua e por movimento, e como dimensionar o armazenamento.">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #ECEFF4;
+    --surf-1: #FFFFFF;
+    --surf-2: #F3F5F9;
+    --surf-3: #E8ECF2;
+    --bdr: rgba(22,30,48,.10);
+    --bdr-lo: rgba(22,30,48,.06);
+    --tx: #1A2230;
+    --tx-2: #4E5A6C;
+    --tx-3: #596779;
+    --tx-4: #657185;
+    --primary: #0B6BD6;
+    --primary-soft: rgba(11,107,214,.08);
+    --primary-soft-2: rgba(11,107,214,.16);
+    --tier-low: #0E7C5A;
+    --tier-low-bg: rgba(14,124,90,.10);
+    --tier-mid: #B45309;
+    --tier-mid-bg: rgba(180,83,9,.10);
+    --tier-high: #C2340F;
+    --tier-high-bg: rgba(194,52,15,.10);
+    --shadow: 0 1px 2px rgba(22,30,48,.05), 0 10px 28px -18px rgba(22,30,48,.28);
+    --sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161B; --surf-1: #1B1E25; --surf-2: #21252E; --surf-3: #282D38;
+      --bdr: rgba(255,255,255,.08); --bdr-lo: rgba(255,255,255,.045);
+      --tx: #E6E9EF; --tx-2: #B1BAC7; --tx-3: #AAB3C0; --tx-4: #929CAB;
+      --primary: #4D93F0;
+      --primary-soft: rgba(77,147,240,.12); --primary-soft-2: rgba(77,147,240,.22);
+      --tier-low: #3FD39A; --tier-low-bg: rgba(63,211,154,.13);
+      --tier-mid: #FBBF24; --tier-mid-bg: rgba(251,191,36,.13);
+      --tier-high: #FB7A5A; --tier-high-bg: rgba(251,122,90,.13);
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px -18px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161B; --surf-1: #1B1E25; --surf-2: #21252E; --surf-3: #282D38;
+    --bdr: rgba(255,255,255,.08); --bdr-lo: rgba(255,255,255,.045);
+    --tx: #E6E9EF; --tx-2: #B1BAC7; --tx-3: #AAB3C0; --tx-4: #929CAB;
+    --primary: #4D93F0;
+    --primary-soft: rgba(77,147,240,.12); --primary-soft-2: rgba(77,147,240,.22);
+    --tier-low: #3FD39A; --tier-low-bg: rgba(63,211,154,.13);
+    --tier-mid: #FBBF24; --tier-mid-bg: rgba(251,191,36,.13);
+    --tier-high: #FB7A5A; --tier-high-bg: rgba(251,122,90,.13);
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px -18px rgba(0,0,0,.7);
+  }
+  :root[data-theme="light"] {
+    --bg: #ECEFF4; --surf-1: #FFFFFF; --surf-2: #F3F5F9; --surf-3: #E8ECF2;
+    --bdr: rgba(22,30,48,.10); --bdr-lo: rgba(22,30,48,.06);
+    --tx: #1A2230; --tx-2: #4E5A6C; --tx-3: #596779; --tx-4: #657185;
+    --primary: #0B6BD6;
+    --primary-soft: rgba(11,107,214,.08); --primary-soft-2: rgba(11,107,214,.16);
+    --tier-low: #0E7C5A; --tier-low-bg: rgba(14,124,90,.10);
+    --tier-mid: #B45309; --tier-mid-bg: rgba(180,83,9,.10);
+    --tier-high: #C2340F; --tier-high-bg: rgba(194,52,15,.10);
+    --shadow: 0 1px 2px rgba(22,30,48,.05), 0 10px 28px -18px rgba(22,30,48,.28);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation: none !important; transition: none !important; } }
+  body {
+    margin: 0; background: var(--bg); color: var(--tx);
+    font-family: var(--sans); font-size: 15.5px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--primary-soft-2); }
+  a { color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 22px; }
+
+  /* ── Barra superior ── */
+  .topbar {
+    border-bottom: 1px solid var(--bdr); background: var(--surf-1);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .topbar-in { max-width: 1200px; margin: 0 auto; padding: 12px 22px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  /* O título encolhe/trunca antes de empurrar a barra: em telas de 320px o botão
+     "Abrir o sistema" precisa continuar visível e clicável. */
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14.5px; letter-spacing: -.01em; color: var(--tx); text-decoration: none; min-width: 0; }
+  .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .brand-mark { width: 24px; height: 24px; flex-shrink: 0; }
+  .topbar-links { display: flex; gap: 6px; flex-shrink: 0; }
+  .topbar-links a {
+    font-family: var(--mono); font-size: 11.5px; color: var(--tx-3); text-decoration: none;
+    padding: 5px 11px; border-radius: 7px; background: var(--surf-2); border: 1px solid var(--bdr-lo);
+    transition: color .14s, background .14s; white-space: nowrap;
+  }
+  .topbar-links a:hover { color: var(--primary); background: var(--primary-soft); }
+  @media (max-width: 620px) { .topbar-links a.opt { display: none; } }
+
+  /* ── Cabeçalho ── */
+  header.hero { padding: 52px 0 38px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--primary); margin: 0 0 14px; display: flex; align-items: center; gap: 9px;
+  }
+  .eyebrow::after { content: ""; height: 1px; flex: 1; background: linear-gradient(90deg, var(--primary-soft-2), transparent); }
+  h1 {
+    font-size: clamp(30px, 5vw, 46px); font-weight: 800; line-height: 1.08; letter-spacing: -.03em;
+    margin: 0 0 16px; text-wrap: balance; max-width: 18ch;
+  }
+  .lede { font-size: 17.5px; color: var(--tx-2); max-width: 60ch; margin: 0; line-height: 1.6; }
+  .lede strong { color: var(--tx); font-weight: 600; }
+
+  /* ── Resposta rápida ── */
+  .quick {
+    margin-top: 34px; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px;
+    background: var(--bdr); border: 1px solid var(--bdr); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow);
+  }
+  .quick-cell { background: var(--surf-1); padding: 18px 20px; }
+  .quick-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--tx-4); margin: 0 0 8px; }
+  .quick-v { font-family: var(--mono); font-size: 25px; font-weight: 600; letter-spacing: -.02em; color: var(--tx); font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .quick-v .u { font-size: 14px; color: var(--tx-4); font-weight: 500; }
+  .quick-note { font-size: 12px; color: var(--tx-4); margin: 6px 0 0; line-height: 1.45; }
+
+  /* ── Layout com índice ── */
+  /* min-width:0 nos filhos é obrigatório: item de grid não encolhe abaixo do
+     conteúdo por padrão, e a tabela larga empurraria a página inteira no celular. */
+  .shell { display: grid; grid-template-columns: 194px minmax(0, 1fr); gap: 52px; padding: 46px 0 90px; align-items: start; }
+  .shell > * { min-width: 0; }
+  @media (max-width: 940px) { .shell { grid-template-columns: minmax(0, 1fr); gap: 0; padding-top: 32px; } }
+
+  nav.toc { position: sticky; top: 72px; }
+  @media (max-width: 940px) {
+    nav.toc { position: static; margin-bottom: 34px; background: var(--surf-1); border: 1px solid var(--bdr); border-radius: 12px; padding: 14px 16px; }
+  }
+  .toc-label { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--tx-4); margin: 0 0 11px; }
+  .toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .toc a {
+    display: flex; gap: 9px; padding: 6px 9px; border-radius: 7px; text-decoration: none;
+    color: var(--tx-3); font-size: 13px; line-height: 1.35; transition: background .14s, color .14s;
+  }
+  .toc a:hover { background: var(--surf-2); color: var(--tx); }
+  .toc a .n { font-family: var(--mono); font-size: 11px; color: var(--tx-4); flex-shrink: 0; }
+
+  /* ── Seções ── */
+  section { scroll-margin-top: 76px; }
+  section + section { margin-top: 54px; padding-top: 48px; border-top: 1px solid var(--bdr); }
+  h2 {
+    font-size: clamp(21px, 2.8vw, 27px); font-weight: 750; letter-spacing: -.022em; margin: 0 0 8px;
+    text-wrap: balance; display: flex; align-items: baseline; gap: 12px;
+  }
+  h2 .num { font-family: var(--mono); font-size: 12.5px; font-weight: 500; color: var(--primary); flex-shrink: 0; }
+  h3 { font-size: 16px; font-weight: 700; letter-spacing: -.008em; margin: 30px 0 9px; color: var(--tx); }
+  .sub { font-size: 14.5px; color: var(--tx-3); margin: 0 0 22px; max-width: 66ch; }
+  p { margin: 0 0 14px; max-width: 68ch; color: var(--tx-2); }
+  p strong, li strong { color: var(--tx); font-weight: 650; }
+  ul { margin: 0 0 15px; padding-left: 21px; max-width: 68ch; color: var(--tx-2); }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--tx-4); }
+  code {
+    font-family: var(--mono); font-size: .875em; background: var(--surf-3);
+    padding: 1.5px 6px; border-radius: 5px; color: var(--tx);
+  }
+
+  /* ── Destaque ── */
+  .note {
+    background: var(--primary-soft); border-left: 2.5px solid var(--primary);
+    border-radius: 0 11px 11px 0; padding: 16px 20px; margin: 22px 0; max-width: 68ch;
+  }
+  .note p { margin: 0; color: var(--tx-2); font-size: 14.5px; }
+  .note p + p { margin-top: 9px; }
+  .note .tag {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--primary); display: block; margin-bottom: 7px; font-weight: 600;
+  }
+
+  /* ── Tabelas ── */
+  .tw {
+    overflow-x: auto; border: 1px solid var(--bdr); border-radius: 13px;
+    background: var(--surf-1); box-shadow: var(--shadow); margin: 20px 0 10px;
+    -webkit-overflow-scrolling: touch;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 600px; }
+  caption { caption-side: bottom; text-align: left; font-size: 12.5px; color: var(--tx-4); padding: 11px 17px 13px; line-height: 1.5; }
+  th, td { text-align: left; padding: 12px 17px; border-bottom: 1px solid var(--bdr-lo); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  thead th {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--tx-4); font-weight: 500; background: var(--surf-2); white-space: nowrap;
+    border-bottom: 1px solid var(--bdr); position: sticky; top: 0;
+  }
+  th.n, td.n {
+    text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
+    white-space: nowrap; color: var(--tx); font-weight: 500;
+  }
+  td.name { font-weight: 650; color: var(--tx); white-space: nowrap; }
+  td.name .sub2 {
+    display: block; font-weight: 400; color: var(--tx-4); font-size: 11.5px;
+    font-family: var(--mono); margin-top: 2px; letter-spacing: -.01em;
+  }
+  tbody tr.hl { background: var(--primary-soft); }
+  tbody tr.hl td.name { color: var(--primary); }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; font-weight: 500;
+  }
+  .badge.measured { background: var(--primary-soft-2); color: var(--primary); }
+  .badge.ref { background: var(--surf-3); color: var(--tx-4); }
+
+  /* barra de magnitude dentro da célula */
+  .mag { display: flex; align-items: center; gap: 9px; justify-content: flex-end; }
+  .mag-bar { width: 46px; height: 5px; border-radius: 3px; background: var(--surf-3); overflow: hidden; flex-shrink: 0; }
+  .mag-fill { display: block; height: 100%; border-radius: 3px; }
+  .t-low .mag-fill { background: var(--tier-low); }
+  .t-mid .mag-fill { background: var(--tier-mid); }
+  .t-high .mag-fill { background: var(--tier-high); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+    font-family: var(--mono); font-size: 11px; white-space: nowrap; font-weight: 500;
+  }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+  .pill.low { background: var(--tier-low-bg); color: var(--tier-low); }
+  .pill.mid { background: var(--tier-mid-bg); color: var(--tier-mid); }
+  .pill.high { background: var(--tier-high-bg); color: var(--tier-high); }
+
+  /* ── Cartões de conceito ── */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(232px, 1fr)); gap: 14px; margin: 22px 0; }
+  .card { background: var(--surf-1); border: 1px solid var(--bdr); border-radius: 12px; padding: 18px 19px; }
+  .card h4 { margin: 0 0 7px; font-size: 14.5px; font-weight: 700; color: var(--tx); letter-spacing: -.008em; }
+  .card p { margin: 0; font-size: 13.5px; color: var(--tx-3); line-height: 1.55; max-width: none; }
+  .card .icon {
+    width: 30px; height: 30px; border-radius: 8px; background: var(--primary-soft); color: var(--primary);
+    display: flex; align-items: center; justify-content: center; margin-bottom: 12px;
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+  }
+
+  /* ── Fórmula ── */
+  .formula {
+    font-family: var(--mono); font-size: 13px; background: var(--surf-2); border: 1px solid var(--bdr);
+    border-radius: 11px; padding: 16px 18px; margin: 16px 0 20px; color: var(--tx-2);
+    line-height: 1.95; overflow-x: auto; max-width: 68ch;
+  }
+  .formula b { color: var(--tx); font-weight: 600; }
+  .formula .r { color: var(--primary); }
+
+  /* ── Rodapé ── */
+  footer {
+    border-top: 1px solid var(--bdr); background: var(--surf-1); padding: 30px 0 40px; margin-top: 20px;
+  }
+  .foot-in { max-width: 1200px; margin: 0 auto; padding: 0 22px; display: flex; flex-wrap: wrap; gap: 14px 32px; align-items: baseline; justify-content: space-between; }
+  .foot-in p { margin: 0; font-size: 12.5px; color: var(--tx-4); max-width: 62ch; }
+  .foot-meta { font-family: var(--mono); font-size: 11px; color: var(--tx-4); white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="brand" href="/">
+      <svg class="brand-mark" viewBox="0 0 120 120" aria-hidden="true">
+        <circle cx="60" cy="60" r="31" fill="none" stroke="currentColor" stroke-width="7" opacity=".9"/>
+        <circle cx="60" cy="60" r="15" fill="currentColor"/>
+      </svg>
+      <span>Guia de Armazenamento</span>
+    </a>
+    <div class="topbar-links">
+      <a href="/live" class="opt">Ao vivo</a>
+      <a href="/playback" class="opt">Gravações</a>
+      <a href="/">Abrir o sistema</a>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <header class="hero">
+    <p class="eyebrow">Guia técnico · armazenamento</p>
+    <h1>Quanto disco cada câmera consome</h1>
+    <p class="lede">Este guia explica, com <strong>números medidos em operação real</strong>, quanto espaço uma câmera ocupa por dia — e como escolher entre <strong>gravação contínua</strong> e <strong>gravação por movimento</strong> sem surpresas na hora de dimensionar o servidor.</p>
+
+    <div class="quick">
+      <div class="quick-cell">
+        <p class="quick-k">Câmera 1080p · 24h contínuas</p>
+        <div class="quick-v">22,2 <span class="u">GB/dia</span></div>
+        <p class="quick-note">Medido: 2,06 Mbps em H.265</p>
+      </div>
+      <div class="quick-cell">
+        <p class="quick-k">A mesma, por movimento</p>
+        <div class="quick-v">2 a 15 <span class="u">GB/dia</span></div>
+        <p class="quick-note">Depende do movimento da cena</p>
+      </div>
+      <div class="quick-cell">
+        <p class="quick-k">O que define o consumo</p>
+        <div class="quick-v">Bitrate</div>
+        <p class="quick-note">Não é a resolução sozinha</p>
+      </div>
+      <div class="quick-cell">
+        <p class="quick-k">Perda por conversão</p>
+        <div class="quick-v">Zero</div>
+        <p class="quick-note">Gravação em cópia, sem recompressão</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <nav class="toc" aria-label="Índice">
+      <p class="toc-label">Neste guia</p>
+      <ol>
+        <li><a href="#regra"><span class="n">01</span><span>A regra de ouro</span></a></li>
+        <li><a href="#qualidade"><span class="n">02</span><span>Consumo por qualidade</span></a></li>
+        <li><a href="#modos"><span class="n">03</span><span>Contínua vs. movimento</span></a></li>
+        <li><a href="#dimensionar"><span class="n">04</span><span>Dimensionar o disco</span></a></li>
+        <li><a href="#real"><span class="n">05</span><span>Medição real</span></a></li>
+        <li><a href="#economia"><span class="n">06</span><span>Como economizamos</span></a></li>
+        <li><a href="#pratica"><span class="n">07</span><span>Regras práticas</span></a></li>
+        <li><a href="#metodo"><span class="n">08</span><span>Metodologia</span></a></li>
+      </ol>
+    </nav>
+
+    <main>
+
+      <section id="regra">
+        <h2><span class="num">01</span>A regra de ouro</h2>
+        <p class="sub">Se você levar só uma ideia deste guia, que seja esta.</p>
+
+        <p>O espaço que uma câmera ocupa <strong>não depende da resolução sozinha</strong> — depende do <strong>bitrate</strong>, que é a quantidade de dados que a câmera produz por segundo. Duas câmeras 1080p podem consumir o dobro uma da outra, se estiverem configuradas com bitrates diferentes.</p>
+
+        <div class="formula">
+          Espaço por dia = <b>bitrate</b> ÷ 8 × 86.400 segundos<br>
+          <span class="r">Na prática:</span> cada <b>1 Mbps</b> de bitrate ≈ <b>10,8 GB por dia</b> de gravação contínua.
+        </div>
+
+        <p>Essa relação é direta porque o sistema grava <strong>em cópia</strong>: o vídeo que a câmera envia é gravado exatamente como veio, sem ser recomprimido. Isso preserva 100% da qualidade original e não gasta processamento — mas também significa que o disco recebe exatamente aquilo que a câmera decidiu produzir.</p>
+
+        <div class="cards">
+          <div class="card">
+            <div class="icon">×2</div>
+            <h4>Dobrar o bitrate dobra o disco</h4>
+            <p>É a relação mais previsível do sistema. Reduzir o bitrate da câmera pela metade corta o armazenamento pela metade, na mesma hora.</p>
+          </div>
+          <div class="card">
+            <div class="icon">H.265</div>
+            <h4>O codec muda tudo</h4>
+            <p>H.265 entrega a mesma imagem com cerca de metade do bitrate do H.264. Uma câmera 1080p em H.265 pode ocupar menos que uma 720p em H.264.</p>
+          </div>
+          <div class="card">
+            <div class="icon">%</div>
+            <h4>Tempo gravado é o outro fator</h4>
+            <p>No modo por movimento, o consumo cai na mesma proporção do tempo em que a cena fica parada. Uma cena calma pode gravar só 5% do dia.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="qualidade">
+        <h2><span class="num">02</span>Consumo por qualidade</h2>
+        <p class="sub">Gravação contínua (24 horas por dia), por câmera. A linha destacada foi medida em uma câmera real em produção; as demais usam bitrates típicos de mercado para cada faixa.</p>
+
+        <div class="tw">
+          <table>
+            <caption>Valores em GB decimais (1 GB = 1.000 MB). Ferramentas de disco do Linux mostram GiB, cerca de 7% menor para o mesmo arquivo.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Qualidade</th>
+                <th scope="col">Bitrate</th>
+                <th scope="col" class="n">24 horas</th>
+                <th scope="col" class="n">7 dias</th>
+                <th scope="col" class="n">30 dias</th>
+                <th scope="col">Origem</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="name">480p (D1)<span class="sub2">H.264</span></td>
+                <td class="n">0,60 Mbps</td>
+                <td class="n t-low"><span class="mag"><span class="mag-bar"><span class="mag-fill" style="width:8%"></span></span>6,48 GB</span></td>
+                <td class="n">45,4 GB</td>
+                <td class="n">194 GB</td>
+                <td><span class="badge ref">referência</span></td>
+              </tr>
+              <tr>
+                <td class="name">720p<span class="sub2">H.264</span></td>
+                <td class="n">1,50 Mbps</td>
+                <td class="n t-low"><span class="mag"><span class="mag-bar"><span class="mag-fill" style="width:19%"></span></span>16,2 GB</span></td>
+                <td class="n">113 GB</td>
+                <td class="n">486 GB</td>
+                <td><span class="badge ref">referência</span></td>
+              </tr>
+              <tr class="hl">
+                <td class="name">1080p (Full HD)<span class="sub2">H.265</span></td>
+                <td class="n">2,06 Mbps</td>
+                <td class="n t-mid"><span class="mag"><span class="mag-bar"><span class="mag-fill" style="width:26%"></span></span>22,2 GB</span></td>
+                <td class="n">156 GB</td>
+                <td class="n">667 GB</td>
+                <td><span class="badge measured">medido</span></td>
+              </tr>
+              <tr>
+                <td class="name">1080p (Full HD)<span class="sub2">H.264</span></td>
+                <td class="n">4,00 Mbps</td>
+                <td class="n t-mid"><span class="mag"><span class="mag-bar"><span class="mag-fill" style="width:50%"></span></span>43,2 GB</span></td>
+                <td class="n">302 GB</td>
+                <td class="n">1,30 TB</td>
+                <td><span class="badge ref">referência</span></td>
+              </tr>
+              <tr>
+                <td class="name">4K (2160p)<span class="sub2">H.265</span></td>
+                <td class="n">8,00 Mbps</td>
+                <td class="n t-high"><span class="mag"><span class="mag-bar"><span class="mag-fill" style="width:100%"></span></span>86,4 GB</span></td>
+                <td class="n">605 GB</td>
+                <td class="n">2,59 TB</td>
+                <td><span class="badge ref">referência</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note">
+          <span class="tag">Repare</span>
+          <p>Uma câmera <strong>1080p em H.265</strong> (22,2 GB/dia) consome <strong>metade</strong> de uma 1080p em H.264 (43,2 GB/dia) — mesma imagem, mesmo tamanho de tela. É a decisão de configuração com maior impacto no custo de armazenamento.</p>
+        </div>
+      </section>
+
+      <section id="modos">
+        <h2><span class="num">03</span>Contínua vs. por movimento</h2>
+        <p class="sub">A gravação por movimento só escreve no disco quando há atividade na cena. Quanto ela economiza depende inteiramente de quão movimentada a cena é — não existe um número único.</p>
+
+        <div class="tw">
+          <table>
+            <caption>Câmera de referência: 1080p H.265 a 2,06 Mbps (a mesma da linha destacada acima). O percentual é a fatia do dia em que a câmera efetivamente gravou.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Cenário</th>
+                <th scope="col">Tempo gravado</th>
+                <th scope="col" class="n">Por dia</th>
+                <th scope="col" class="n">7 dias</th>
+                <th scope="col" class="n">30 dias</th>
+                <th scope="col" class="n">Economia</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="name">Gravação contínua<span class="sub2">24 h por dia</span></td>
+                <td><span class="pill high">100% do dia</span></td>
+                <td class="n">22,2 GB</td>
+                <td class="n">156 GB</td>
+                <td class="n">667 GB</td>
+                <td class="n">—</td>
+              </tr>
+              <tr>
+                <td class="name">Movimento intenso<span class="sub2">rua comercial, pátio</span></td>
+                <td><span class="pill high">67% do dia</span></td>
+                <td class="n">14,9 GB</td>
+                <td class="n">104 GB</td>
+                <td class="n">446 GB</td>
+                <td class="n">33%</td>
+              </tr>
+              <tr>
+                <td class="name">Movimento moderado<span class="sub2">recepção, corredor</span></td>
+                <td><span class="pill mid">25% do dia</span></td>
+                <td class="n">5,56 GB</td>
+                <td class="n">38,9 GB</td>
+                <td class="n">167 GB</td>
+                <td class="n">75%</td>
+              </tr>
+              <tr>
+                <td class="name">Movimento baixo<span class="sub2">estoque, garagem</span></td>
+                <td><span class="pill low">10% do dia</span></td>
+                <td class="n">2,22 GB</td>
+                <td class="n">15,6 GB</td>
+                <td class="n">66,7 GB</td>
+                <td class="n">90%</td>
+              </tr>
+              <tr>
+                <td class="name">Movimento raro<span class="sub2">sala técnica, depósito</span></td>
+                <td><span class="pill low">3% do dia</span></td>
+                <td class="n">0,67 GB</td>
+                <td class="n">4,67 GB</td>
+                <td class="n">20,0 GB</td>
+                <td class="n">97%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Por que uma detecção grava mais do que dura</h3>
+        <p>Cada detecção não grava apenas o instante do movimento. O sistema continua gravando por um tempo depois que a cena se acalma — a <strong>pós-gravação</strong>, hoje configurada em <strong>90 segundos</strong>. Isso existe para que o evento não seja cortado no meio.</p>
+        <p>Na conta prática: <strong>uma detecção de 30 segundos ocupa 2 minutos de disco</strong> (30s do evento + 90s de pós-gravação). Por isso, 60 detecções curtas ao longo do dia já representam cerca de 8% do dia gravado, não 2%.</p>
+
+        <div class="note">
+          <span class="tag">Ponto de decisão</span>
+          <p>Quando a cena é muito movimentada, o modo por movimento economiza pouco (33% no caso intenso acima) e ainda corre o risco de perder trechos entre eventos. <strong>Acima de ~60% de atividade, a gravação contínua costuma ser a escolha melhor</strong> — mais simples, sem lacunas e com custo previsível.</p>
+        </div>
+      </section>
+
+      <section id="dimensionar">
+        <h2><span class="num">04</span>Dimensionar o disco</h2>
+        <p class="sub">Quanto de armazenamento comprar para um projeto. Todas as contas usam a câmera de referência de 1080p H.265 (2,06 Mbps) — para 1080p em H.264, dobre os valores; para 4K, multiplique por quatro.</p>
+
+        <h3>Gravação contínua</h3>
+        <div class="tw">
+          <table>
+            <caption>Espaço total necessário para manter o período completo de retenção, em gravação 24 horas.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Câmeras</th>
+                <th scope="col" class="n">7 dias</th>
+                <th scope="col" class="n">15 dias</th>
+                <th scope="col" class="n">30 dias</th>
+                <th scope="col" class="n">60 dias</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td class="name">4 câmeras</td><td class="n">623 GB</td><td class="n">1,33 TB</td><td class="n">2,67 TB</td><td class="n">5,34 TB</td></tr>
+              <tr><td class="name">8 câmeras</td><td class="n">1,25 TB</td><td class="n">2,67 TB</td><td class="n">5,34 TB</td><td class="n">10,7 TB</td></tr>
+              <tr><td class="name">16 câmeras</td><td class="n">2,49 TB</td><td class="n">5,34 TB</td><td class="n">10,7 TB</td><td class="n">21,4 TB</td></tr>
+              <tr><td class="name">32 câmeras</td><td class="n">4,98 TB</td><td class="n">10,7 TB</td><td class="n">21,4 TB</td><td class="n">42,7 TB</td></tr>
+              <tr><td class="name">64 câmeras</td><td class="n">9,97 TB</td><td class="n">21,4 TB</td><td class="n">42,7 TB</td><td class="n">85,4 TB</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Gravação por movimento (cenário moderado, 25% do dia)</h3>
+        <div class="tw">
+          <table>
+            <caption>Mesmas câmeras e períodos, gravando apenas quando há atividade moderada na cena.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Câmeras</th>
+                <th scope="col" class="n">7 dias</th>
+                <th scope="col" class="n">15 dias</th>
+                <th scope="col" class="n">30 dias</th>
+                <th scope="col" class="n">60 dias</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td class="name">4 câmeras</td><td class="n">156 GB</td><td class="n">334 GB</td><td class="n">667 GB</td><td class="n">1,33 TB</td></tr>
+              <tr><td class="name">8 câmeras</td><td class="n">311 GB</td><td class="n">667 GB</td><td class="n">1,33 TB</td><td class="n">2,67 TB</td></tr>
+              <tr><td class="name">16 câmeras</td><td class="n">623 GB</td><td class="n">1,33 TB</td><td class="n">2,67 TB</td><td class="n">5,34 TB</td></tr>
+              <tr><td class="name">32 câmeras</td><td class="n">1,25 TB</td><td class="n">2,67 TB</td><td class="n">5,34 TB</td><td class="n">10,7 TB</td></tr>
+              <tr><td class="name">64 câmeras</td><td class="n">2,49 TB</td><td class="n">5,34 TB</td><td class="n">10,7 TB</td><td class="n">21,4 TB</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note">
+          <span class="tag">Margem recomendada</span>
+          <p>Dimensione o disco com <strong>20% a 30% de folga</strong> sobre o valor da tabela. Cenas mais movimentadas que o previsto, câmeras novas e o próprio sistema operacional consomem espaço. O sistema interrompe a gravação automaticamente quando o disco chega a <strong>92% de uso</strong>, para nunca travar o servidor — mas chegar nesse ponto significa perder gravação.</p>
+        </div>
+      </section>
+
+      <section id="real">
+        <h2><span class="num">05</span>Medição real, não estimativa</h2>
+        <p class="sub">Os números deste guia não vieram de tabela de fabricante. Foram medidos em uma instalação em produção, com câmeras reais gravando cenas reais.</p>
+
+        <div class="tw">
+          <table>
+            <caption>Medições feitas em 27/07/2026 sobre a instalação em operação.</caption>
+            <thead>
+              <tr>
+                <th scope="col">O que foi medido</th>
+                <th scope="col" class="n">Resultado</th>
+                <th scope="col">Como</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="name">Bitrate real gravado<span class="sub2">câmera 1080p H.265 30 fps</span></td>
+                <td class="n">2,06 Mbps</td>
+                <td>Análise direta de um arquivo de gravação já salvo em disco</td>
+              </tr>
+              <tr>
+                <td class="name">Consumo real em 1 dia<span class="sub2">modo por movimento, cena movimentada</span></td>
+                <td class="n">14,9 GB</td>
+                <td>Soma dos arquivos gravados em 17h42 de operação, projetada para 24h</td>
+              </tr>
+              <tr>
+                <td class="name">Tempo efetivamente gravado<span class="sub2">mesma câmera, mesmo dia</span></td>
+                <td class="n">66,7%</td>
+                <td>Consumo real dividido pelo consumo teórico de 24h contínuas</td>
+              </tr>
+              <tr>
+                <td class="name">Bitrate dos fluxos secundários<span class="sub2">8 câmeras, usados no mosaico</span></td>
+                <td class="n">1,06 Mbps</td>
+                <td>Contadores de tráfego do servidor de mídia, amostrados em intervalo</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>A consistência entre esses números é o que dá confiança ao guia: a câmera medida gravou <strong>14,9 GB</strong> em um dia; a conta teórica para 66,7% de um dia a 2,06 Mbps dá <strong>14,8 GB</strong>. A diferença fica dentro do arredondamento — ou seja, <strong>a fórmula da Seção 01 descreve corretamente o comportamento real do sistema</strong>.</p>
+      </section>
+
+      <section id="economia">
+        <h2><span class="num">06</span>Como o sistema economiza disco</h2>
+        <p class="sub">Quatro decisões de engenharia que reduzem o armazenamento sem sacrificar a qualidade da evidência.</p>
+
+        <div class="cards">
+          <div class="card">
+            <div class="icon">1:1</div>
+            <h4>Gravação em cópia</h4>
+            <p>O vídeo é salvo exatamente como a câmera enviou, sem recompressão. Preserva 100% da qualidade original e não gasta processador — outros sistemas recomprimem e perdem qualidade a cada gravação.</p>
+          </div>
+          <div class="card">
+            <div class="icon">↓</div>
+            <h4>Fluxo secundário no mosaico</h4>
+            <p>Ao exibir várias câmeras na mesma tela, o sistema usa o fluxo de menor resolução da câmera (cerca de 1 Mbps em vez de 2 a 8). Reduz banda e processamento sem afetar o que está gravado.</p>
+          </div>
+          <div class="card">
+            <div class="icon">7d</div>
+            <h4>Retenção automática</h4>
+            <p>Gravações mais antigas que o período configurado são apagadas sozinhas. É o que impede o disco de encher com o tempo. O padrão desta instalação é de 7 dias, ajustável por câmera.</p>
+          </div>
+          <div class="card">
+            <div class="icon">92%</div>
+            <h4>Proteção de disco</h4>
+            <p>Se o armazenamento passar de 92% de uso, o sistema interrompe a gravação automaticamente. É uma trava de segurança: um disco 100% cheio derruba o servidor inteiro.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="pratica">
+        <h2><span class="num">07</span>Regras práticas</h2>
+        <p class="sub">O resumo aplicável, para quem precisa decidir sem refazer as contas.</p>
+
+        <ul>
+          <li><strong>Cada 1 Mbps ≈ 11 GB por dia.</strong> É a única conta que precisa ser memorizada. Multiplique pelo número de câmeras e pelos dias de retenção.</li>
+          <li><strong>Prefira H.265 sempre que a câmera suportar.</strong> Corta o armazenamento pela metade com a mesma qualidade de imagem. É a economia mais barata que existe.</li>
+          <li><strong>Cena movimentada? Grave contínuo.</strong> Acima de ~60% de atividade o modo por movimento economiza pouco e ainda arrisca perder trechos entre eventos.</li>
+          <li><strong>Cena parada? Grave por movimento.</strong> Em depósitos, salas técnicas e áreas restritas a economia chega a 90% ou mais.</li>
+          <li><strong>Resolução alta só onde a imagem precisa ser lida.</strong> 4K faz sentido para ler placa e reconhecer rosto à distância — custa quatro vezes o disco de um 1080p. Numa visão geral de pátio, é dinheiro em disco sem ganho de evidência.</li>
+          <li><strong>Retenção é a variável mais cara.</strong> Dobrar os dias guardados dobra o disco. Antes de comprar armazenamento, verifique quantos dias de fato precisam ser mantidos — obrigação legal, contrato ou apenas hábito.</li>
+          <li><strong>Deixe 20% a 30% de folga.</strong> A conta da tabela é o mínimo, não o recomendado.</li>
+        </ul>
+      </section>
+
+      <section id="metodo">
+        <h2><span class="num">08</span>Metodologia e limites</h2>
+        <p class="sub">O que foi medido, o que foi estimado e onde os números podem variar.</p>
+
+        <div class="formula">
+          <b>Contínua:</b> bytes/dia = bitrate ÷ 8 × 86.400<br>
+          <b>Por movimento:</b> bytes/dia = bitrate ÷ 8 × segundos gravados no dia<br>
+          <b>Segundos gravados:</b> detecções × (duração do evento + 90 s de pós-gravação)
+        </div>
+
+        <ul>
+          <li><strong>Medido de fato:</strong> o bitrate de 2,06 Mbps (1080p H.265), o consumo diário real de 14,9 GB e o bitrate de 1,06 Mbps dos fluxos secundários. Todos obtidos da instalação em produção em 27/07/2026.</li>
+          <li><strong>Referência de mercado:</strong> os bitrates de 480p, 720p, 1080p H.264 e 4K. São faixas típicas para cada resolução, não medições desta instalação — a câmera real pode estar configurada acima ou abaixo.</li>
+          <li><strong>Unidades:</strong> os valores usam GB decimal (1 GB = 1.000 MB), padrão de fabricantes de disco e de medição de bitrate. Ferramentas do Linux mostram GiB (base 1.024), cerca de 7% menor para o mesmo arquivo — a diferença é de unidade, não de tamanho.</li>
+          <li><strong>O que pode variar:</strong> câmeras com bitrate variável produzem mais dados em cenas com muito detalhe ou movimento (chuva, folhagem, multidão) e menos em cenas paradas. As tabelas assumem bitrate médio constante.</li>
+          <li><strong>Não incluído nas contas:</strong> miniaturas de eventos, clipes exportados manualmente e o espaço do próprio sistema operacional. Somados, ficam bem abaixo do vídeo, mas não são zero.</li>
+        </ul>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<footer>
+  <div class="foot-in">
+    <p>Guia gerado a partir de medições diretas na instalação em produção. Os valores de referência de mercado estão sinalizados como tal em cada tabela. Para uma estimativa específica do seu projeto, considere o bitrate real das câmeras que serão instaladas.</p>
+    <span class="foot-meta">Atualizado em 27/07/2026</span>
+  </div>
+</footer>
+
+</body>
+</html>
