@@ -691,11 +691,14 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   private async probeRecordedFileMetadata(filePath: string) {
     try {
+      // Pede também os STREAMS: duração sozinha não prova que há vídeo. Um arquivo
+      // só-áudio, ou com a trilha de vídeo estruturalmente quebrada, tem duração e
+      // passaria como gravação boa — virando uma linha READY que não reproduz.
       const { stdout } = await execFileAsync('ffprobe', [
         '-v',
         'error',
         '-show_entries',
-        'format=duration,size',
+        'format=duration,size:stream=codec_type,codec_name',
         '-of',
         'json',
         filePath,
@@ -703,15 +706,22 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         timeout: Math.max(5_000, Number(process.env.RECORDING_METADATA_PROBE_TIMEOUT_MS ?? 15_000)),
         maxBuffer: 1024 * 1024,
       });
-      const parsed = JSON.parse(stdout || '{}') as { format?: { duration?: string; size?: string } };
+      const parsed = JSON.parse(stdout || '{}') as {
+        format?: { duration?: string; size?: string };
+        streams?: Array<{ codec_type?: string; codec_name?: string }>;
+      };
       const duration = Number(parsed.format?.duration);
       const size = Number(parsed.format?.size);
+      const hasVideoStream = Array.isArray(parsed.streams)
+        && parsed.streams.some((s) => s?.codec_type === 'video' && Boolean(s?.codec_name));
       return {
         durationSecondsExact: Number.isFinite(duration) && duration > 0 ? duration : null,
         sizeBytes: Number.isFinite(size) && size >= 0 ? size : statSync(filePath).size,
+        hasVideoStream,
       };
     } catch {
-      return { durationSecondsExact: null, sizeBytes: statSync(filePath).size };
+      // Probe falhou: não afirmamos que há vídeo (o registro exige a prova).
+      return { durationSecondsExact: null, sizeBytes: statSync(filePath).size, hasVideoStream: false };
     }
   }
 
@@ -733,6 +743,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const metadata = await this.probeRecordedFileMetadata(filePath);
     if (metadata.durationSecondsExact == null) {
       throw new Error('segmento_mp4_invalido_ou_incompleto');
+    }
+    // Duração não é prova de vídeo: sem trilha de vídeo decodificável o arquivo
+    // nunca vira linha READY (senão o playback ganha um item que não reproduz).
+    if (!metadata.hasVideoStream) {
+      throw new Error('segmento_mp4_sem_stream_de_video');
     }
     const durationSecondsExact = metadata.durationSecondsExact;
     const durationSeconds = Math.max(1, Math.round(durationSecondsExact));
@@ -1133,7 +1148,12 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     });
     proc.on('error', (error) => {
       this.logger.error(`Falha no processo FFmpeg de gravação camera=${cameraId}: ${sanitizeSensitiveText(error)}`);
-      void this.prisma.camera.update({ where: { id: cameraId }, data: { recordingEnabled: false } }).catch(() => undefined);
+      // NÃO tocar em `recordingEnabled` aqui. Esse campo é o ESTADO DESEJADO do
+      // cliente (lido como `intendedRecording` no getStatus) — uma falha de RUNTIME
+      // do FFmpeg (câmera fora, link caído, binário ocupado) não pode desarmar a
+      // gravação de forma permanente: a câmera pararia de gravar e não voltaria
+      // sozinha nunca mais, nem após reinício. Só uma ação explícita (stop/modo)
+      // muda o desejado; a falha é tratada como estado de runtime abaixo.
       const current = state ?? this.active.get(cameraId);
       if (current) void this.finalizeRecordingState(cameraId, current, proc.exitCode);
     });

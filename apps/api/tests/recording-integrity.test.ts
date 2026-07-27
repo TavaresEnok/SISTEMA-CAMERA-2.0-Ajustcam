@@ -73,7 +73,7 @@ test('D2 disk-guard: bytes livres abaixo do mínimo PARA as gravações ativas',
 
 test('D2 integridade: segmento sem duração válida é REJEITADO (não registra lixo)', async () => {
   const mgr = makeManager();
-  mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: null, sizeBytes: 0 });
+  mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: null, sizeBytes: 0, hasVideoStream: false });
   let created = false;
   mgr.prisma = { camera: { findUnique: async () => ({ recordingMode: 'motion' }) }, recording: { create: async () => { created = true; return { id: 'x' }; } } };
   await assert.rejects(
@@ -85,7 +85,7 @@ test('D2 integridade: segmento sem duração válida é REJEITADO (não registra
 
 test('D2 integridade: segmento válido registra com início/fim/duração corretos', async () => {
   const mgr = makeManager();
-  mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: 58.4, sizeBytes: 1000 });
+  mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: 58.4, sizeBytes: 1000, hasVideoStream: true });
   let createdData: any = null;
   mgr.prisma = {
     camera: { findUnique: async () => ({ recordingMode: 'motion' }) },
@@ -109,7 +109,7 @@ test('D2 integridade: segmento válido registra com início/fim/duração corret
 test('D2 integridade: arquivo com nome fora do padrão é ignorado em silêncio', async () => {
   const mgr = makeManager();
   let probed = false;
-  mgr.probeRecordedFileMetadata = async () => { probed = true; return { durationSecondsExact: 10, sizeBytes: 1 }; };
+  mgr.probeRecordedFileMetadata = async () => { probed = true; return { durationSecondsExact: 10, sizeBytes: 1, hasVideoStream: true }; };
   await mgr.registerSegment('cam-1', '/rec/qualquer-coisa.mp4', 60); // não deve lançar
   assert.equal(probed, false, 'nome fora do padrão retorna antes de qualquer I/O');
 });
