@@ -19,6 +19,15 @@ import { toast } from '../hooks/use-toast';
 const API_URL = getApiBaseUrl();
 type PermissionLevel = 'VIEW' | 'CONTROL' | 'RECORD' | 'ADMIN';
 
+/** Estado comercial do grupo — como o dono da instalação cobra o cliente final. */
+type GroupAccessStatus = 'ACTIVE' | 'RESTRICTED' | 'SUSPENDED';
+
+const ACCESS_OPTIONS: Array<{ value: GroupAccessStatus; label: string; hint: string }> = [
+  { value: 'ACTIVE', label: 'Liberado', hint: 'Acesso normal a tudo.' },
+  { value: 'RESTRICTED', label: 'Restrito (sem histórico)', hint: 'Continua vendo AO VIVO, mas perde playback, gravações e exportação.' },
+  { value: 'SUSPENDED', label: 'Suspenso (sem acesso)', hint: 'Não vê nada. Use quando o cliente está inadimplente.' },
+];
+
 type AccessGroup = {
   id: string;
   name: string;
@@ -26,6 +35,9 @@ type AccessGroup = {
   isActive: boolean;
   /** Cota de câmeras privadas que o cliente deste grupo pode cadastrar (0 = nenhuma). */
   maxPrivateCameras?: number;
+  /** Bloqueio comercial: ACTIVE normal · RESTRICTED sem histórico · SUSPENDED sem acesso. */
+  accessStatus?: GroupAccessStatus;
+  accessMessage?: string | null;
   cameras: Array<{ id: string; name: string }>;
   _userPermissions?: UserPermission[];
 };
@@ -79,6 +91,8 @@ export default function GroupsPage() {
   const [editDesc, setEditDesc] = useState('');
   const [editMaxPrivate, setEditMaxPrivate] = useState(0);
   const [editSaving, setEditSaving] = useState(false);
+  const [editAccessStatus, setEditAccessStatus] = useState<GroupAccessStatus>('ACTIVE');
+  const [editAccessMessage, setEditAccessMessage] = useState('');
 
   // Delete group dialog
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -178,6 +192,8 @@ export default function GroupsPage() {
     setEditName(selGroup?.name ?? '');
     setEditDesc(selGroup?.description ?? '');
     setEditMaxPrivate(selGroup?.maxPrivateCameras ?? 0);
+    setEditAccessStatus(selGroup?.accessStatus ?? 'ACTIVE');
+    setEditAccessMessage(selGroup?.accessMessage ?? '');
     setEditOpen(true);
   };
 
@@ -189,6 +205,8 @@ export default function GroupsPage() {
         name: editName.trim(),
         description: editDesc.trim() || null,
         maxPrivateCameras: Math.max(0, Math.floor(Number(editMaxPrivate) || 0)),
+        accessStatus: editAccessStatus,
+        accessMessage: editAccessMessage.trim() || null,
       });
       await load();
       setEditOpen(false);
@@ -304,7 +322,21 @@ export default function GroupsPage() {
                     {g.name.slice(0, 2).toUpperCase()}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="text-[12.5px] font-semibold truncate">{g.name}</div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="text-[12.5px] font-semibold truncate">{g.name}</div>
+                      {/* Selo do bloqueio comercial: quem está em atraso precisa
+                          saltar aos olhos na lista, sem abrir o grupo. */}
+                      {g.accessStatus === 'SUSPENDED' && (
+                        <span className="shrink-0 rounded bg-[hsl(var(--destructive)_/_0.15)] px-1.5 py-px text-[9px] font-semibold text-[hsl(var(--destructive))]">
+                          SUSPENSO
+                        </span>
+                      )}
+                      {g.accessStatus === 'RESTRICTED' && (
+                        <span className="shrink-0 rounded bg-[hsl(var(--status-warning)_/_0.15)] px-1.5 py-px text-[9px] font-semibold text-[hsl(var(--status-warning))]">
+                          RESTRITO
+                        </span>
+                      )}
+                    </div>
                     {g.description && (
                       <div className="text-[10px] text-muted-foreground truncate">{g.description}</div>
                     )}
@@ -577,6 +609,48 @@ export default function GroupsPage() {
               <p className="text-[10px] text-muted-foreground">
                 Quantas câmeras o cliente deste grupo pode cadastrar pelo app dele (o "acordado"). 0 = não permite.
               </p>
+            </div>
+            {/* ── Bloqueio comercial do cliente final ──
+                Espelha o que a Central faz com a instalação inteira, um nível
+                abaixo: é assim que o integrador cobra quem está em atraso. */}
+            <div className="space-y-1.5 border-t border-border pt-3">
+              <Label className="text-xs">Acesso do cliente</Label>
+              <div className="space-y-1.5">
+                {ACCESS_OPTIONS.map((opt) => (
+                  <label
+                    key={opt.value}
+                    className="flex cursor-pointer items-start gap-2 rounded border border-border px-2.5 py-2 hover:bg-muted/40"
+                  >
+                    <input
+                      type="radio"
+                      name="group-access"
+                      className="mt-0.5"
+                      checked={editAccessStatus === opt.value}
+                      onChange={() => setEditAccessStatus(opt.value)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-[12px] font-medium">{opt.label}</span>
+                      <span className="block text-[10px] text-muted-foreground">{opt.hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {editAccessStatus !== 'ACTIVE' && (
+                <div className="space-y-1.5 pt-1">
+                  <Label className="text-xs">Motivo <span className="font-normal text-muted-foreground">(o cliente vê)</span></Label>
+                  <Input
+                    value={editAccessMessage}
+                    onChange={(e) => setEditAccessMessage(e.target.value)}
+                    placeholder="Ex.: Mensalidade em aberto. Fale com o suporte."
+                    maxLength={300}
+                  />
+                  <p className="text-[10px] text-[hsl(var(--status-warning))]">
+                    {editAccessStatus === 'SUSPENDED'
+                      ? 'Os usuários deste grupo deixam de ver as câmeras imediatamente.'
+                      : 'Os usuários mantêm o ao vivo, mas perdem playback, gravações e exportação.'}
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 pt-2">
               <Button variant="ghost" size="sm" onClick={() => setEditOpen(false)}>Cancelar</Button>
