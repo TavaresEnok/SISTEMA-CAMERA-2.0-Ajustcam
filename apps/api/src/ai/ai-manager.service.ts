@@ -226,10 +226,21 @@ export class AiManagerService implements OnModuleInit {
   private async performSyncAll() {
     try {
       const settings = await this.getSettings();
-      if (!(await this.commercialPolicy.isAllowed('aiAdvanced'))) {
-        this.logger.log('IA bloqueada pela política comercial. Parando processadores ativos.');
+      // ⚠️ `aiAdvanced` significa OBJETO/FACE, não "IA em geral". A detecção de
+      // MOVIMENTO (MOG2) é o que ARMA a gravação por movimento e não pode ser
+      // derrubada por essa checagem: com a política "somente movimento" — o
+      // estado normal e desejado — `aiAdvanced` é false, e o stopAll cego aqui
+      // deixava as câmeras armadas sem gravar, em silêncio. Só bloqueamos tudo
+      // quando o próprio MOVIMENTO está proibido.
+      const motionAllowed = await this.commercialPolicy.isAllowed('aiMotion').catch(() => true);
+      if (!motionAllowed) {
+        this.logger.log('IA bloqueada pela política comercial (movimento proibido). Parando processadores ativos.');
         await this.aiService.stopAll().catch(() => undefined);
         return { started: 0, skipped: 'commercial_restriction', settings };
+      }
+      if (settings.mode !== 'motion' && !(await this.commercialPolicy.isAllowed('aiAdvanced'))) {
+        this.logger.log(`Modo de IA "${settings.mode}" bloqueado pela política comercial; seguindo apenas com movimento.`);
+        settings.mode = 'motion';
       }
       if (!settings.enabled) {
         this.logger.log('IA global desativada. Parando processadores ativos.');
@@ -775,6 +786,23 @@ export class AiManagerService implements OnModuleInit {
     return 'Movimento';
   }
 
+  /**
+   * Corrida com prazo: usada para trabalho OPCIONAL (otimização) que nunca pode
+   * segurar um caminho essencial. Rejeita ao estourar; o chamador decide o
+   * fallback. Não cancela a promessa original (não dá, em JS) — apenas para de
+   * esperar por ela.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), Math.max(250, ms));
+      if (typeof timer.unref === 'function') timer.unref();
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
   private async buildAiSource(cam: any): Promise<{ rtspUrl: string; info: Record<string, unknown> }> {
     const password = this.cryptoService.decrypt(cam.passwordEncrypted);
     const rawSubtype = String(process.env.AI_RTSP_SUBTYPE ?? '').trim().toLowerCase();
@@ -857,7 +885,17 @@ export class AiManagerService implements OnModuleInit {
     // fallback de HEVC logo acima já usa há tempos — a diferença é que agora vale
     // para toda câmera, não só as HEVC. Best-effort: falhar aqui só significa
     // seguir no direto, que é o comportamento de antes.
-    const ensured = await this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid').catch(() => null);
+    // ⚠️ COM TIMEOUT, obrigatoriamente. `ensurePathForCamera` compartilha uma
+    // promessa em voo por (câmera, modo): se essa promessa travar (MediaMTX lento
+    // ou fora), TODO chamador seguinte fica pendurado nela para sempre — e um
+    // `.catch()` não salva, porque nada é rejeitado, apenas nunca resolve.
+    // Aconteceu em produção: a análise da câmera não voltava, sem erro nenhum no
+    // log, e a detecção de movimento (que arma a gravação) ficou fora do ar.
+    // O gateway é otimização; ele JAMAIS pode atrasar ou impedir a subida da IA.
+    const ensured = await this.withTimeout(
+      this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid'),
+      Number(process.env.AI_SOURCE_GATEWAY_ENSURE_TIMEOUT_MS ?? 4000),
+    ).catch(() => null);
     const gatewayDecision = ensured?.pathName
       ? this.sourceGateway?.resolveSourceUrl({
         cameraId: cam.id,

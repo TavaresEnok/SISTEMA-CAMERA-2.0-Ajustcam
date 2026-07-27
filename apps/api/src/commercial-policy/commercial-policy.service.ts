@@ -3,7 +3,11 @@ import { UserRole } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { type AuthUser } from '../common/types/auth-user.type';
 
-export type CommercialFeature = 'localLive' | 'localRecording' | 'localPlayback' | 'addCameras' | 'aiAdvanced' | 'exports';
+// `aiAdvanced` = OBJETO/FACE (pesadas). `aiMotion` = detecção de MOVIMENTO
+// (MOG2), que arma a gravação por movimento e é tratada à parte de propósito:
+// confundir as duas derrubava o MOG2 sempre que objeto/face estavam desligados,
+// que é o estado normal e desejado.
+export type CommercialFeature = 'localLive' | 'localRecording' | 'localPlayback' | 'addCameras' | 'aiAdvanced' | 'aiMotion' | 'exports';
 export type CommercialLicenseStatus = 'UNKNOWN' | 'ACTIVE' | 'GRACE' | 'RESTRICTED' | 'SUSPENDED';
 
 type RestrictionMap = Record<CommercialFeature | 'adminAccess' | 'cloudSupport' | 'updates', boolean>;
@@ -14,6 +18,7 @@ const DEFAULT_RESTRICTIONS: RestrictionMap = {
   localPlayback: true,
   addCameras: true,
   aiAdvanced: true,
+  aiMotion: true,
   exports: true,
   adminAccess: true,
   cloudSupport: true,
@@ -47,6 +52,7 @@ const GENERIC_FEATURE_MESSAGES: Record<CommercialFeature, string> = {
   localPlayback: 'Playback temporariamente indisponível. Entre em contato com o administrador do sistema.',
   addCameras: 'Cadastro de novas câmeras temporariamente indisponível. Entre em contato com o administrador do sistema.',
   aiAdvanced: 'Análise inteligente temporariamente indisponível. Entre em contato com o administrador do sistema.',
+  aiMotion: 'Detecção de movimento temporariamente indisponível. Entre em contato com o administrador do sistema.',
   exports: 'Exportação temporariamente indisponível. Entre em contato com o administrador do sistema.',
 };
 

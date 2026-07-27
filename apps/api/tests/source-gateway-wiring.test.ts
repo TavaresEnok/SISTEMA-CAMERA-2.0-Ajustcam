@@ -73,10 +73,27 @@ test('mediamtx-proxy: registra a origem publicada ao preparar o path', async () 
 test('ai-manager: GARANTE o path do MediaMTX antes de consultar o gateway', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync('src/ai/ai-manager.service.ts', 'utf8');
-  const ensureAt = src.indexOf("ensurePathForCamera(cam.id, 'grid').catch");
+  const ensureAt = src.indexOf("ensurePathForCamera(cam.id, 'grid')");
   const gatewayAt = src.indexOf('this.sourceGateway?.resolveSourceUrl');
   assert.notEqual(ensureAt, -1, 'a IA precisa garantir a origem antes de perguntar');
   assert.ok(ensureAt < gatewayAt, 'o ensure tem de vir ANTES da consulta ao gateway');
   // E sem path garantido não se pergunta nada (evita URL interna inválida).
   assert.match(src.slice(ensureAt, gatewayAt + 200), /ensured\?\.pathName/);
+});
+
+// REGRESSÃO REAL (produção, 2026-07-27): sem prazo, o `await ensurePathForCamera`
+// pendurou a subida da IA. Aquele método compartilha uma promessa em voo por
+// (câmera, modo): se ela travar, todo chamador seguinte espera para sempre — e o
+// `.catch()` NÃO salva, porque nada rejeita, apenas nunca resolve. A detecção de
+// movimento (que arma a gravação) ficou fora do ar sem UM erro no log.
+test('ai-manager: o ensure do gateway tem PRAZO (otimização não segura a IA)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync('src/ai/ai-manager.service.ts', 'utf8');
+  // O fallback de HEVC também chama ensurePathForCamera (e vem antes no arquivo),
+  // então olhamos a chamada do GATEWAY: a que alimenta resolveSourceUrl.
+  const gatewayAt = src.indexOf('this.sourceGateway?.resolveSourceUrl');
+  const trecho = src.slice(Math.max(0, gatewayAt - 700), gatewayAt);
+  assert.match(trecho, /withTimeout\(/, 'o ensure do gateway precisa correr contra um prazo');
+  assert.match(trecho, /ensurePathForCamera\(cam\.id, 'grid'\)/, 'e ser o ensure do path de grade');
+  assert.match(src, /private withTimeout<T>/, 'o helper de prazo precisa existir');
 });

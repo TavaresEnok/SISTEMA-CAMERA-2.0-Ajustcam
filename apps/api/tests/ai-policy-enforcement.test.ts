@@ -60,3 +60,30 @@ test('falha ao parar a IA não propaga (heartbeat não pode quebrar por isso)', 
   await assert.doesNotReject(() => svc.enforceAiRestrictions({ aiMotion: false }));
   assert.ok(state.logs.some((l) => l.startsWith('warn:')));
 });
+
+// QUARTA VIA (a que derrubou a IA em produção, 2026-07-27): performSyncAll
+// bloqueava TODA a IA com isAllowed('aiAdvanced'). Com "somente movimento" —
+// o estado normal — aiAdvanced é false, então o MOG2 morria e as câmeras armadas
+// paravam de gravar, com a mensagem enganosa "IA bloqueada pela política
+// comercial". Movimento tem de ter chave própria.
+test('sync: aiAdvanced=false NÃO pode derrubar a IA (é o estado normal)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync('src/ai/ai-manager.service.ts', 'utf8');
+  const at = src.indexOf('private async performSyncAll');
+  const corpo = src.slice(at, at + 1600);
+  assert.match(corpo, /isAllowed\('aiMotion'\)/, 'o bloqueio total deve depender de aiMotion');
+  const stopAt = corpo.indexOf('stopAll');
+  const trechoAteStop = corpo.slice(0, stopAt);
+  assert.doesNotMatch(
+    trechoAteStop.replace(/\/\/[^\n]*/g, ''),
+    /if \(!\(await this\.commercialPolicy\.isAllowed\('aiAdvanced'\)\)\) \{\s*$/m,
+    'aiAdvanced sozinho não pode disparar o stopAll',
+  );
+});
+
+test('sync: aiMotion é feature comercial reconhecida (senão o default seria negar)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync('src/commercial-policy/commercial-policy.service.ts', 'utf8');
+  assert.match(src, /'aiMotion'/, 'aiMotion precisa existir no tipo CommercialFeature');
+  assert.match(src, /aiMotion: true/, 'e no default permissivo');
+});
