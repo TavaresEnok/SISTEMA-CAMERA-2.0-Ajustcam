@@ -19,6 +19,10 @@ id_ed25519
 id_ed25519.pub
 *.sql
 !apps/api/prisma/migrations/**/*.sql
+# SQL versionado que NÃO é migração (fundação Tenant/RLS do item 3.1). Sem esta
+# exceção o `*.sql` acima engolia a política de isolamento e ela ficava só no
+# worktree — fora do repo, invisível num clone novo.
+!apps/api/prisma/rls/*.sql
 *.dump
 secrets/
 pnpm-debug.log*
