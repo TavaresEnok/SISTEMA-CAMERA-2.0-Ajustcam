@@ -85,6 +85,20 @@ MOTION_PROFILE = {
     # Frigate): quem entra e FICA continua sendo detectado; mudança persistente
     # (carro estacionado) é absorvida gradualmente depois.
     "motion_freeze_learning_frames": _env_int("MOTION_FREEZE_LEARNING_FRAMES", 6),
+    # MUDANÇA GLOBAL DE CENA (luz acendendo, IR ligando, sol saindo da nuvem):
+    # recalibra o fundo E CONTINUA reportando o movimento, marcado com
+    # sceneChange=true no metadata. Engolir o evento era não gravar justamente no
+    # instante em que algo acontece — e o MOTION_DETECTED é o gatilho da gravação.
+    # false = kill-switch, volta ao comportamento antigo (descarta o evento).
+    "motion_scene_change_report": _env_bool("MOTION_SCENE_CHANGE_REPORT", True),
+    # Roda o MOG2 no plano de LUMINÂNCIA (1 canal) em vez do BGR (3 canais).
+    # OPT-IN: o padrão é o caminho de hoje. Objeto que só se distingue por matiz
+    # (mesma luminância do fundo) some no plano Y — por isso a troca é consciente.
+    "motion_luma_plane": _env_bool("MOTION_LUMA_PLANE", False),
+    # Teto de caixas de movimento por frame. O detector devolve um Detection por
+    # objeto coeso (maior primeiro); o teto impede que uma cena agitada vire uma
+    # lista enorme — cada caixa custa um recorte na confirmação semântica.
+    "motion_max_boxes": _env_int("MOTION_MAX_BOXES", 4),
     # O primeiro movimento continua imediato; apenas eventos repetidos da mesma
     # cena são consolidados. Mantém o post-roll da gravação acima deste valor.
     "event_debounce_seconds": _env_int("MOTION_EVENT_DEBOUNCE_SECONDS", 45),

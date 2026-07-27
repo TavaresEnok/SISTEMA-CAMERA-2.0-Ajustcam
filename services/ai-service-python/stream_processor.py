@@ -14,6 +14,7 @@ from model_registry import registry
 from runtime_profiles import MOTION_PROFILE, runtime_profile
 from reconnect_backoff import compute_reconnect_delay
 from capture_rate_guard import CaptureRateGuard
+from inference_watchdog import evaluate_inference_health, watchdog_settings
 
 logger = logging.getLogger("ai-service.stream")
 
@@ -593,6 +594,46 @@ class StreamProcessor:
             "consecutive_capture_failures": self.consecutive_capture_failures,
         }
 
+    def inference_state(self, capture_ready: bool | None = None, max_frame_age_seconds: float = 20.0, now=None) -> dict:
+        """Saúde da INFERÊNCIA avançada deste processador (item 1 do watchdog).
+
+        Só OBSERVA: nenhum contador é tocado, nenhum caminho de movimento é
+        alterado. Com a IA de objeto/face desligada (analysis_type='motion') o
+        veredito é `not_applicable` — nunca degradado.
+
+        `capture_ready` pode ser injetado pelo /health, que já calculou o
+        readiness de captura; sem ele, é recalculado aqui.
+        """
+        moment = time.time() if now is None else float(now)
+        if capture_ready is None:
+            capture_ready = bool(self.readiness_state(max_frame_age_seconds)["ready"])
+        last_inference_at = float(self._inference_timestamps[-1]) if self._inference_timestamps else 0.0
+        avg_ms = (
+            self.advanced_infer_sum_ms / self.advanced_infer_runs
+            if self.advanced_infer_runs > 0 else 0.0
+        )
+        # Mesmo intervalo que o _process usa para decidir quando inferir.
+        expected_interval = 1.0 / max(0.5, float(self.advanced_process_fps))
+        settings = watchdog_settings()
+        return evaluate_inference_health(
+            advanced_analysis_type=self.advanced_analysis_type,
+            runs=self.advanced_infer_runs,
+            errors=self.advanced_infer_errors,
+            last_inference_at=last_inference_at,
+            last_duration_ms=self.advanced_infer_last_ms,
+            avg_duration_ms=avg_ms,
+            expected_interval_seconds=expected_interval,
+            capture_ready=bool(capture_ready),
+            awake=self._is_awake(),
+            started_at=self._started_at,
+            now=moment,
+            stall_multiplier=settings["multiplier"],
+            min_stall_seconds=settings["minimum"],
+            max_stall_seconds=settings["maximum"],
+            startup_grace_seconds=settings["startup_grace"],
+            last_error=self.last_error,
+        )
+
     def _is_awake(self):
         return self.motion_trigger != "CAMERA" or time.time() < self.wakeup_until or self._has_active_live_view_session()
 
@@ -1019,7 +1060,7 @@ class StreamProcessor:
                     if should_run_advanced or live_overlay:
                         self._store_live_detections(live_overlay, current_time)
                 else:
-                    self._store_live_detections(detections, current_time)
+                    self._store_live_detections(self._overlay_detections(detections), current_time)
             except Exception as exc:
                 self.last_error = str(exc)
                 logger.warning("[%s] erro inferência: %s", self.camera_id, exc)
@@ -1133,6 +1174,31 @@ class StreamProcessor:
 
         self.semantic_last_labels = labels
         return confirmed
+
+    def _overlay_detections(self, detections):
+        """Overlay do /live: UMA caixa de movimento — a principal —, como sempre.
+
+        O MotionDetector passou a devolver TODAS as caixas de movimento (é o que
+        permite a confirmação semântica achar a pessoa que entrou ao lado da
+        árvore que balança, já que a árvore é a MAIOR caixa). Isso é para o
+        pipeline; a tela do cliente não muda: aqui só a primeira caixa de
+        movimento segue para o overlay.
+
+        Detecções que NÃO são de movimento (objeto/face) passam todas — nesses
+        modos o overlay sempre mostrou um retângulo por objeto.
+
+        Os EVENTOS não precisam deste filtro: o debounce por tipo em _process já
+        deixa passar um único MOTION_DETECTED por janela.
+        """
+        filtered = []
+        motion_seen = False
+        for detection in detections:
+            if (getattr(detection, "event_type", None) or "") == "MOTION_DETECTED":
+                if motion_seen:
+                    continue
+                motion_seen = True
+            filtered.append(detection)
+        return filtered
 
     def _store_live_detections(self, detections, timestamp):
         payload = []
