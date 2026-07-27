@@ -4,6 +4,8 @@ const path = require('node:path');
 const { PgStore } = require('./pg-store');
 const { mergeDb } = require('./dual-read');
 const { writeSigningBackup } = require('./signing-backup');
+const { TimeseriesStore, NoopTimeseriesStore } = require('./timeseries-store');
+const { DEFAULT_RAW_RETENTION_HOURS, DEFAULT_HOURLY_RETENTION_DAYS, toNumber } = require('./timeseries');
 
 // Orquestrador do datastore da Central. Escolhe o backend por env e expõe a MESMA
 // interface load()/save(db) do server.js legado, para trocar de backend sem mexer
@@ -37,7 +39,27 @@ function resolveConfig(env = process.env) {
   const backupDir = String(env.DRAC_CENTRAL_BACKUP_DIR || '').trim()
     ? path.resolve(process.cwd(), env.DRAC_CENTRAL_BACKUP_DIR)
     : path.join(path.dirname(dataFile), 'backups');
-  return { databaseUrl, mode, dataFile, backupDir };
+  return { databaseUrl, mode, dataFile, backupDir, timeseries: resolveTimeseriesConfig(env, mode) };
+}
+
+// Série temporal: só existe COM Postgres. O arquivo JSON não pode receber uma
+// amostra a cada 60s (é o mesmo arquivo que já corrompeu e derrubou a Central),
+// então em modo json o histórico longo fica DESLIGADO e a Central segue com o
+// histórico curto de sempre. Com Postgres liga por padrão; `=false` desliga.
+function resolveTimeseriesConfig(env = process.env, mode = 'json') {
+  const flag = String(env.DRAC_CENTRAL_TIMESERIES_ENABLED || '').trim().toLowerCase();
+  const usesPg = mode === 'dual' || mode === 'pg';
+  const enabled = usesPg && flag !== 'false' && flag !== '0' && flag !== 'off';
+  const positive = (value, fallback) => {
+    const n = toNumber(value);
+    return n !== null && n > 0 ? n : fallback;
+  };
+  return {
+    enabled,
+    rawRetentionHours: positive(env.DRAC_CENTRAL_TIMESERIES_RAW_HOURS, DEFAULT_RAW_RETENTION_HOURS),
+    hourlyRetentionDays: positive(env.DRAC_CENTRAL_TIMESERIES_HOURLY_DAYS, DEFAULT_HOURLY_RETENTION_DAYS),
+    maintenanceIntervalMs: positive(env.DRAC_CENTRAL_TIMESERIES_MAINTENANCE_MINUTES, 30) * 60 * 1000,
+  };
 }
 
 // legacy = { load, save } (o loadDb/saveDb do server.js). store = PgStore (injetável
@@ -46,6 +68,17 @@ function createDatastore({ legacy, config, store } = {}) {
   const cfg = config || resolveConfig();
   const usesPg = cfg.mode === 'dual' || cfg.mode === 'pg';
   const pg = usesPg ? (store || new PgStore({ connectionString: cfg.databaseUrl })) : null;
+  // Série temporal: real só quando há Postgres E a flag não foi desligada.
+  // Sem isso (o DEFAULT), é o NO-OP silencioso — nenhuma consulta, nenhum log.
+  const tsConfig = cfg.timeseries || resolveTimeseriesConfig(process.env, cfg.mode);
+  const timeseries = pg && tsConfig.enabled
+    ? new TimeseriesStore({
+      pgStore: pg,
+      rawRetentionHours: tsConfig.rawRetentionHours,
+      hourlyRetentionDays: tsConfig.hourlyRetentionDays,
+    })
+    : new NoopTimeseriesStore();
+  if (timeseries.enabled) timeseries.maintenanceIntervalMs = tsConfig.maintenanceIntervalMs;
 
   let initPromise = null;
   async function ensureInit() {
@@ -96,7 +129,14 @@ function createDatastore({ legacy, config, store } = {}) {
     if (pg) await pg.close();
   }
 
-  return { mode: cfg.mode, config: cfg, load, save, ensureInit, close, store: pg };
+  return { mode: cfg.mode, config: cfg, load, save, ensureInit, close, store: pg, timeseries };
 }
 
-module.exports = { resolveConfig, createDatastore, PgStore };
+module.exports = {
+  resolveConfig,
+  resolveTimeseriesConfig,
+  createDatastore,
+  PgStore,
+  TimeseriesStore,
+  NoopTimeseriesStore,
+};

@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
 const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
+const timeseries = require('./datastore/timeseries');
 
 function loadEnvFile() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -212,6 +213,44 @@ async function loadDb() {
 
 async function saveDb(db) {
   return getDatastore().save(db);
+}
+
+// ── Série temporal (histórico REAL da frota) ────────────────────────────────
+// SÓ existe com Postgres configurado. No DEFAULT (JSON), getTimeseries() devolve
+// o NO-OP: `enabled === false` e todos os caminhos abaixo saem na primeira linha
+// — nenhuma consulta, nenhum log, nenhum custo. A Central segue como hoje.
+function getTimeseries() {
+  return getDatastore().timeseries;
+}
+
+// Nunca deixa a série temporal derrubar a rota que a chamou: heartbeat aceito é
+// mais importante que amostra gravada.
+async function withTimeseries(action, label) {
+  const store = getTimeseries();
+  if (!store || !store.enabled) return null;
+  try {
+    return await action(store);
+  } catch (error) {
+    console.error(`[central] série temporal (${label}) falhou:`, error && error.message ? error.message : error);
+    return null;
+  }
+}
+
+// Bloco `cameras` do heartbeat: OPCIONAL. A instalação manda
+// { totals, staleThresholdSeconds, omitted, items[] } — a lista pode vir
+// TRUNCADA por gravidade, e por isso `totals` (da frota inteira) é o que vale
+// para os números. Devolvemos o bloco CRU; quem precisa da lista normaliza.
+function heartbeatCameraRaw(body) {
+  if (!body || typeof body !== 'object') return null;
+  const block = body.cameras ?? body.cameraHealth ?? (body.observability && body.observability.cameras);
+  return block === undefined || block === null ? null : block;
+}
+
+// `null` = bloco não veio (não mexe no estado por câmera); array (mesmo vazio)
+// = veio e é o estado exato.
+function heartbeatCameraBlock(body) {
+  const block = heartbeatCameraRaw(body);
+  return block === null ? null : timeseries.parseCameraHealth(block);
 }
 
 function timingSafeTextEquals(a, b) {
@@ -764,6 +803,99 @@ function supportDiagnostics(item) {
   };
 }
 
+// ── Série temporal para o painel ────────────────────────────────────────────
+// Formato ESTÁVEL e simples de desenhar: `points` é um array de { t, ...valores }
+// com as MESMAS chaves em qualquer resolução/fonte. Quem consome não precisa
+// saber se veio do Postgres ou do histórico curto do JSON.
+function timeseriesRetention(store) {
+  return {
+    rawHours: store?.rawRetentionHours ?? timeseries.DEFAULT_RAW_RETENTION_HOURS,
+    hourlyDays: store?.hourlyRetentionDays ?? timeseries.DEFAULT_HOURLY_RETENTION_DAYS,
+  };
+}
+
+async function handleInstallationTimeseries(req, res, db, url, installationId) {
+  const item = db.installations[installationId];
+  if (!item) {
+    await saveDb(db);
+    return json(req, res, 404, { error: 'installation_not_found' });
+  }
+  const range = timeseries.resolveRange({ from: url.searchParams.get('from'), to: url.searchParams.get('to') });
+  const store = getTimeseries();
+  await saveDb(db);
+
+  const series = store && store.enabled
+    ? await withTimeseries((s) => s.installationSeries(installationId, { ...range, resolution: url.searchParams.get('resolution') }), 'series')
+    : null;
+
+  if (!series) {
+    // DEFAULT (sem Postgres) ou falha do banco: o histórico CURTO que já existe
+    // hoje dentro do JSON, na mesma forma de ponto. O painel nunca fica sem dado.
+    return json(req, res, 200, {
+      installationId,
+      source: 'json',
+      enabled: Boolean(store && store.enabled),
+      degraded: Boolean(store && store.enabled),
+      ...range,
+      resolution: 'raw',
+      retention: timeseriesRetention(store),
+      points: timeseries.pointsFromHeartbeatHistory(item.heartbeatHistory, range),
+      cameras: [],
+    });
+  }
+
+  const cameras = (await withTimeseries((s) => s.cameraHealth(installationId), 'camera-health')) || [];
+  return json(req, res, 200, {
+    installationId,
+    source: 'postgres',
+    enabled: true,
+    degraded: false,
+    ...series,
+    retention: timeseriesRetention(store),
+    cameras,
+  });
+}
+
+async function handleFleetTimeseries(req, res, db, url) {
+  const range = timeseries.resolveRange({ from: url.searchParams.get('from'), to: url.searchParams.get('to') });
+  const bucketSeconds = timeseries.normalizeBucketSeconds(url.searchParams.get('bucket'), 300);
+  const store = getTimeseries();
+  const installations = Object.entries(db.installations || {});
+  await saveDb(db);
+
+  const series = store && store.enabled
+    ? await withTimeseries((s) => s.fleetSeries({ ...range, resolution: url.searchParams.get('resolution'), bucketSeconds }), 'fleet-series')
+    : null;
+
+  if (!series) {
+    const rows = [];
+    for (const [id, item] of installations) {
+      const points = timeseries.pointsFromHeartbeatHistory(item?.heartbeatHistory, range);
+      if (points.length) rows.push(...timeseries.toBucketRows(id, points, bucketSeconds));
+    }
+    return json(req, res, 200, {
+      source: 'json',
+      enabled: Boolean(store && store.enabled),
+      degraded: Boolean(store && store.enabled),
+      ...range,
+      resolution: 'raw',
+      bucketSeconds,
+      retention: timeseriesRetention(store),
+      installations: installations.length,
+      points: timeseries.foldFleetRows(rows),
+    });
+  }
+
+  return json(req, res, 200, {
+    source: 'postgres',
+    enabled: true,
+    degraded: false,
+    ...series,
+    retention: timeseriesRetention(store),
+    installations: installations.length,
+  });
+}
+
 function licenseResponse(item) {
   const status = item.licenseStatus || LICENSE_ACTIVE;
   const restrictions = {
@@ -870,6 +1002,25 @@ async function handleHeartbeat(req, res) {
   };
   db.installations[installationId] = item;
   await saveDb(db);
+  // Série temporal: o JSON continua guardando só as últimas ~100 amostras (o
+  // arquivo não aguenta mais que isso); o histórico LONGO vai para o Postgres,
+  // quando houver. Sem Postgres isto é um retorno imediato.
+  const cameraRaw = heartbeatCameraRaw(body);
+  const cameraHealth = cameraRaw === null ? null : timeseries.parseCameraHealth(cameraRaw);
+  await withTimeseries(
+    (store) => store.recordHeartbeat(installationId, {
+      sample: timeseries.buildSample({
+        at: now,
+        metrics,
+        alerts,
+        cameraHealth,
+        cameraTotals: cameraRaw,
+        storage: body.storage,
+      }),
+      cameras: cameraHealth,
+    }),
+    'heartbeat',
+  );
   return json(req, res, 200, {
     accepted: true,
     serverTime: now,
@@ -1757,11 +1908,22 @@ async function route(req, res) {
           installationId: id,
         });
         await saveDb(db);
+        // Sem Postgres é no-op; com Postgres evita série órfã de uma instalação
+        // que deixou de existir.
+        await withTimeseries((store) => store.purgeInstallation(id), 'purge');
         return json(req, res, 200, { ok: true });
       }
       const installerCommandMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/installer$/);
       if (req.method === 'GET' && installerCommandMatch) {
         return handleGetInstallerCommand(req, res, db, actor, decodeURIComponent(installerCommandMatch[1]));
+      }
+      // ── Série temporal (histórico real para gráfico) ───────────────────────
+      if (req.method === 'GET' && url.pathname === '/api/admin/fleet/timeseries') {
+        return handleFleetTimeseries(req, res, db, url);
+      }
+      const timeseriesMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/timeseries$/);
+      if (req.method === 'GET' && timeseriesMatch) {
+        return handleInstallationTimeseries(req, res, db, url, decodeURIComponent(timeseriesMatch[1]));
       }
       const diagnosticsMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/diagnostics$/);
       if (req.method === 'GET' && diagnosticsMatch) {
@@ -1849,7 +2011,30 @@ function runSerialized(task) {
   return p;
 }
 
+// Poda/rollup periódicos da série temporal: sem isso a tabela de amostras cresce
+// para sempre. Só liga quando há Postgres (no DEFAULT devolve null e nenhum timer
+// é criado). `unref()` para o timer nunca segurar o processo de pé.
+function startTimeseriesMaintenance() {
+  const store = getTimeseries();
+  if (!store || !store.enabled) return null;
+  const intervalMs = Math.max(60 * 1000, Number(store.maintenanceIntervalMs) || 30 * 60 * 1000);
+  const run = () => {
+    withTimeseries(async (s) => {
+      const result = await s.maintain({ now: new Date() });
+      if (result && (result.rolledUpSamples || result.hourlyDeleted)) {
+        console.log(`[central] rollup da série temporal: ${result.rolledUpSamples} amostras → ${result.buckets} buckets horários; ${result.hourlyDeleted} buckets expirados removidos.`);
+      }
+      return result;
+    }, 'maintain');
+  };
+  const timer = setInterval(run, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  run();
+  return timer;
+}
+
 function startServer() {
+  startTimeseriesMaintenance();
   return http.createServer((req, res) => {
   // route() é async; sem este .catch, uma rejeição (ex.: loadDb) escapava como
   // unhandledRejection. Aqui garantimos uma resposta 500 e seguimos vivos.
@@ -1878,7 +2063,10 @@ module.exports = {
   parseDbText,
   publicInstallation,
   fleetSummary,
+  heartbeatCameraBlock,
+  heartbeatCameraRaw,
   runSerialized,
   startServer,
+  startTimeseriesMaintenance,
   verifyPassword,
 };

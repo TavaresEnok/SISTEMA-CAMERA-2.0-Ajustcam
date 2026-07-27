@@ -253,8 +253,42 @@
       .modal-body { color: var(--muted); line-height: 1.55; }
       .modal-actions { border-top: 1px solid var(--line-soft); display: flex; justify-content: flex-end; gap: 10px; }
 
+      /* Dashboard de frota — cartões de total + série temporal desenhada em SVG
+         inline (o painel não tem build nem CDN, então nada de biblioteca).
+         O bloco do gráfico é REMOVIDO do DOM quando o endpoint de série não
+         responde; o resto do painel continua exatamente como antes. */
+      .fleet-tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+      .fleet-tile { display: flex; gap: 11px; align-items: flex-start; border: 1px solid var(--line-soft); border-radius: 10px; padding: 14px; background: var(--surface-soft); }
+      .fleet-tile .dot { width: 9px; height: 9px; border-radius: 99px; margin-top: 6px; flex: 0 0 auto; background: var(--quiet); }
+      .fleet-tile > div { min-width: 0; }
+      .fleet-tile label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+      .fleet-tile strong { display: block; font-size: 26px; line-height: 1; font-variant-numeric: tabular-nums; }
+      .fleet-tile span { display: block; color: var(--quiet); font-size: 11px; margin-top: 6px; }
+      .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+      .chart-ranges { display: flex; gap: 6px; }
+      .chart-ranges button { min-height: 30px; padding: 0 11px; font-size: 12px; }
+      .chart-ranges button.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+      .chart-legend { display: flex; flex-wrap: wrap; gap: 8px; }
+      .chart-legend button { min-height: 30px; padding: 0 11px; font-size: 12px; border-radius: 999px; display: inline-flex; align-items: center; gap: 7px; }
+      .chart-legend button .key { width: 9px; height: 9px; border-radius: 99px; background: currentColor; flex: 0 0 auto; }
+      .chart-legend button .value { color: var(--muted); font-variant-numeric: tabular-nums; }
+      .chart-legend button.off { opacity: .42; }
+      .chart-box svg { display: block; width: 100%; height: auto; }
+      .chart-box .grid { stroke: var(--line-soft); stroke-width: 1; }
+      .chart-box .axis { fill: var(--quiet); font-size: 10px; }
+      .chart-box .line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .chart-box .cursor { stroke: var(--quiet); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; }
+      .chart-box .overlay { fill: transparent; }
+      .chart-readout { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; color: var(--muted); font-size: 12px; min-height: 18px; }
+      .chart-readout b { color: var(--ink); font-variant-numeric: tabular-nums; }
+      .cam-issues { display: grid; gap: 8px; }
+      .cam-issue { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; background: var(--surface-soft); }
+      .cam-issue .name { font-weight: 750; font-size: 13px; word-break: break-word; }
+      .cam-issue .why { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
       @media (max-width: 1240px) {
         .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .fleet-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .workgrid { grid-template-columns: 1fr; }
         .detail { position: static; }
         .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -271,6 +305,7 @@
         .sidebar-foot button { width: auto; }
         .content { padding: 16px; }
         .metrics, .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .fleet-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .filters { grid-template-columns: 1fr; }
         .trend-grid { grid-template-columns: 1fr; }
       }
@@ -358,6 +393,20 @@
             <div class="metric-card"><label>Alertas operacionais</label><strong id="m-alarms">0</strong><span>alarmes e streaming</span></div>
             <div class="metric-card"><label>Maior uso de disco</label><strong id="m-disk">-%</strong><span>entre todos os clientes</span></div>
           </div>
+          <section class="panel" style="margin-bottom:16px">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">Frota</div>
+                <div class="panel-subtitle">Totais consolidados de todas as instalações</div>
+              </div>
+              <span id="fleet-health" class="badge neutral">-</span>
+            </div>
+            <div class="detail-body">
+              <div id="fleet-tiles" class="fleet-tiles"></div>
+              <!-- Some inteiro quando o endpoint de série temporal não responde. -->
+              <div id="fleet-chart" class="section hidden"></div>
+            </div>
+          </section>
           <section class="panel" style="margin-bottom:16px">
             <div class="panel-head">
               <div>
@@ -695,6 +744,11 @@
     </dialog>
     <div id="toast" class="toast"></div>
 
+    <!-- Lógica pura do dashboard (escala, downsampling, eixo de tempo, totais).
+         Caminho RELATIVO de propósito: a Central também é servida sob /central/.
+         Se o arquivo não vier, window.DracChartUtils fica indefinido e o painel
+         segue funcionando sem a seção de gráfico. -->
+    <script src="chart-utils.js"></script>
     <script>
       const CENTRAL_BASE_PATH = window.location.pathname === '/central' || window.location.pathname.startsWith('/central/')
         ? '/central'
@@ -709,6 +763,18 @@
         auditEvents: [],
         provision: null,
         summary: null,
+        // Dashboard de frota. `endpoint === undefined` = ainda não sondado;
+        // `null` = sondado e indisponível (não tenta de novo antes do cooldown).
+        fleet: {
+          rangeHours: 24,
+          hiddenSeries: {},
+          points: null,
+          endpoint: undefined,
+          probedAt: 0,
+          byInstallation: {},
+          installEndpoint: undefined,
+          installProbedAt: 0,
+        },
       };
       if (!['operacao', 'clientes', 'instalacao', 'contratos', 'alertas', 'auditoria', 'aplicativos', 'usuarios'].includes(state.view)) state.view = 'operacao';
 
@@ -1050,6 +1116,369 @@
           ${renderSeriesCard('Falhas de live', fleetSeries(items, 'streamLiveFailuresLast24h'))}
         </div>`;
       }
+      // ── Dashboard de frota ────────────────────────────────────────────────
+      // Toda esta seção é ADITIVA e degrada sozinha: sem o chart-utils.js ou sem
+      // o endpoint de série temporal, nada aqui renderiza e o painel continua
+      // idêntico ao de antes. Nenhum dado do servidor entra no DOM sem escapeHtml.
+      const CU = window.DracChartUtils || null;
+      const CHART_MAX_POINTS = 120;
+      const SERIES_PROBE_COOLDOWN_MS = 5 * 60 * 1000;
+      const SERIES_CACHE_MS = 20 * 1000;
+      // Endpoint real primeiro; os demais são sondas para instalações que ainda
+      // rodem uma Central mais antiga. Nenhum respondendo, a seção some.
+      const FLEET_SERIES_ENDPOINTS = [
+        '/api/admin/fleet/timeseries',
+        '/api/admin/timeseries',
+        '/api/admin/metrics/timeseries',
+      ];
+      const INSTALLATION_SERIES_ENDPOINTS = [
+        '/api/admin/installations/{id}/timeseries',
+        '/api/admin/installations/{id}/metrics/timeseries',
+      ];
+      const FLEET_RANGES = [
+        { hours: 6, label: '6h' },
+        { hours: 24, label: '24h' },
+        { hours: 168, label: '7d' },
+      ];
+      // Nome real do backend primeiro; os aliases cobrem Centrais mais antigas.
+      // Série sem nenhum alias presente simplesmente não é oferecida na legenda —
+      // é assim que `camerasStalled: null` (desconhecido no fallback JSON) some.
+      const SERIES_DEFS = [
+        { id: 'cameras', label: 'Câmeras online', color: 'var(--brand)', axis: 'count', aliases: ['camerasOnline', 'cameraOnline', 'onlineCameras'] },
+        { id: 'recordings', label: 'Gravações ativas', color: 'var(--green)', axis: 'count', aliases: ['recordingsActive', 'activeRecordings', 'activeRecordingCount'] },
+        { id: 'stalled', label: 'Câmeras travadas', color: 'var(--red)', axis: 'count', aliases: ['camerasStalled', 'cameraStalled'] },
+        { id: 'disk', label: 'Uso de disco', color: 'var(--amber)', axis: 'percent', suffix: '%', aliases: ['diskUsagePercent', 'maxDiskUsagePercent', 'diskPercent'] },
+      ];
+      const CHART_GEOMETRY = { width: 760, height: 236, padTop: 14, padRight: 46, padBottom: 26, padLeft: 46 };
+      const cameraReasonLabels = {
+        recording_stalled: 'gravação travada',
+        error: 'erro',
+        offline: 'sem comunicação',
+        recording_inactive: 'gravação parada',
+        disabled: 'desativada',
+      };
+      const cameraReasonTone = { recording_stalled: 'bad', error: 'bad', offline: 'bad', recording_inactive: 'warn', disabled: 'neutral' };
+
+      // Janela pedida ao backend, no contrato dele: from/to em ISO (+ bucket em
+      // segundos na visão de frota). Sem isso o servidor assume 24h e o seletor
+      // de 6h/7d não faria nada.
+      function seriesParams(scope) {
+        const hours = Math.max(1, number(state.fleet.rangeHours, 24));
+        const to = new Date();
+        const from = new Date(to.getTime() - hours * 3600 * 1000);
+        const params = { from: from.toISOString(), to: to.toISOString() };
+        if (scope === 'fleet') params.bucket = String(hours <= 24 ? 300 : 3600);
+        return params;
+      }
+      /** Devolve { points, cameras } ou null quando o endpoint não existe. */
+      async function fetchSeriesFrom(template, id, params) {
+        const path = template.replace('{id}', encodeURIComponent(String(id || '')));
+        const query = new URLSearchParams(params || {}).toString();
+        const attempts = query ? [`${path}?${query}`, path] : [path];
+        for (const url of attempts) {
+          let res;
+          try {
+            res = await fetch(centralUrl(url), { credentials: 'include' });
+          } catch {
+            return null;
+          }
+          // 400/422 = o endpoint existe mas recusou os filtros: tenta sem eles.
+          if (!res.ok) {
+            if (res.status === 400 || res.status === 422) continue;
+            return null;
+          }
+          try {
+            const data = await res.json();
+            return { points: CU.normalizeSeries(data), cameras: Array.isArray(data?.cameras) ? data.cameras : [] };
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      }
+      async function resolveSeries(scope, id, params) {
+        if (!CU) return null;
+        const known = scope === 'fleet' ? state.fleet.endpoint : state.fleet.installEndpoint;
+        const probedAt = scope === 'fleet' ? state.fleet.probedAt : state.fleet.installProbedAt;
+        if (known === null && Date.now() - probedAt < SERIES_PROBE_COOLDOWN_MS) return null;
+        const candidates = known || (scope === 'fleet' ? FLEET_SERIES_ENDPOINTS : INSTALLATION_SERIES_ENDPOINTS);
+        for (const candidate of [].concat(candidates)) {
+          const result = await fetchSeriesFrom(candidate, id, params);
+          if (result) {
+            if (scope === 'fleet') state.fleet.endpoint = candidate;
+            else state.fleet.installEndpoint = candidate;
+            return result;
+          }
+        }
+        if (scope === 'fleet') { state.fleet.endpoint = null; state.fleet.probedAt = Date.now(); }
+        else { state.fleet.installEndpoint = null; state.fleet.installProbedAt = Date.now(); }
+        return null;
+      }
+      async function refreshFleetSeries() {
+        if (!CU) return;
+        try {
+          const result = await resolveSeries('fleet', null, seriesParams('fleet'));
+          state.fleet.points = result ? result.points : null;
+          renderFleetChart();
+        } catch {
+          state.fleet.points = null;
+          document.querySelector('#fleet-chart')?.classList.add('hidden');
+        }
+      }
+      function ensureInstallationSeries(id) {
+        if (!CU || !id) return;
+        const cached = state.fleet.byInstallation[id];
+        if (cached && Date.now() - cached.at < SERIES_CACHE_MS) return;
+        // Marca o cache ANTES do await: renderDetail roda a cada tecla digitada
+        // no filtro e não pode disparar uma requisição por tecla.
+        state.fleet.byInstallation[id] = cached
+          ? { ...cached, at: Date.now() }
+          : { points: null, cameras: [], at: Date.now() };
+        void resolveSeries('installation', id, seriesParams('installation')).then((result) => {
+          state.fleet.byInstallation[id] = {
+            points: result ? result.points : null,
+            cameras: result ? result.cameras : [],
+            at: Date.now(),
+          };
+          if (selectedItem() && selectedItem().id === id) renderDetail();
+        }).catch(() => {
+          state.fleet.byInstallation[id] = { points: null, cameras: [], at: Date.now() };
+        });
+      }
+
+      // ── Cartões de total da frota ─────────────────────────────────────────
+      function fleetTile(tone, label, value, hint) {
+        return `<div class="fleet-tile">
+          <span class="dot" style="background:var(--${tone})"></span>
+          <div>
+            <label>${escapeHtml(label)}</label>
+            <strong>${escapeHtml(fmt.format(number(value, 0)))}</strong>
+            <span>${escapeHtml(hint)}</span>
+          </div>
+        </div>`;
+      }
+      function renderFleetTiles() {
+        const box = document.querySelector('#fleet-tiles');
+        if (!box) return;
+        if (!CU) { box.innerHTML = ''; return; }
+        const totals = CU.aggregateFleetTotals(state.installations);
+        box.innerHTML = [
+          fleetTile('green', 'Instalações online', totals.online, `${fmt.format(totals.installations)} no total`),
+          fleetTile('red', 'Instalações offline', totals.offline, totals.pending ? `${fmt.format(totals.pending)} aguardando instalação` : 'sem sinal recente'),
+          fleetTile('brand', 'Câmeras totais', totals.cameraTotal, `${fmt.format(totals.cameraOnline)} online agora`),
+          fleetTile('amber', 'Câmeras com problema', totals.camerasAttention, totals.camerasProblem ? `${fmt.format(totals.camerasProblem)} detalhada(s) no heartbeat` : 'offline ou em erro'),
+          fleetTile('violet', 'Gravações ativas', totals.recordingActive, `pico de disco ${fmt.format(totals.maxDiskUsagePercent)}%`),
+        ].join('');
+        const health = document.querySelector('#fleet-health');
+        if (health) {
+          const bad = totals.offline > 0;
+          const attention = totals.camerasAttention > 0 || totals.maxDiskUsagePercent >= 85;
+          health.textContent = bad ? `${fmt.format(totals.offline)} instalação(ões) offline` : attention ? 'Frota em atenção' : 'Frota estável';
+          health.className = `badge ${bad ? 'bad' : attention ? 'warn' : 'ok'}`;
+        }
+      }
+
+      // ── Gráfico de série temporal (SVG inline, sem biblioteca) ────────────
+      function seriesLastValue(points, key) {
+        for (let index = points.length - 1; index >= 0; index -= 1) {
+          const value = Number(points[index][key]);
+          if (Number.isFinite(value)) return value;
+        }
+        return null;
+      }
+      function formatSeriesValue(def, value) {
+        if (value === null) return '-';
+        const rounded = def.axis === 'percent' ? Math.round(value) : Math.round(value);
+        return `${fmt.format(rounded)}${def.suffix || ''}`;
+      }
+      /**
+       * Monta o modelo do gráfico. Devolve null quando não há NENHUMA série
+       * reconhecível — é assim que a seção inteira desaparece sem erro.
+       */
+      function buildChartModel(points, prefix) {
+        if (!CU) return null;
+        const list = Array.isArray(points) ? points : [];
+        const available = SERIES_DEFS
+          .map((def) => ({ ...def, key: CU.resolveSeriesKey(list, def.aliases) }))
+          .filter((def) => def.key);
+        if (!available.length) return null;
+        const visible = available.filter((def) => !state.fleet.hiddenSeries[def.id]);
+        const reduced = CU.downsamplePoints(list, CHART_MAX_POINTS, available.map((def) => def.key));
+        const counts = [];
+        for (const def of visible) {
+          if (def.axis === 'percent') continue;
+          for (const point of reduced) {
+            const value = Number(point[def.key]);
+            if (Number.isFinite(value)) counts.push(value);
+          }
+        }
+        const geo = CHART_GEOMETRY;
+        return {
+          prefix,
+          reduced,
+          available,
+          visible,
+          plot: { width: geo.width - geo.padLeft - geo.padRight, height: geo.height - geo.padTop - geo.padBottom },
+          countScale: CU.computeScale(counts, { integer: true }),
+          percentScale: CU.computeScale([], { min: 0, max: 100 }),
+          hasPercent: visible.some((def) => def.axis === 'percent'),
+          hasCount: visible.some((def) => def.axis !== 'percent'),
+        };
+      }
+      function chartMarkup(model) {
+        const geo = CHART_GEOMETRY;
+        const { plot, reduced } = model;
+        if (!reduced.length) return '<div class="subtext">Sem amostras no período.</div>';
+        const gridScale = model.hasCount || !model.hasPercent ? model.countScale : model.percentScale;
+        const grid = gridScale.ticks.map((tick) => {
+          const y = geo.padTop + CU.projectY(tick, gridScale, plot.height);
+          return `<line class="grid" x1="${geo.padLeft}" y1="${CU.round(y, 2)}" x2="${geo.padLeft + plot.width}" y2="${CU.round(y, 2)}"></line>`
+            + `<text class="axis" x="${geo.padLeft - 8}" y="${CU.round(y + 3, 2)}" text-anchor="end">${escapeHtml(fmt.format(tick))}</text>`;
+        }).join('');
+        const percentAxis = model.hasPercent ? model.percentScale.ticks.map((tick) => {
+          const y = geo.padTop + CU.projectY(tick, model.percentScale, plot.height);
+          return `<text class="axis" x="${geo.padLeft + plot.width + 8}" y="${CU.round(y + 3, 2)}" text-anchor="start">${escapeHtml(`${tick}%`)}</text>`;
+        }).join('') : '';
+        const xAxis = CU.timeAxisTicks(reduced, 5).map((tick) => {
+          const x = geo.padLeft + CU.projectX(tick.index, reduced.length, plot.width);
+          const anchor = tick.ratio === 0 ? 'start' : tick.ratio === 1 ? 'end' : 'middle';
+          return `<text class="axis" x="${CU.round(x, 2)}" y="${geo.height - 8}" text-anchor="${anchor}">${escapeHtml(tick.label)}</text>`;
+        }).join('');
+        const lines = model.visible.map((def) => {
+          const scale = def.axis === 'percent' ? model.percentScale : model.countScale;
+          const path = CU.buildLinePath(reduced, def.key, plot, scale);
+          if (!path) return '';
+          return `<path class="line" d="${path}" style="stroke:${def.color}"></path>`;
+        }).join('');
+        const legend = model.available.map((def) => {
+          const off = state.fleet.hiddenSeries[def.id] ? ' off' : '';
+          const last = formatSeriesValue(def, seriesLastValue(reduced, def.key));
+          return `<button type="button" class="${`legend${off}`.trim()}" data-series="${escapeHtml(def.id)}" data-chart="${escapeHtml(model.prefix)}" style="color:${def.color}">
+            <span class="key"></span>${escapeHtml(def.label)} <span class="value">${escapeHtml(last)}</span>
+          </button>`;
+        }).join('');
+        return `
+          <div class="chart-legend" data-chart-legend="${escapeHtml(model.prefix)}">${legend}</div>
+          <div class="chart-box" data-chart-box="${escapeHtml(model.prefix)}" style="margin-top:12px">
+            <svg viewBox="0 0 ${geo.width} ${geo.height}" role="img" aria-label="Série temporal da frota">
+              ${grid}${percentAxis}${xAxis}
+              <line class="cursor" data-chart-cursor y1="${geo.padTop}" y2="${geo.padTop + plot.height}" x1="0" x2="0"></line>
+              <g transform="translate(${geo.padLeft},${geo.padTop})">${lines}</g>
+              <rect class="overlay" data-chart-overlay x="${geo.padLeft}" y="${geo.padTop}" width="${plot.width}" height="${plot.height}"></rect>
+            </svg>
+            <div class="chart-readout" data-chart-readout></div>
+          </div>`;
+      }
+      function wireChart(container, model) {
+        if (!container || !model || !model.reduced.length) return;
+        // `prefix` é constante do próprio painel ('fleet'/'installation'),
+        // nunca vem do servidor — seletor direto é seguro aqui.
+        container.querySelectorAll(`[data-chart-legend="${model.prefix}"] [data-series]`).forEach((button) => {
+          button.addEventListener('click', () => {
+            const id = button.dataset.series;
+            state.fleet.hiddenSeries[id] = !state.fleet.hiddenSeries[id];
+            if (model.prefix === 'fleet') renderFleetChart();
+            else renderDetail();
+          });
+        });
+        const box = container.querySelector(`[data-chart-box="${model.prefix}"]`);
+        if (!box) return;
+        const overlay = box.querySelector('[data-chart-overlay]');
+        const cursor = box.querySelector('[data-chart-cursor]');
+        const readout = box.querySelector('[data-chart-readout]');
+        if (!overlay || !cursor || !readout) return;
+        const geo = CHART_GEOMETRY;
+        const clear = () => {
+          cursor.style.opacity = '0';
+          readout.innerHTML = '<span>Passe o mouse no gráfico para ver o instante.</span>';
+        };
+        overlay.addEventListener('mousemove', (event) => {
+          const rect = overlay.getBoundingClientRect();
+          if (!rect.width) return;
+          const index = CU.nearestPointIndex(model.reduced, (event.clientX - rect.left) / rect.width);
+          const point = model.reduced[index];
+          if (!point) return;
+          const x = geo.padLeft + CU.projectX(index, model.reduced.length, model.plot.width);
+          cursor.setAttribute('x1', String(CU.round(x, 2)));
+          cursor.setAttribute('x2', String(CU.round(x, 2)));
+          cursor.style.opacity = '1';
+          const when = point.ts ? dtf.format(new Date(point.ts)) : '';
+          readout.innerHTML = `<span><b>${escapeHtml(when)}</b></span>`
+            + model.visible.map((def) => `<span style="color:${def.color}">${escapeHtml(def.label)}: <b>${escapeHtml(formatSeriesValue(def, Number.isFinite(Number(point[def.key])) ? Number(point[def.key]) : null))}</b></span>`).join('');
+        });
+        overlay.addEventListener('mouseleave', clear);
+        clear();
+      }
+      function renderFleetChart() {
+        const box = document.querySelector('#fleet-chart');
+        if (!box) return;
+        const points = CU ? state.fleet.points : null;
+        const hide = () => { box.classList.add('hidden'); box.innerHTML = ''; };
+        if (!points) return hide();                       // endpoint ausente/erro
+        const model = points.length ? buildChartModel(points, 'fleet') : null;
+        if (points.length && !model) return hide();       // formato irreconhecível
+        const ranges = FLEET_RANGES.map((range) => `<button type="button" data-range="${range.hours}" class="${range.hours === state.fleet.rangeHours ? 'active' : ''}">${escapeHtml(range.label)}</button>`).join('');
+        box.classList.remove('hidden');
+        box.innerHTML = `
+          <div class="chart-head">
+            <div class="section-title" style="margin:0">Evolução da frota</div>
+            <div class="chart-ranges">${ranges}</div>
+          </div>
+          ${model ? chartMarkup(model) : '<div class="subtext">Endpoint ativo, mas ainda sem amostras nesta janela.</div>'}`;
+        box.querySelectorAll('[data-range]').forEach((button) => button.addEventListener('click', () => {
+          const hours = number(button.dataset.range, 24);
+          if (hours === state.fleet.rangeHours) return;
+          state.fleet.rangeHours = hours;
+          state.fleet.byInstallation = {};
+          void refreshFleetSeries();
+        }));
+        wireChart(box, model);
+      }
+
+      // ── Seções por instalação ─────────────────────────────────────────────
+      // Guardado para o wireChart do detalhe usar EXATAMENTE o modelo que foi
+      // desenhado (recalcular abriria espaço para o hover apontar outro ponto).
+      let lastInstallationChartModel = null;
+      function installationChartHtml(item) {
+        lastInstallationChartModel = null;
+        if (!CU || !item) return '';
+        const cached = state.fleet.byInstallation[item.id];
+        const model = cached && cached.points && cached.points.length ? buildChartModel(cached.points, 'installation') : null;
+        if (!model) return '';
+        lastInstallationChartModel = model;
+        return `<div class="section">
+          <div class="section-title">Evolução desta instalação</div>
+          ${chartMarkup(model)}
+        </div>`;
+      }
+      function problemCamerasHtml(item) {
+        if (!CU || !item) return '';
+        // O bloco por câmera NÃO viaja no /api/admin/installations (o JSON da
+        // Central não guarda) — ele vem junto da série da instalação. Se ainda
+        // não chegou, tenta o próprio item (agente que mande em metrics.cameras).
+        const cached = state.fleet.byInstallation[item.id];
+        const fromSeries = cached && Array.isArray(cached.cameras) && cached.cameras.length ? cached.cameras : null;
+        const cameras = CU.selectProblemCameras(fromSeries || item, { limit: 12 });
+        if (!cameras.length) return '';
+        const rows = cameras.map((camera) => {
+          const badges = camera.reasons.map((reason) => `<span class="badge ${cameraReasonTone[reason] || 'warn'}">${escapeHtml(cameraReasonLabels[reason] || reason)}</span>`).join(' ');
+          const detail = camera.secondsSinceLastSegment === null
+            ? escapeHtml(camera.status)
+            : `sem segmento há ${escapeHtml(timeAgo(Math.round(camera.secondsSinceLastSegment)))}`;
+          return `<div class="cam-issue">
+            <div style="min-width:0">
+              <div class="name">${escapeHtml(camera.name || camera.id || 'Câmera sem nome')}</div>
+              <div class="why">${badges}</div>
+            </div>
+            <div class="subtext" style="text-align:right;white-space:nowrap">${detail}</div>
+          </div>`;
+        }).join('');
+        return `<div class="section">
+          <div class="section-title">Câmeras com problema (${fmt.format(cameras.length)})</div>
+          <div class="cam-issues">${rows}</div>
+        </div>`;
+      }
+
       function renderResources(status, item = null) {
         const map = restrictionMap(status, item);
         return `<div class="resource-grid">${Object.entries(map).map(([key, allowed]) => `
@@ -1131,6 +1560,7 @@
           return;
         }
         state.selectedId = item.id;
+        ensureInstallationSeries(item.id);
         const mem = item.server?.totalMemoryBytes ? Math.round(((item.server.totalMemoryBytes - item.server.freeMemoryBytes) / item.server.totalMemoryBytes) * 100) : null;
         els.detail.innerHTML = `
           <div class="panel-head">
@@ -1172,6 +1602,8 @@
               <div class="section-title">Tendências</div>
               ${renderTrends(item)}
             </div>
+            ${installationChartHtml(item)}
+            ${problemCamerasHtml(item)}
             <div class="section">
               <div class="section-title">Servidor</div>
               <div class="kv">
@@ -1227,6 +1659,7 @@
         els.detail.querySelector('#copy-selected-diagnostics')?.addEventListener('click', () => copyDiagnosticsFor(item.id));
         els.detail.querySelector('#copy-selected-installer')?.addEventListener('click', () => copyInstallerFor(item.id));
         els.detail.querySelector('#delete-pending-install')?.addEventListener('click', () => deletePendingInstallation(item.id));
+        if (lastInstallationChartModel) wireChart(els.detail, lastInstallationChartModel);
       }
       function renderInventory() {
         const items = filteredItems();
@@ -1401,6 +1834,8 @@
         setView(state.view);
         const items = filteredItems();
         renderMetrics(items);
+        renderFleetTiles();
+        renderFleetChart();
         renderFleetTrends(items);
         renderRows(items);
         renderDetail();
@@ -1487,6 +1922,8 @@
           localStorage.setItem('drac-central-selected', state.selectedId);
           document.querySelector('#last-update').textContent = `Atualizado ${new Date().toLocaleTimeString('pt-BR')}`;
           render();
+          // Série temporal é opcional: falha aqui não pode afetar o painel.
+          void refreshFleetSeries();
         } catch {
           showToast('Falha ao atualizar a central.');
           return;

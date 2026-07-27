@@ -9,6 +9,26 @@ const { reconcile, reconcileCount } = require('./dual-read');
 // para o server.js trocar de backend com risco mínimo. A lógica pura (mapeamento,
 // dual-read, reconciliação) vive nos módulos irmãos e é testada isolada.
 
+// `CREATE TABLE/INDEX IF NOT EXISTS` NÃO é livre de corrida: a checagem de
+// existência acontece ANTES da inserção no catálogo, então dois processos
+// criando o schema ao mesmo tempo num banco vazio quebram com
+// "duplicate key value violates unique constraint pg_type_typname_nsp_index"
+// (23505) ou "relation already exists" (42P07). Como o DDL é idempotente por
+// construção, a resposta certa é TENTAR DE NOVO: na segunda passada as tabelas já
+// existem e tudo vira no-op. Erro que não seja de corrida sobe na hora.
+const CONCURRENT_DDL_CODES = new Set(['23505', '42P07', '42P16', '42710']);
+
+async function applySchema(pg, attempts = 3) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await pg.query(SCHEMA_SQL);
+    } catch (error) {
+      if (attempt >= attempts || !CONCURRENT_DDL_CODES.has(String(error && error.code))) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
+  }
+}
+
 class PgStore {
   constructor(options = {}) {
     this.options = options;
@@ -29,7 +49,14 @@ class PgStore {
   }
 
   async initSchema() {
-    if (!this._ready) this._ready = this._pg().query(SCHEMA_SQL);
+    // Falha não pode ficar memoizada: um banco que subiu depois da Central
+    // deixaria o processo travado numa promessa rejeitada para sempre.
+    if (!this._ready) {
+      this._ready = applySchema(this._pg()).catch((error) => {
+        this._ready = null;
+        throw error;
+      });
+    }
     await this._ready;
   }
 
