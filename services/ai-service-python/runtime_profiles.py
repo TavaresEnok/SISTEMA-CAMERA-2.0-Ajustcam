@@ -61,14 +61,6 @@ def _env_csv_int(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
             continue
     return tuple(values) or default
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        return float(str(raw).strip())
-    except Exception:
-        return default
 
 MOTION_PROFILE = {
     "mode": "motion",
