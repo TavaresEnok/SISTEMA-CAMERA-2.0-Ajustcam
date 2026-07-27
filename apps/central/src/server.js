@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
 const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
+const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
 
 function loadEnvFile() {
@@ -48,6 +49,11 @@ const ALLOWED_ORIGINS = String(process.env.DRAC_CENTRAL_ALLOWED_ORIGINS || '*')
   .filter(Boolean);
 const loginAttempts = new Map();
 const MAX_REQUEST_BODY_BYTES = Math.max(16 * 1024, Number(process.env.DRAC_CENTRAL_MAX_BODY_BYTES || 1024 * 1024));
+
+// Scheduler multi-nó (fase 4) — DESLIGADO por default. Com a flag off as rotas
+// nem são registradas: nada é lido, nada é escrito, e o registro de nós continua
+// tão inerte quanto é hoje. Ligar exige DRAC_CENTRAL_SCHEDULER_ENABLED=true.
+const SCHEDULER = scheduler.schedulerConfigFromEnv(process.env);
 
 // Build-agent (gera os APKs white-label). Roda no HOST; a Central fala com ele
 // pela gateway da bridge Docker. Token compartilhado (nunca exposto ao browser).
@@ -1418,6 +1424,76 @@ async function handlePatchComputeNodes(req, res, db, actor, installationId) {
   return json(req, res, 200, publicInstallation(item));
 }
 
+// ── Scheduler multi-nó (fase 4) ──────────────────────────────────────────────
+// Control-plane orquestrado pela CENTRAL: quem decide qual nó roda o quê.
+// Estas rotas só existem com a flag ligada e são de LEITURA/PLANEJAMENTO —
+// NADA é executado em nó nenhum (fase futura). O plano fica no objeto da
+// instalação (`schedulerPlan`), como os nós: sem tabela nem coluna nova.
+
+// GET: devolve o plano SALVO como está. Não replaneja e não escreve nada — um
+// GET que replanejasse trocaria tokens (e migraria câmeras) a cada refresh do
+// painel.
+async function handleGetSchedulerPlan(req, res, db, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  await saveDb(db);
+  return json(req, res, 200, scheduler.planView(item));
+}
+
+// POST: força o replanejamento. `previous` é o plano salvo (ou, na primeira vez,
+// o próprio registro), então replanejar MINIMIZA migração por construção.
+// `dryRun:true` calcula e devolve sem persistir (simulação de "e se…").
+async function handleSchedulerReplan(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  const body = await readBody(req);
+  // Mesma regra da PATCH de compute-nodes: payload malformado é 400, nunca um
+  // 200 que planeja com dado errado.
+  if (body.workloads !== undefined && !Array.isArray(body.workloads)) {
+    return json(req, res, 400, { error: 'invalid_scheduler_payload', details: ['workloads deve ser um array'] });
+  }
+  if (body.nodeStates !== undefined && (!body.nodeStates || typeof body.nodeStates !== 'object' || Array.isArray(body.nodeStates))) {
+    return json(req, res, 400, { error: 'invalid_scheduler_payload', details: ['nodeStates deve ser um objeto { nodeId: { lastSeenAt, draining, status } }'] });
+  }
+  const validation = validateComputeNodes(normalizeComputeNodes(item.computeNodes));
+  if (!validation.valid) {
+    return json(req, res, 400, { error: 'invalid_compute_nodes', details: validation.errors });
+  }
+
+  let plan;
+  try {
+    plan = scheduler.planForInstallation(item, {
+      now: new Date(), // o relógio entra AQUI; o algoritmo não o lê sozinho
+      config: SCHEDULER,
+      workloads: body.workloads,
+      nodeStates: body.nodeStates,
+    });
+  } catch (error) {
+    if (error && error.code === 'too_many_workloads') {
+      return json(req, res, 400, { error: 'too_many_workloads', message: error.message });
+    }
+    throw error;
+  }
+
+  const dryRun = body.dryRun === true;
+  if (!dryRun) {
+    // NÃO mexemos em item.updatedAt: replanejar não é mudança de política do
+    // cliente (updatedAt > lastHeartbeatAt marcaria "política pendente" à toa).
+    item[scheduler.PLAN_FIELD] = plan;
+    addAuditEvent(db, req, {
+      type: 'installation.scheduler_replanned',
+      actor: actor.email,
+      result: 'accepted',
+      installationId,
+      epoch: plan.epoch,
+      migrations: plan.stats.migrations,
+      unassigned: plan.stats.unassigned,
+    });
+  }
+  await saveDb(db);
+  return json(req, res, 200, { enabled: true, installationId, dryRun, plan });
+}
+
 async function handleInstallationApp(req, res, db, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
@@ -1863,6 +1939,20 @@ async function route(req, res) {
       const computeNodesMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/compute-nodes$/);
       if (req.method === 'PATCH' && computeNodesMatch) {
         return handlePatchComputeNodes(req, res, db, actor, decodeURIComponent(computeNodesMatch[1]));
+      }
+
+      // ── Scheduler multi-nó (fase 4) — SÓ com a flag ligada ─────────────────
+      // Com a flag off nem chegamos a testar o caminho: as rotas caem no 404
+      // genérico lá embaixo, exatamente como antes desta fase existir.
+      if (SCHEDULER.enabled) {
+        const schedulerMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/scheduler$/);
+        if (req.method === 'GET' && schedulerMatch) {
+          return handleGetSchedulerPlan(req, res, db, decodeURIComponent(schedulerMatch[1]));
+        }
+        const replanMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/scheduler\/replan$/);
+        if (req.method === 'POST' && replanMatch) {
+          return handleSchedulerReplan(req, res, db, actor, decodeURIComponent(replanMatch[1]));
+        }
       }
 
       // ── Instalação remota via SSH ──────────────────────────────────────────
