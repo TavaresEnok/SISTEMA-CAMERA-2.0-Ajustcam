@@ -12,6 +12,9 @@ import {
 import { CryptoService } from '../common/crypto/crypto.service';
 import { SettingsService } from '../settings/settings.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
+// Métricas por câmera: singleton de módulo (sem DI, para não mexer no construtor
+// deste serviço) e sempre em try/catch — observabilidade não derruba stream.
+import { cameraMetrics } from '../observability/camera-metrics.service';
 import {
   GRID_LIVE_MAX_HEIGHT,
   GRID_LIVE_MAX_WIDTH,
@@ -221,6 +224,11 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       await this.apiRequest('DELETE', `/v3/config/paths/delete/${encoded}`).catch(() => undefined);
       await this.ensurePathForCamera(parsed.cameraId, parsed.deliveryMode);
       this.logger.log(`Watchdog: path ${pathName} reconfigurado com sucesso.`);
+      // Métrica (aditiva): só conta recuperação que DEU CERTO — o caminho de
+      // falha cai no catch abaixo e não infla o contador.
+      try {
+        cameraMetrics.recordStreamRecovery(parsed.cameraId);
+      } catch { /* observabilidade nunca interrompe a recuperação */ }
     } catch (error) {
       this.logger.error(
         `Watchdog: falha ao recuperar ${pathName}: ${error instanceof Error ? error.message : String(error)}`,

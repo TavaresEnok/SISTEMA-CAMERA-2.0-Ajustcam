@@ -1,14 +1,25 @@
 import { Controller, Get, Header } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
+import { CameraMetricsService } from './camera-metrics.service';
+import { buildCameraSeries } from './camera-prometheus.helper';
 import { formatPrometheus, type Metric } from './prometheus.helper';
 
-// /metrics no formato Prometheus. AGREGADO por design (sem labels de câmera/URL/IP)
-// para não vazar PII nem explodir cardinalidade — a correlação por instalação fica
-// na Central autenticada (regra de cardinalidade/PII do item 2.3).
+// /metrics no formato Prometheus. As séries AGREGADAS seguem sem qualquer rótulo;
+// as séries POR CÂMERA (contrato B) usam EXCLUSIVAMENTE o rótulo camera_id — este
+// endpoint é @Public e nome/IP/URL entregariam o cliente e a topologia da
+// instalação (regra de cardinalidade/PII do item 2.3). A correlação id→nome fica
+// na rota AUTENTICADA GET /observability/cameras (e na Central).
+//
+// Nada aqui consulta o banco: um endpoint público que fosse ao Postgres a cada
+// scrape viraria amplificador de carga sobre o banco que sustenta a gravação.
+// As séries por câmera saem do registro EM MEMÓRIA.
 @Controller()
 export class MetricsController {
-  constructor(private readonly recordings: RecordingProcessManagerService) {}
+  constructor(
+    private readonly recordings: RecordingProcessManagerService,
+    private readonly cameraMetrics: CameraMetricsService,
+  ) {}
 
   @Public()
   @Get('metrics')
@@ -22,6 +33,19 @@ export class MetricsController {
       { name: 'drac_api_heap_used_bytes', help: 'Heap V8 em uso', type: 'gauge', value: mem.heapUsed },
       { name: 'drac_recordings_active', help: 'Gravações locais ativas neste host', type: 'gauge', value: this.recordings.getActiveRecordingCount() },
     ];
+    // ADITIVO: as séries por câmera entram DEPOIS das agregadas, que continuam
+    // byte-a-byte como estavam (dashboards/alertas existentes não quebram).
+    metrics.push(...this.buildCameraMetrics());
     return formatPrometheus(metrics);
+  }
+
+  private buildCameraMetrics(): Metric[] {
+    try {
+      const activeCameraIds = this.recordings.getRuntimeSummary().activeCameraIds ?? [];
+      return buildCameraSeries({ snapshots: this.cameraMetrics.snapshotAll(), activeCameraIds });
+    } catch {
+      // Uma falha na parte NOVA nunca pode derrubar o /metrics que já existia.
+      return [];
+    }
   }
 }

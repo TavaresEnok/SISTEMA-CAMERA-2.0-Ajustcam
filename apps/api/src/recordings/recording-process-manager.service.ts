@@ -24,6 +24,11 @@ import { buildRtspUrl, resolveRecordingRtspProfile } from '../cameras/helpers/rt
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
+// Registro de métricas por câmera. Importado como SINGLETON de módulo (e não por
+// DI) de propósito: instrumentar não pode exigir mexer no construtor deste
+// serviço crítico. Toda chamada é síncrona, trivial e envolvida em try/catch —
+// observabilidade JAMAIS pode derrubar uma gravação.
+import { cameraMetrics } from '../observability/camera-metrics.service';
 import { buildRecordingOutputDir, buildRecordingOutputPattern } from './helpers/recording-path.helper';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
 
@@ -42,6 +47,13 @@ export type RecordingProcessState = {
   knownFiles: Set<string>;
   scanInFlight: Promise<void> | null;
   finalizePromise: Promise<void> | null;
+  /**
+   * Marcado quando a parada foi PEDIDA (stop/stopAll/rollback do start). Serve
+   * para a métrica não contar uma parada normal como "reinício": o handler
+   * `proc.on('close')` dispara ANTES do stop() retornar, então a intenção
+   * precisa estar registrada no estado antes do kill. Não altera o fluxo.
+   */
+  stopRequested?: boolean;
 };
 
 type WorkerRecordingCommand = {
@@ -252,7 +264,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
   }
 
-  private getRecordingStaleThresholdSeconds(segmentSeconds?: number | null) {
+  // Público (era private) para que a observabilidade por câmera use EXATAMENTE
+  // o mesmo limiar de "gravação travada" que o status/health já usam — duas
+  // fórmulas divergentes acusariam defeitos diferentes na mesma câmera.
+  // Comportamento e chamadas existentes: inalterados.
+  getRecordingStaleThresholdSeconds(segmentSeconds?: number | null) {
     const configuredThreshold = Number(process.env.RECORDING_STALE_THRESHOLD_SECONDS ?? 180);
     const defaultSegmentSeconds = Number(this.configService.get<number>('recordingSegmentSeconds') ?? 300);
     const effectiveSegmentSeconds = Number(segmentSeconds && segmentSeconds > 0 ? segmentSeconds : defaultSegmentSeconds);
@@ -788,6 +804,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
 
     if (!created) return;
+    // Métrica (aditiva): segmento NOVO registrado. Só depois do commit no banco,
+    // e nunca para uma re-registração do mesmo arquivo.
+    try {
+      cameraMetrics.recordSegment(cameraId);
+    } catch { /* observabilidade nunca interrompe a gravação */ }
     try {
       await this.thumbnailQueue.add(
         'generate-thumbnail',
@@ -1011,6 +1032,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   private finalizeRecordingState(cameraId: string, state: RecordingProcessState, exitCode?: number | null) {
     if (state.finalizePromise) return state.finalizePromise;
+    // Métrica (aditiva): o processo morreu SEM que a parada tenha sido pedida —
+    // é queda/reinício. Depois do guard acima, então cada morte conta uma vez.
+    if (!state.stopRequested) {
+      try {
+        cameraMetrics.recordRecordingRestart(cameraId);
+      } catch { /* observabilidade nunca interrompe a finalização */ }
+    }
     state.finalizePromise = (async () => {
       clearInterval(state.watcher);
       await this.scanAndRegister(state, true);
@@ -1188,6 +1216,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         data: { recordingEnabled: true, ...(await this.resolveRecordingModeUpdate(cameraId, options?.recordingMode)) },
       });
     } catch (error) {
+      state.stopRequested = true; // rollback do start: parada PEDIDA, não queda
       await this.stopProcessAndWait(state);
       await this.finalizeRecordingState(cameraId, state, state.process.exitCode);
       throw error;
@@ -1238,6 +1267,9 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
 
     clearInterval(state.watcher);
+    // ANTES do kill: o handler `proc.on('close')` chama finalize primeiro, e sem
+    // esta marca toda parada normal viraria "reinício" na métrica.
+    state.stopRequested = true;
     await this.stopProcessAndWait(state);
     await this.finalizeRecordingState(cameraId, state, state.process.exitCode);
 
