@@ -246,6 +246,31 @@ export class RecordingsController {
     return result;
   }
 
+  /**
+   * `recordings:check` (item 2.4) — reconciliação bidirecional DB↔disco. Só RELATA
+   * (não apaga nem adota nada): a decisão de agir é do operador. Sem esta rota o
+   * método era inalcançável — existia mas não era executável.
+   */
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('serverConfig')
+  @Post('recordings/maintenance/check-integrity')
+  async checkRecordingIntegrity(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { limit?: number },
+    @Req() req: Request,
+  ) {
+    const result = await this.recordingsService.checkRecordingIntegrity(body?.limit ?? 100_000);
+    await this.auditService.log(
+      user.id,
+      'recording.integrity.check',
+      'Recording',
+      null,
+      { dbCount: result.dbCount, diskCount: result.diskCount, orfaosNoDisco: result.orfaosNoDisco.length, orfaosNoDb: result.orfaosNoDb.length },
+      req,
+    );
+    return result;
+  }
+
   @Roles(UserRole.ADMIN)
   @RequirePermission('serverConfig')
   @Post('recordings/maintenance/thumbnails/backfill')
