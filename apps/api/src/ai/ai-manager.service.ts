@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { CamerasService } from '../cameras/cameras.service';
 import { AiService } from './ai.service';
+import { SourceGatewayService } from '../camera-stream/source-gateway.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import {
@@ -119,6 +120,8 @@ export class AiManagerService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly mediamtxProxy: MediamtxProxyService,
     private readonly commercialPolicy: CommercialPolicyService,
+    // Opcional: camada nova, DESLIGADA por default. Sem ela nada muda.
+    @Optional() private readonly sourceGateway?: SourceGatewayService,
   ) {}
 
   async onModuleInit() {
@@ -839,6 +842,41 @@ export class AiManagerService implements OnModuleInit {
           },
         };
       }
+    }
+
+    // Source Gateway (flag CAMERA_SOURCE_GATEWAY_ENABLED, default OFF): quando
+    // ligado E já existe origem republicada, a IA lê do MediaMTX em vez de abrir
+    // MAIS uma conexão na câmera. É o consumidor mais seguro para migrar primeiro:
+    // a IA só precisa de QUADROS (não do bitstream original, como a gravação), e o
+    // fail-safe da IA já trata fonte indisponível gravando assim mesmo.
+    // Com a flag OFF, resolveSourceUrl devolve `rtspUrl` sem tocar em nada.
+    const gatewayDecision = this.sourceGateway?.resolveSourceUrl({
+      cameraId: cam.id,
+      profile: 'sub',
+      consumer: 'ai',
+      directUrl: rtspUrl,
+      internalUrl: this.mediamtxProxy.buildInternalRtspUrl(
+        this.mediamtxProxy.pathNameFromCameraId(cam.id, 'grid'),
+      ),
+    });
+    if (gatewayDecision && gatewayDecision.url !== rtspUrl) {
+      const gatewayUrlSanitized = sanitizeRtspUrl(gatewayDecision.url);
+      this.logger.log(`IA roteada pelo Source Gateway para a origem interna de ${cam.name}: ${gatewayUrlSanitized}`);
+      return {
+        rtspUrl: gatewayDecision.url,
+        info: {
+          ...infoBase,
+          sourceKind: 'source_gateway_internal',
+          usesMediaMtx: true,
+          audioRequested: false,
+          analyticsRtspUrl: gatewayUrlSanitized,
+          analyticsSourceUrlSanitized: sourceUrlSanitized,
+          analyticsOriginalRtspUrl: sourceUrlSanitized,
+          analyticsSourceCodec: analyticsCodec,
+          analyticsTranscodedForAi: false,
+          analyticsGatewayReason: gatewayDecision.reason,
+        },
+      };
     }
 
     this.logger.debug(`IA usando RTSP direto analytics para ${cam.name}: ${sourceUrlSanitized}${analyticsCodec ? ` codec=${analyticsCodec}` : ''}`);

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { spawn } from 'child_process';
 import { type Request } from 'express';
@@ -21,6 +21,8 @@ import {
   GRID_LIVE_TARGET_FPS,
   type LiveViewMode,
 } from './helpers/live-delivery-profile.helper';
+import { liveViewModeToSourceProfile } from './helpers/source-profile.helper';
+import { SourceGatewayService } from './source-gateway.service';
 
 type DeliveryUrls = {
   enabled: boolean;
@@ -75,6 +77,10 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     private readonly camerasService: CamerasService,
     private readonly cryptoService: CryptoService,
     private readonly settingsService: SettingsService,
+    // Opcional de propósito: o gateway é uma camada nova e DESLIGADA por default.
+    // Sendo opcional, este serviço continua instanciável (inclusive nos testes que
+    // o constroem à mão) sem conhecer o gateway.
+    @Optional() private readonly sourceGateway?: SourceGatewayService,
   ) {}
 
   onApplicationBootstrap() {
@@ -290,7 +296,10 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     return `'${value.replace(/'/g, `'\\''`)}'`;
   }
 
-  private pathNameFromCameraId(cameraId: string, deliveryMode: LiveViewMode = 'selected') {
+  // Público para o Source Gateway: consumidores precisam saber o NOME do path
+  // interno daquela câmera/perfil para pedir a URL republicada. Só leitura — a
+  // função é pura (deriva o nome do id), não cria nem altera path nenhum.
+  pathNameFromCameraId(cameraId: string, deliveryMode: LiveViewMode = 'selected') {
     const base = `cam_${cameraId.replace(/[^a-zA-Z0-9]/g, '')}`;
     // 'original' tem path PRÓPRIO (_orig): se compartilhasse o base com 'selected',
     // dois espectadores em modos diferentes ficariam reconfigurando o mesmo path
@@ -904,6 +913,19 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     const request = this.configurePathForCamera(cameraId, deliveryMode)
       .then((value) => {
         this.pathEnsureCache.set(ensureKey, { value, at: Date.now() });
+        // Avisa o Source Gateway que ESTE perfil tem origem republicada internamente.
+        // Sem este aviso o gateway nunca teria o que oferecer e cairia sempre no
+        // fallback direto — ou seja, ligar a flag não mudaria nada. Best-effort:
+        // um erro aqui NUNCA pode derrubar a preparação do path de live.
+        try {
+          this.sourceGateway?.registerPublishedSource(
+            cameraId,
+            liveViewModeToSourceProfile(deliveryMode),
+            value.pathName ? this.buildInternalRtspUrl(value.pathName) : null,
+          );
+        } catch {
+          /* observabilidade não interfere no live */
+        }
         return value;
       })
       .finally(() => {
