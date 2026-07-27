@@ -50,6 +50,7 @@ export function buildCameraSeries(input: CameraSeriesInput): Metric[] {
   const secondsSince: Metric[] = [];
   const restarts: Metric[] = [];
   const recoveries: Metric[] = [];
+  const brakes: Metric[] = [];
 
   for (const cameraId of ids) {
     const snapshot = byId.get(cameraId) ?? null;
@@ -91,9 +92,19 @@ export function buildCameraSeries(input: CameraSeriesInput): Metric[] {
       value: snapshot?.recoveriesTotal ?? 0,
       labels,
     });
+
+    // Freio anti-tempestade armado = o watchdog DESISTIU desta câmera por um
+    // tempo. É o sinal de "manda alguém no local": vale alerta, não só gráfico.
+    brakes.push({
+      name: 'drac_camera_stream_recovery_brakes_total',
+      help: 'Vezes que o freio anti-tempestade pausou a recuperação desta câmera (fonte não volta sozinha)',
+      type: 'counter',
+      value: snapshot?.brakesTotal ?? 0,
+      labels,
+    });
   }
 
   // Agrupadas por NOME: o formato exige as amostras de uma métrica contíguas
   // (HELP/TYPE únicos, emitidos pelo formatPrometheus na primeira amostra).
-  return [...recordingActive, ...secondsSince, ...restarts, ...recoveries];
+  return [...recordingActive, ...secondsSince, ...restarts, ...recoveries, ...brakes];
 }

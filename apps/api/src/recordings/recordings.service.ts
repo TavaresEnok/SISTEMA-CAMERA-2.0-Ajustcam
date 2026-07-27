@@ -29,6 +29,14 @@ import {
   type TimelinePreviewPlan,
 } from './helpers/timeline-preview.helper';
 import { planVodPlaylist, renderVodPlaylist, type VodSourceSegment } from './helpers/vod-playlist.helper';
+import {
+  buildCompatibleTranscodeArgs,
+  detectTranscodeHwaccel,
+  reportHwaccelFailure,
+  reportHwaccelSuccess,
+  type HwaccelDecision,
+  type HwaccelPreset,
+} from '../camera-stream/helpers/hwaccel-presets.helper';
 import archiver from 'archiver';
 
 const execFileAsync = promisify(execFile);
@@ -366,53 +374,85 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const tmpPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
 
     // Transcode H.265 (or any incompatible codec) → H.264 preserving original resolution and quality.
-    // CRF 18 = visually lossless. scale=iw:ih preserves original dimensions from the camera.
-    try {
-      await execFileAsync('ffmpeg', [
-        '-y',
-        '-i',
-        inputPath,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a:0?',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '18',
-        '-profile:v',
-        'high',
-        '-level',
-        '4.1',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-ar',
-        '44100',
-        '-ac',
-        '2',
-        '-movflags',
-        '+faststart',
-        tmpPath,
-      ], {
-        timeout: 300000,  // 5 min max for large files
-        maxBuffer: 8 * 1024 * 1024,
-      });
-    } catch (error) {
-      // Timeout/erro não pode deixar lixo parcial ocupando disco.
-      try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
-      throw new InternalServerErrorException(error instanceof Error ? error.message : 'Falha ao gerar playback compatível.');
+    // CRF 18 = visually lossless. A resolução original é preservada (sem -vf).
+    //
+    // CAMPO DE PROVAS DA ACELERAÇÃO POR HARDWARE: este transcode é offline e
+    // descartável — se falhar, nenhuma câmera cai, só refazemos em CPU. Por isso
+    // é aqui que a GPU estreia. A rede de proteção é a mesma do Frigate
+    // (record/export.py:749-770): comando com hwaccel falhou ⇒ refaz sem hwaccel.
+    // O arquivo TEM de sair; a aceleração é um bônus, nunca um requisito.
+    const hwaccel = await this.resolveTranscodeHwaccel();
+    if (hwaccel.degraded) {
+      // O dono precisa ENXERGAR que prometeram GPU e não há GPU.
+      this.logger.warn(`Aceleração por hardware indisponível: ${hwaccel.reason}`);
     }
 
-    if (!existsSync(tmpPath) || statSync(tmpPath).size === 0) {
+    const tentativas: Array<{ preset: HwaccelPreset | null; args: string[] }> = [];
+    if (hwaccel.preset) {
+      tentativas.push({
+        preset: hwaccel.preset,
+        args: buildCompatibleTranscodeArgs({
+          input: inputPath,
+          output: tmpPath,
+          preset: hwaccel.preset,
+          device: hwaccel.device,
+        }),
+      });
+    }
+    tentativas.push({
+      preset: null,
+      args: buildCompatibleTranscodeArgs({ input: inputPath, output: tmpPath, preset: null }),
+    });
+
+    let ultimoErro: string | null = null;
+    let publicado = false;
+    for (const tentativa of tentativas) {
+      try {
+        await this.runTranscodeAttempt(tentativa.args);
+        // Código de saída 0 NÃO é prova: falhas de hwaccel costumam sair 0 e não
+        // escrever nada. Só um arquivo com bytes conta como sucesso.
+        if (existsSync(tmpPath) && statSync(tmpPath).size > 0) {
+          if (tentativa.preset) reportHwaccelSuccess(tentativa.preset);
+          publicado = true;
+          break;
+        }
+        ultimoErro = 'o ffmpeg terminou sem produzir arquivo';
+      } catch (error) {
+        ultimoErro = error instanceof Error ? error.message : String(error);
+      }
+      // Lixo parcial não pode sobreviver entre tentativas nem no fim.
       try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
-      throw new InternalServerErrorException('Falha ao gerar arquivo compatível para playback.');
+      if (tentativa.preset) {
+        // Quarentena, não exclusão: o preset volta a ser testado sozinho depois.
+        const emQuarentena = reportHwaccelFailure(tentativa.preset);
+        this.logger.warn(
+          `Transcode compatível com aceleração ${tentativa.preset} FALHOU (${ultimoErro}); refazendo em CPU` +
+            (emQuarentena ? ` — preset colocado em QUARENTENA após falhas repetidas.` : '.'),
+        );
+      }
+    }
+
+    if (!publicado) {
+      try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
+      throw new InternalServerErrorException(
+        `Falha ao gerar arquivo compatível para playback: ${ultimoErro ?? 'erro desconhecido'}`,
+      );
     }
     renameSync(tmpPath, outputPath); // atômico no mesmo filesystem
     return outputPath;
+  }
+
+  /** Seam única para a decisão de aceleração (cache/quarentena vivem no helper). */
+  private resolveTranscodeHwaccel(): Promise<HwaccelDecision> {
+    return detectTranscodeHwaccel();
+  }
+
+  /** Seam única para executar o ffmpeg do transcode compatível. */
+  private async runTranscodeAttempt(args: string[]): Promise<void> {
+    await execFileAsync('ffmpeg', args, {
+      timeout: 300000, // 5 min max for large files
+      maxBuffer: 8 * 1024 * 1024,
+    });
   }
 
   async streamRecordingCompatible(recordingId: string, res: Response) {

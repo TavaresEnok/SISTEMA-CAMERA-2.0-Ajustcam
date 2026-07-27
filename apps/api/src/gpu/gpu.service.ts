@@ -4,6 +4,16 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { access } from 'node:fs/promises';
 import { SettingsService } from '../settings/settings.service';
+import {
+  applyQuarantine,
+  detectHwaccelReport,
+  detectTranscodeHwaccel,
+  resolveHwaccel,
+  type DetectHwaccelOptions,
+  type HwaccelDecision,
+  type HwaccelPreset,
+  type HwaccelProbeReport,
+} from '../camera-stream/helpers/hwaccel-presets.helper';
 
 const run = promisify(execFile);
 
@@ -23,8 +33,34 @@ export type GpuStatus = {
     gpuVisible: boolean;
     /** O ffmpeg deste serviço tem encoder acelerado (NVENC / VAAPI / QSV). */
     transcodeAccel: boolean;
+    /**
+     * A aceleração foi COMPROVADA por encode+decode reais neste container —
+     * não apenas listada por `ffmpeg -encoders` (que é só compilação e dá
+     * falso positivo em qualquer VM sem GPU).
+     */
+    transcodeAccelProven: boolean;
     /** O serviço de IA está usando um runtime acelerado (CUDA / OpenVINO GPU). */
     aiAccel: boolean;
+  };
+  /** Detecção honesta do pipeline de transcode offline (playback compatível). */
+  hwaccel: {
+    /** Tri-estado configurado em TRANSCODE_HWACCEL: auto | <preset> | cpu. */
+    mode: string;
+    /** Preset em uso agora (null = CPU). */
+    preset: HwaccelPreset | null;
+    device: string | null;
+    /** O preset em uso passou pelo teste real? */
+    proven: boolean;
+    /** Prometeram aceleração e não há: precisa aparecer na tela. */
+    degraded: boolean;
+    reason: string;
+    /** Presets aprovados no teste real (independente do modo configurado). */
+    provenPresets: HwaccelPreset[];
+    /** Por que cada candidato reprovou (texto do ffmpeg). */
+    failures: Record<string, string>;
+    /** O que o ffmpeg apenas DECLARA ter (compilação). */
+    compiled: { nvenc: boolean; vaapi: boolean; qsv: boolean };
+    probedAt: string;
   };
   ai: {
     /** A feature de IA está ligada no sistema? (aiFeatureEnabled). Hoje: false. */
@@ -57,6 +93,12 @@ export type GpuVerifyResult = {
   encoder: string | null;
   elapsedMs: number | null;
   message: string;
+  /**
+   * true  = encode+decode reais rodaram neste container.
+   * false = o resultado veio de declaração (encoder compilado / env de outro
+   *         container). Nunca confunda os dois na UI.
+   */
+  proven?: boolean;
 };
 
 @Injectable()
@@ -138,11 +180,42 @@ export class GpuService {
     }
   }
 
+  /**
+   * Detecção HONESTA: o relatório vem de encode+decode CURTOS executados de
+   * verdade (helper compartilhado com o transcode offline — as duas telas veem
+   * a mesma verdade, com o mesmo cache e a mesma quarentena).
+   */
+  /**
+   * Porta de execução do teste real. Em produção fica vazia (o helper usa o
+   * ffmpeg deste container, o MESMO que roda o transcode offline).
+   */
+  protected hwaccelProbeOptions(): DetectHwaccelOptions {
+    return {};
+  }
+
+  private async probeHwaccelCapability(force = false): Promise<{
+    report: HwaccelProbeReport;
+    capability: HwaccelDecision;
+    effective: HwaccelDecision;
+  }> {
+    const probeOptions = this.hwaccelProbeOptions();
+    const report = await detectHwaccelReport({ ...probeOptions, force });
+    const emQuarentena = applyQuarantine(report);
+    return {
+      report,
+      // `auto` ignora o modo configurado: responde "este host CONSEGUE acelerar?".
+      capability: resolveHwaccel('auto', emQuarentena),
+      // O que o transcode vai realmente usar agora (respeita TRANSCODE_HWACCEL).
+      effective: await detectTranscodeHwaccel(probeOptions),
+    };
+  }
+
   async getStatus(): Promise<GpuStatus> {
-    const [device, intel, encoders, aiProbe, enabled, aiFeatureEnabled, aiAccelEnabled] = await Promise.all([
+    const [device, intel, encoders, hw, aiProbe, enabled, aiFeatureEnabled, aiAccelEnabled] = await Promise.all([
       this.detectNvidia(),
       this.hasIntelRenderNode(),
       this.ffmpegAccelEncoders(),
+      this.probeHwaccelCapability(),
       this.probeAiRuntime(),
       this.settings.isGpuAccelerationEnabled(),
       this.settings.isAiFeatureEnabled(),
@@ -157,7 +230,11 @@ export class GpuService {
     // GPU_TRANSCODE_AVAILABLE=true na API — então confiamos nesse sinal. Como
     // fallback, também aceitamos o ffmpeg local desta API ter encoder acelerado.
     const transcodePipelineHasNvenc = String(this.config.get<string>('gpuTranscodeAvailable') ?? process.env.GPU_TRANSCODE_AVAILABLE ?? '').toLowerCase() === 'true';
-    const localTranscodeAccel = vendor === 'nvidia' ? encoders.nvenc : vendor === 'intel' ? encoders.vaapi || encoders.qsv : false;
+    // ANTES: bastava o encoder aparecer em `ffmpeg -encoders`. Isso é COMPILAÇÃO,
+    // não hardware — neste próprio host o ffmpeg lista h264_nvenc/h264_vaapi/
+    // h264_qsv e nenhum dos três abre um dispositivo ("Cannot load libcuda.so.1",
+    // "No VA display found"). Agora só conta o que RODOU de fato.
+    const localTranscodeAccel = hw.capability.proven;
     const transcodeAccel = gpuVisible && (transcodePipelineHasNvenc || localTranscodeAccel);
     const aiRuntime = (ai.runtime ?? '').toLowerCase();
     const aiDevice = (ai.device ?? '').toLowerCase();
@@ -173,13 +250,40 @@ export class GpuService {
     if (gpuVisible && !transcodeAccel) {
       hints.push('A GPU está visível, mas o ffmpeg deste build não tem encoder acelerado. Use uma imagem com NVENC/VAAPI.');
     }
+    // O aviso que faltava: o ffmpeg PROMETE aceleração e o hardware não responde.
+    // Sem isto o admin liga a GPU e acha que ganhou desempenho que não existe.
+    if (hw.capability.degraded) {
+      hints.push(hw.capability.reason);
+    }
+    if (hw.effective.degraded && hw.effective.reason !== hw.capability.reason) {
+      hints.push(hw.effective.reason);
+    }
 
     return {
       vendor,
       enabled,
       ready: gpuVisible && transcodeAccel,
       device,
-      checks: { gpuVisible, transcodeAccel, aiAccel: aiRunsOnGpu },
+      checks: {
+        gpuVisible,
+        transcodeAccel,
+        transcodeAccelProven: hw.capability.proven,
+        aiAccel: aiRunsOnGpu,
+      },
+      hwaccel: {
+        mode: hw.effective.mode,
+        preset: hw.effective.preset,
+        device: hw.effective.device,
+        proven: hw.effective.proven,
+        degraded: hw.effective.degraded || hw.capability.degraded,
+        reason: hw.effective.reason,
+        provenPresets: (Object.keys(hw.report.proven) as HwaccelPreset[]).filter(
+          (preset) => hw.report.proven[preset] === true,
+        ),
+        failures: hw.report.failures as Record<string, string>,
+        compiled: hw.report.compiled,
+        probedAt: hw.report.probedAt,
+      },
       ai: {
         featureEnabled: aiFeatureEnabled,
         accelerationEnabled: aiAccelEnabled,
@@ -227,31 +331,71 @@ export class GpuService {
     };
   }
 
+  /** Nome do encoder efetivamente usado por cada família de preset. */
+  private encoderOfPreset(preset: HwaccelPreset | null): string | null {
+    if (!preset) return null;
+    if (preset.startsWith('preset-nvidia')) return 'h264_nvenc';
+    if (preset === 'preset-vaapi') return 'h264_vaapi';
+    if (preset.startsWith('preset-intel-qsv')) return 'h264_qsv';
+    return null;
+  }
+
   async verify(): Promise<GpuVerifyResult> {
-    const encoders = await this.ffmpegAccelEncoders();
-    const encoder = encoders.nvenc ? 'h264_nvenc' : encoders.vaapi ? 'h264_vaapi' : encoders.qsv ? 'h264_qsv' : null;
-    const transcodePipelineHasNvenc = String(this.config.get<string>('gpuTranscodeAvailable') ?? process.env.GPU_TRANSCODE_AVAILABLE ?? '').toLowerCase() === 'true';
-    if (!encoder) {
-      if (transcodePipelineHasNvenc) {
-        return { ok: true, encoder: 'h264_nvenc', elapsedMs: null, message: 'Pipeline de transcode (MediaMTX) tem NVENC embutido. Teste de encode local indisponível neste container, mas a aceleração está pronta.' };
-      }
-      return { ok: false, encoder: null, elapsedMs: null, message: 'Nenhum encoder de GPU disponível no ffmpeg deste serviço.' };
-    }
-    // VAAPI/QSV exigem device extra; o auto-teste cobre o caminho NVENC (encode puro).
-    if (encoder !== 'h264_nvenc') {
-      return { ok: true, encoder, elapsedMs: null, message: `Encoder ${encoder} presente no ffmpeg. Teste de encode automático disponível apenas para NVENC.` };
-    }
+    // Auto-teste HONESTO: refaz o encode+decode reais agora (force), em vez de
+    // acreditar na lista de encoders compilados.
     const startedAt = Date.now();
-    const r = await this.exec(
-      'ffmpeg',
-      ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-t', '2', '-c:v', 'h264_nvenc', '-f', 'null', '-'],
-      20000,
-    );
+    const hw = await this.probeHwaccelCapability(true);
     const elapsedMs = Date.now() - startedAt;
-    if (!r.ok) {
-      return { ok: false, encoder, elapsedMs, message: `Falha no encode de teste com ${encoder}: ${(r.stderr || '').slice(0, 240) || 'erro desconhecido'}` };
+    const transcodePipelineHasNvenc = String(this.config.get<string>('gpuTranscodeAvailable') ?? process.env.GPU_TRANSCODE_AVAILABLE ?? '').toLowerCase() === 'true';
+
+    if (hw.capability.proven && hw.capability.preset) {
+      const encoder = this.encoderOfPreset(hw.capability.preset);
+      return {
+        ok: true,
+        encoder,
+        elapsedMs,
+        proven: true,
+        message: `Encode + decode de teste com ${encoder} (${hw.capability.preset}) concluídos em ${elapsedMs} ms.`,
+      };
     }
-    return { ok: true, encoder, elapsedMs, message: `Encode de teste com ${encoder} concluído em ${elapsedMs} ms.` };
+
+    const motivos = Object.entries(hw.report.failures)
+      .map(([preset, erro]) => `${preset}: ${erro}`)
+      .join(' | ');
+
+    if (transcodePipelineHasNvenc) {
+      // Sinal declarado por OUTRO container (MediaMTX com NVENC). Não dá para
+      // provar daqui — e isso precisa ficar explícito, não virar "ok" silencioso.
+      return {
+        ok: true,
+        encoder: 'h264_nvenc',
+        elapsedMs,
+        proven: false,
+        message:
+          'Pipeline de transcode (MediaMTX) DECLARA ter NVENC — não é possível comprovar a partir deste container. ' +
+          `O ffmpeg da API não conseguiu acelerar nada aqui (${motivos || 'sem encoder de GPU'}).`,
+      };
+    }
+
+    const compilados = Object.entries(hw.report.compiled)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+    if (compilados.length > 0) {
+      return {
+        ok: false,
+        encoder: null,
+        elapsedMs,
+        proven: false,
+        message: `O ffmpeg lista ${compilados.join('/')} mas NENHUM funcionou de verdade: ${motivos || 'erro desconhecido'}.`,
+      };
+    }
+    return {
+      ok: false,
+      encoder: null,
+      elapsedMs,
+      proven: false,
+      message: 'Nenhum encoder de GPU disponível no ffmpeg deste serviço.',
+    };
   }
 
   async setMode(enabled: boolean, userId?: string): Promise<GpuStatus> {

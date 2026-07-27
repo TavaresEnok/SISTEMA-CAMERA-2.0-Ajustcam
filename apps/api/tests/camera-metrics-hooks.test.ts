@@ -129,6 +129,7 @@ test('hook stream: recuperação de path travado conta para a câmera certa', as
   const proxy: any = Object.create(MediamtxProxyService.prototype);
   proxy.logger = { warn() {}, log() {}, debug() {}, error() {} };
   proxy.recoveringPaths = new Set<string>();
+  proxy.recoveryBrake = new Map<string, unknown>();
   proxy.invalidateMainCodecCache = () => {};
   proxy.apiRequest = async () => '';
   proxy.ensurePathForCamera = async () => undefined;
@@ -144,6 +145,7 @@ test('hook stream: recuperação que FALHOU não conta como recuperação', asyn
   const proxy: any = Object.create(MediamtxProxyService.prototype);
   proxy.logger = { warn() {}, log() {}, debug() {}, error() {} };
   proxy.recoveringPaths = new Set<string>();
+  proxy.recoveryBrake = new Map<string, unknown>();
   proxy.invalidateMainCodecCache = () => {};
   proxy.apiRequest = async () => '';
   proxy.ensurePathForCamera = async () => { throw new Error('MediaMTX fora'); };
@@ -158,9 +160,11 @@ test('à prova de falha: métrica que EXPLODE não derruba gravação nem stream
   const originalSegment = cameraMetrics.recordSegment;
   const originalRestart = cameraMetrics.recordRecordingRestart;
   const originalRecovery = cameraMetrics.recordStreamRecovery;
+  const originalBrake = cameraMetrics.recordStreamRecoveryBrake;
   (cameraMetrics as any).recordSegment = boom;
   (cameraMetrics as any).recordRecordingRestart = boom;
   (cameraMetrics as any).recordStreamRecovery = boom;
+  (cameraMetrics as any).recordStreamRecoveryBrake = boom;
   try {
     const svc = makeRecorder();
     svc.active = new Map();
@@ -172,14 +176,20 @@ test('à prova de falha: métrica que EXPLODE não derruba gravação nem stream
     const proxy: any = Object.create(MediamtxProxyService.prototype);
     proxy.logger = { warn() {}, log() {}, debug() {}, error() {} };
     proxy.recoveringPaths = new Set<string>();
+    proxy.recoveryBrake = new Map<string, unknown>();
     proxy.invalidateMainCodecCache = () => {};
     proxy.apiRequest = async () => '';
     proxy.ensurePathForCamera = async () => undefined;
-    await assert.doesNotReject(() => proxy.recoverStuckPath(`cam_${CAM.replace(/-/g, '')}`, false, 1));
+    // 5 recuperações seguidas ARMAM o freio anti-tempestade — e é justamente aí
+    // que a métrica do freio é chamada. Nem isso pode derrubar o watchdog.
+    for (let i = 0; i < 5; i += 1) {
+      await assert.doesNotReject(() => proxy.recoverStuckPath(`cam_${CAM.replace(/-/g, '')}`, false, 1));
+    }
     assert.equal(proxy.recoveringPaths.size, 0, 'o guard por-path precisa ser liberado mesmo assim');
   } finally {
     (cameraMetrics as any).recordSegment = originalSegment;
     (cameraMetrics as any).recordRecordingRestart = originalRestart;
     (cameraMetrics as any).recordStreamRecovery = originalRecovery;
+    (cameraMetrics as any).recordStreamRecoveryBrake = originalBrake;
   }
 });

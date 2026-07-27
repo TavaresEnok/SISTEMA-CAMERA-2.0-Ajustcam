@@ -13,6 +13,7 @@ from detectors.motion import MotionDetector
 from model_registry import registry
 from runtime_profiles import MOTION_PROFILE, runtime_profile
 from reconnect_backoff import compute_reconnect_delay
+from capture_rate_guard import CaptureRateGuard
 
 logger = logging.getLogger("ai-service.stream")
 
@@ -178,6 +179,21 @@ class StreamProcessor:
         self.semantic_confirmations = 0
         self.semantic_errors = 0
         self.semantic_last_labels: list[str] = []
+        # ── FPS de captura anômalo (timestamp quebrado na câmera) ────────────
+        # Técnica derivada do Frigate (MIT) — Copyright (c) Frigate, Inc.
+        # Quando os timestamps da câmera estão quebrados, o decoder para de se
+        # cadenciar pelo relógio do stream e lê o mais rápido que consegue: CPU
+        # a 100% sem que ninguém saiba por quê. O guarda só DENUNCIA (o DRAC não
+        # mata captura por suspeita); o freio de CPU é opt-in.
+        self._capture_rate_guard = CaptureRateGuard(
+            expected_fps=0.0,
+            margin_fps=float(os.getenv("AI_CAPTURE_RATE_MARGIN_FPS", "10")),
+            sustain_seconds=float(os.getenv("AI_CAPTURE_RATE_SUSTAIN_SECONDS", "30")),
+            cooldown_seconds=float(os.getenv("AI_CAPTURE_RATE_ALERT_COOLDOWN_SECONDS", "300")),
+        )
+        self._capture_rate_throttle_enabled = str(
+            os.getenv("AI_CAPTURE_RATE_THROTTLE_ENABLED", "false")
+        ).strip().lower() in ("1", "true", "yes", "on")
 
     @property
     def advanced_analysis_type(self):
@@ -424,6 +440,37 @@ class StreamProcessor:
         except Exception:
             return None
 
+    def _note_capture_rate(self) -> float:
+        """Contabiliza UM frame consumido e denuncia FPS de captura anômalo.
+
+        NUNCA derruba a captura: o DRAC é VMS com valor probatório e matar o
+        stream por suspeita pode custar exatamente o instante que interessava.
+        Devolve o sleep (s) sugerido pelo freio de CPU — 0.0 quando não há
+        anomalia OU quando o throttle está desligado (o default).
+        """
+        try:
+            event = self._capture_rate_guard.observe()
+        except Exception:
+            return 0.0
+        if event:
+            logger.warning(
+                "[%s] FPS de captura ANÔMALO: %.1f fps observados x %.1f esperados (limite %.1f) "
+                "sustentados por %.0fs — assinatura de TIMESTAMP QUEBRADO NA CÂMERA: o decoder "
+                "perde a cadência do stream e lê o mais rápido que consegue, queimando CPU. "
+                "A análise e a gravação seguem; verifique relógio/RTP da câmera (ou force TCP).",
+                self.camera_id,
+                event["observed_fps"],
+                event["expected_fps"],
+                event["threshold_fps"],
+                event["sustained_seconds"],
+            )
+        if not self._capture_rate_throttle_enabled:
+            return 0.0
+        try:
+            return float(self._capture_rate_guard.suggested_sleep_seconds())
+        except Exception:
+            return 0.0
+
     def _rate_from_timestamps(self, timestamps):
         if len(timestamps) < 2:
             return 0.0
@@ -448,6 +495,9 @@ class StreamProcessor:
                 "fps": round(fps, 3) if fps > 0 else info.get("fps"),
             })
             self._capture_stream_info = info
+            # O FPS declarado pela fonte é a referência do guarda de taxa (valor
+            # inválido/absurdo é ignorado lá dentro, mantendo o fallback).
+            self._capture_rate_guard.set_expected_fps(info.get("fps"))
         except Exception:
             pass
 
@@ -511,6 +561,9 @@ class StreamProcessor:
             "last_capture_success_at": self.last_capture_success_at,
             "last_capture_failure_at": self.last_capture_failure_at,
             "consecutive_capture_failures": self.consecutive_capture_failures,
+            # Diagnóstico do FPS anômalo (timestamp quebrado): números crus para
+            # o operador/health, sem interpretar por ele.
+            "capture_rate_guard": self._capture_rate_guard.state(),
         }
 
     def readiness_state(self, max_frame_age_seconds: float = 20.0) -> dict:
@@ -774,6 +827,12 @@ class StreamProcessor:
                 # então o loop se auto-cadencia no FPS do stream.
                 if cap.grab():
                     grab_failures = 0
+                    # Cada frame DRENADO também conta para a taxa de captura: é
+                    # justamente aqui que o timestamp quebrado aparece (grab()
+                    # deveria bloquear até o próximo frame e passa a voltar na hora).
+                    throttle = self._note_capture_rate()
+                    if throttle > 0:
+                        time.sleep(throttle)
                 else:
                     grab_failures += 1
                     time.sleep(0.05)
@@ -808,6 +867,7 @@ class StreamProcessor:
             self.last_seen = capture_timestamp
             self.last_capture_success_at = capture_timestamp
             self.consecutive_capture_failures = 0
+            self._note_capture_rate()
             if isinstance(self.last_error, str) and self.last_error.startswith("capture_failed"):
                 self.last_error = None
             self._capture_timestamps.append(capture_timestamp)

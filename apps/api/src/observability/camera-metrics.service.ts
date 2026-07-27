@@ -32,24 +32,31 @@ export type CameraMetricsSnapshot = {
   segmentsLastHour: number;
   restartsLastHour: number;
   recoveriesLastHour: number;
+  /** Vezes que o freio anti-tempestade do watchdog PAROU de tentar recuperar. */
+  brakesLastHour: number;
   segmentsTotal: number;
   restartsTotal: number;
   recoveriesTotal: number;
+  brakesTotal: number;
   lastSegmentAt: Date | null;
   lastRecoveryAt: Date | null;
+  lastBrakeAt: Date | null;
 };
 
-type SeriesKind = 'segments' | 'restarts' | 'recoveries';
+type SeriesKind = 'segments' | 'restarts' | 'recoveries' | 'brakes';
 
 type CameraEntry = {
   segments: number[];
   restarts: number[];
   recoveries: number[];
+  brakes: number[];
   segmentsTotal: number;
   restartsTotal: number;
   recoveriesTotal: number;
+  brakesTotal: number;
   lastSegmentAtMs: number | null;
   lastRecoveryAtMs: number | null;
+  lastBrakeAtMs: number | null;
   touchedAtMs: number;
 };
 
@@ -58,11 +65,14 @@ const EMPTY_SNAPSHOT = (cameraId: string): CameraMetricsSnapshot => ({
   segmentsLastHour: 0,
   restartsLastHour: 0,
   recoveriesLastHour: 0,
+  brakesLastHour: 0,
   segmentsTotal: 0,
   restartsTotal: 0,
   recoveriesTotal: 0,
+  brakesTotal: 0,
   lastSegmentAt: null,
   lastRecoveryAt: null,
+  lastBrakeAt: null,
 });
 
 export class CameraMetricsService {
@@ -101,6 +111,20 @@ export class CameraMetricsService {
   }
 
   /**
+   * O FREIO ANTI-TEMPESTADE armou: o watchdog DESISTIU de recuperar este path
+   * por um tempo (recuperações demais numa janela curta, todas fúteis). É o
+   * sinal de "a câmera não vai voltar sozinha, alguém precisa ir lá" — por isso
+   * ele é uma série própria, e não mais uma recuperação.
+   */
+  recordStreamRecoveryBrake(cameraId: string): void {
+    this.safe(cameraId, (entry, now) => {
+      this.push(entry.brakes, now);
+      entry.brakesTotal += 1;
+      if (entry.lastBrakeAtMs == null || now > entry.lastBrakeAtMs) entry.lastBrakeAtMs = now;
+    });
+  }
+
+  /**
    * Semeia a marca-d'água do último segmento a partir de uma fonte DURÁVEL (o
    * banco). Só AVANÇA o relógio — nunca conta como evento novo, senão a leitura
    * autenticada inflaria a janela do /metrics. Serve para o /metrics não ficar
@@ -127,11 +151,14 @@ export class CameraMetricsService {
       segmentsLastHour: this.countWindow(entry.segments, now),
       restartsLastHour: this.countWindow(entry.restarts, now),
       recoveriesLastHour: this.countWindow(entry.recoveries, now),
+      brakesLastHour: this.countWindow(entry.brakes, now),
       segmentsTotal: entry.segmentsTotal,
       restartsTotal: entry.restartsTotal,
       recoveriesTotal: entry.recoveriesTotal,
+      brakesTotal: entry.brakesTotal,
       lastSegmentAt: entry.lastSegmentAtMs == null ? null : new Date(entry.lastSegmentAtMs),
       lastRecoveryAt: entry.lastRecoveryAtMs == null ? null : new Date(entry.lastRecoveryAtMs),
+      lastBrakeAt: entry.lastBrakeAtMs == null ? null : new Date(entry.lastBrakeAtMs),
     };
   }
 
@@ -190,11 +217,14 @@ export class CameraMetricsService {
       segments: [],
       restarts: [],
       recoveries: [],
+      brakes: [],
       segmentsTotal: 0,
       restartsTotal: 0,
       recoveriesTotal: 0,
+      brakesTotal: 0,
       lastSegmentAtMs: null,
       lastRecoveryAtMs: null,
+      lastBrakeAtMs: null,
       touchedAtMs: now,
     };
     this.cameras.set(id, entry);

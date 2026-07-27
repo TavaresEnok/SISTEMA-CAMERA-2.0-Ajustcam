@@ -96,6 +96,31 @@ function pct(value: number | null | undefined): number | null {
   return Math.round((value as number) * 10000) / 100;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Watchdog de processadores DEGRADADOS: era 120s. Um detector cego (a fonte
+// mudou por baixo dele) exige 2 ciclos para agir — 120s viravam 4 MINUTOS de
+// câmera armada sem detectar movimento, ou seja, sem gravar. A 30s o mesmo
+// diagnóstico sai em 1 minuto.
+//
+// Por que baixar é seguro: a frequência do TICK não é a frequência da AÇÃO. Toda
+// recuperação continua travada por cooldown POR CÂMERA em tempo ABSOLUTO
+// (AI_DEGRADED_RECOVERY_COOLDOWN_MS, piso de 2 min; 5 min para processador
+// ausente), então tick mais rápido não vira tempestade de restart — encurta só a
+// DETECÇÃO. O custo por tick é um GET /health no ai-service (barato, local).
+//
+// O piso existe para que ninguém consiga martelar o ai-service por env; e o
+// fallback protege contra o defeito antigo `Math.max(60_000, Number('abc'))` =
+// NaN, que fazia setInterval disparar a cada ~1ms.
+// ─────────────────────────────────────────────────────────────────────────────
+export const AI_DEGRADED_WATCHDOG_DEFAULT_INTERVAL_MS = 30_000;
+export const AI_DEGRADED_WATCHDOG_MIN_INTERVAL_MS = 10_000;
+
+export function resolveDegradedWatchdogIntervalMs(raw?: string | null): number {
+  const parsed = Number(String(raw ?? '').trim());
+  const wanted = Number.isFinite(parsed) && parsed > 0 ? parsed : AI_DEGRADED_WATCHDOG_DEFAULT_INTERVAL_MS;
+  return Math.max(AI_DEGRADED_WATCHDOG_MIN_INTERVAL_MS, wanted);
+}
+
 function parseCsvEnv(raw: string | undefined): string[] {
   return String(raw ?? '')
     .split(',')
@@ -137,8 +162,9 @@ export class AiManagerService implements OnModuleInit {
     // quando a fonte muda por baixo dele (ex.: site caiu e voltou com outro
     // codec/URL — o detector fica cego sem se auto-curar). Aqui a análise é
     // reiniciada com a fonte RE-RESOLVIDA (buildAiSource) automaticamente.
-    const watchdogIntervalMs = Math.max(60_000, Number(process.env.AI_DEGRADED_WATCHDOG_INTERVAL_MS ?? 120_000));
+    const watchdogIntervalMs = resolveDegradedWatchdogIntervalMs(process.env.AI_DEGRADED_WATCHDOG_INTERVAL_MS);
     this.degradedWatchdogTimer = setInterval(() => void this.recoverDegradedProcessors(), watchdogIntervalMs);
+    this.logger.log(`Watchdog de IA degradada ativo (intervalo ${Math.round(watchdogIntervalMs / 1000)}s).`);
     if (typeof this.degradedWatchdogTimer.unref === 'function') this.degradedWatchdogTimer.unref();
   }
 
