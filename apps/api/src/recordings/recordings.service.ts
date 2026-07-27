@@ -1,6 +1,6 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { createReadStream, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { rename, rm, stat } from 'node:fs/promises';
 import { extname, join } from 'node:path';
@@ -42,6 +42,10 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RecordingsService.name);
   private readonly thumbnailGenerationInFlight = new Map<string, Promise<void>>();
   private readonly timelinePreviewInFlight = new Map<string, Promise<void>>();
+  // Transcode de playback compatível é CARO (até 5 min de FFmpeg). Sem dedup, N
+  // requisições simultâneas da MESMA gravação disparavam N transcodes do mesmo
+  // arquivo — tempestade de CPU que degrada gravação e live no mesmo host.
+  private readonly compatibleFileInFlight = new Map<string, Promise<string>>();
   private readonly thumbnailGenerationWaiters: Array<() => void> = [];
   private thumbnailGenerationActive = 0;
   private integritySweepTimer: NodeJS.Timeout | null = null;
@@ -330,7 +334,18 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     createReadStream(filePath, { start: validStart, end: validEnd }).pipe(res);
   }
 
-  private async ensureCompatibleFile(recordingId: string) {
+  private async ensureCompatibleFile(recordingId: string): Promise<string> {
+    // Dedup por gravação: quem chegar durante um transcode em andamento AGUARDA o
+    // mesmo trabalho em vez de iniciar outro.
+    const existing = this.compatibleFileInFlight.get(recordingId);
+    if (existing) return existing;
+    const work = this.generateCompatibleFile(recordingId)
+      .finally(() => this.compatibleFileInFlight.delete(recordingId));
+    this.compatibleFileInFlight.set(recordingId, work);
+    return work;
+  }
+
+  private async generateCompatibleFile(recordingId: string) {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const inputPath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
@@ -344,6 +359,10 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     if (existsSync(outputPath) && statSync(outputPath).size > 0) {
       return outputPath;
     }
+    // Escreve num TEMPORÁRIO e só then renomeia: o nome final nunca aponta para um
+    // arquivo pela metade (um transcode interrompido deixava um MP4 truncado que o
+    // `existsSync` seguinte aceitaria como cache válido, servindo vídeo quebrado).
+    const tmpPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
 
     // Transcode H.265 (or any incompatible codec) → H.264 preserving original resolution and quality.
     // CRF 18 = visually lossless. scale=iw:ih preserves original dimensions from the camera.
@@ -376,18 +395,22 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         '2',
         '-movflags',
         '+faststart',
-        outputPath,
+        tmpPath,
       ], {
         timeout: 300000,  // 5 min max for large files
         maxBuffer: 8 * 1024 * 1024,
       });
     } catch (error) {
+      // Timeout/erro não pode deixar lixo parcial ocupando disco.
+      try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
       throw new InternalServerErrorException(error instanceof Error ? error.message : 'Falha ao gerar playback compatível.');
     }
 
-    if (!existsSync(outputPath)) {
+    if (!existsSync(tmpPath) || statSync(tmpPath).size === 0) {
+      try { rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
       throw new InternalServerErrorException('Falha ao gerar arquivo compatível para playback.');
     }
+    renameSync(tmpPath, outputPath); // atômico no mesmo filesystem
     return outputPath;
   }
 
