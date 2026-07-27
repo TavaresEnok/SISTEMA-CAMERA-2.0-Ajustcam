@@ -19,7 +19,11 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 CONFIRM_MOTION_CONCURRENCY = int(os.getenv("AI_CONFIRM_MOTION_CONCURRENCY", "1") or "1")
-CONFIRM_MOTION_DEADLINE_SEC = float(os.getenv("AI_CONFIRM_MOTION_DEADLINE_SEC", "8") or "8")
+# 6s deixa MARGEM sob o timeout de 8s do cliente (api/src/ai/ai.service.ts): assim
+# quem responde é o nosso fail-safe (confirmed=None, com log e reason="timeout") e
+# não o abort do cliente — mesmo desfecho prático (grava), mas observável do lado do
+# serviço. Empatar em 8s fazia o deadline do servidor quase nunca disparar.
+CONFIRM_MOTION_DEADLINE_SEC = float(os.getenv("AI_CONFIRM_MOTION_DEADLINE_SEC", "6") or "6")
 
 _sem: Optional[asyncio.Semaphore] = None
 
@@ -52,7 +56,24 @@ async def run_confirm_motion(
     sem = semaphore if semaphore is not None else get_semaphore()
     try:
         async with sem:
-            return await asyncio.wait_for(asyncio.to_thread(blocking_call), timeout=deadline)
+            # `wait_for` cancela a ESPERA, não a thread — Python não interrompe thread.
+            # Se soltássemos o semáforo no timeout, a thread órfã seguiria usando o
+            # modelo enquanto a próxima inferência começasse: a promessa de serializar
+            # o modelo único quebraria justamente no caso de falha, e as órfãs se
+            # acumulariam no executor sob rajada. Então o `shield` protege a task do
+            # cancelamento e nós a aguardamos até o fim ANTES de liberar a vaga; quem
+            # devolve a resposta ao chamador é o deadline (fail-safe abaixo).
+            task = asyncio.ensure_future(asyncio.to_thread(blocking_call))
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
+            except asyncio.TimeoutError:
+                # Segura a vaga do semáforo até a thread terminar de fato (ela se
+                # auto-encerra: a captura tem timeout próprio). Só então libera.
+                try:
+                    await task
+                except Exception:
+                    pass
+                raise
     except asyncio.TimeoutError:
         if logger is not None:
             logger.warning(

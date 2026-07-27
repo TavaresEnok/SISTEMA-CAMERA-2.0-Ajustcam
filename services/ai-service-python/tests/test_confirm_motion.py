@@ -60,6 +60,31 @@ class RunConfirmMotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tid", seen)
         self.assertNotEqual(seen["tid"], loop_thread)
 
+    async def test_semaphore_holds_through_timeout(self):
+        # O caso que faltava: no TIMEOUT, a thread órfã continua rodando. Se o
+        # semáforo fosse liberado ali, duas inferências usariam o modelo único ao
+        # mesmo tempo (pico 2). O semáforo tem de segurar a vaga até a thread acabar.
+        sem = asyncio.Semaphore(1)
+        state = {"cur": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def slow():
+            with lock:
+                state["cur"] += 1
+                state["peak"] = max(state["peak"], state["cur"])
+            time.sleep(0.35)  # passa MUITO do deadline abaixo
+            with lock:
+                state["cur"] -= 1
+            return {"confirmed": False, "reason": "no_object", "labels": []}
+
+        first, second = await asyncio.gather(
+            confirm_motion.run_confirm_motion(slow, deadline=0.05, semaphore=sem),
+            confirm_motion.run_confirm_motion(slow, deadline=1.5, semaphore=sem),
+        )
+        self.assertIsNone(first["confirmed"])          # o 1º estourou -> fail-safe
+        self.assertEqual(first["reason"], "timeout")
+        self.assertEqual(state["peak"], 1, "duas inferências simultâneas no modelo único após timeout")
+
     async def test_semaphore_bounds_concurrency(self):
         # Semaphore(1) => duas chamadas NÃO se sobrepõem (pico de concorrência == 1).
         sem = asyncio.Semaphore(1)
