@@ -11,6 +11,7 @@ from stream_processor import StreamProcessor
 from model_registry import registry
 from runtime_profiles import exposed_profiles
 from onnxruntime_session import inference_threading_status
+from confirm_motion import run_confirm_motion, capture_and_detect
 
 logging.basicConfig(
     level=(os.getenv("AI_LOG_LEVEL", "INFO") or "INFO").strip().upper(),
@@ -190,47 +191,14 @@ async def confirm_motion(request: ConfirmMotionRequest, x_service_token: Optiona
     falhou. Só confirmed=False (frame lido e SEM objeto) suprime a gravação.
     """
     validate_internal_token(x_service_token)
-    import cv2 as _cv2
-    import time as _time
-
-    cap = None
-    try:
-        cap = _cv2.VideoCapture(request.rtsp_url, _cv2.CAP_FFMPEG)
-        cap.set(_cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000)
-        cap.set(_cv2.CAP_PROP_READ_TIMEOUT_MSEC, 4000)
-        cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
-        frame = None
-        started = _time.time()
-        # Descarta os primeiros quadros (podem vir do buffer antigo) e pega um recente.
-        for _ in range(5):
-            ok, f = cap.read()
-            if ok and f is not None:
-                frame = f
-            if _time.time() - started > 5:
-                break
-        if frame is None:
-            return {"confirmed": None, "reason": "no_frame", "labels": []}
-
-        detector = registry.ensure_detector("general")
-        objects = detector.infer(frame, context_key=None, input_size_hint=640)
-        accept = set(request.accept_labels or [])
-        labels = [str(getattr(o, "label", "")) for o in objects]
-        relevant = [l for l in labels if not accept or l in accept]
-        best_conf = max([float(getattr(o, "confidence", 0.0)) for o in objects], default=0.0)
-        return {
-            "confirmed": bool(relevant),
-            "reason": None if relevant else "no_object",
-            "labels": labels,
-            "confidence": round(best_conf, 4),
-        }
-    except Exception as exc:
-        return {"confirmed": None, "reason": f"error:{exc}", "labels": []}
-    finally:
-        try:
-            if cap is not None:
-                cap.release()
-        except Exception:
-            pass
+    # Item 2.1: o trabalho bloqueante (cv2 + inferência) NÃO roda mais no event loop.
+    # run_confirm_motion o executa numa thread com semáforo + deadline; fail-safe
+    # (timeout/erro -> confirmed=None -> a API grava) preservado. Ver confirm_motion.py.
+    return await run_confirm_motion(
+        lambda: capture_and_detect(request.rtsp_url, request.accept_labels, registry.ensure_detector),
+        camera_id=request.camera_id,
+        logger=logger,
+    )
 
 
 @app.post("/analyze/wakeup/{camera_id}")
