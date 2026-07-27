@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Cpu, MemoryStick, HardDrive, Activity, Gauge, RefreshCw,
   Server, Video, Brain, Wifi, ArrowUp, ArrowDown, Minus, CheckCircle2, AlertTriangle,
+  HeartPulse,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -15,6 +16,16 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { getApiBaseUrl } from '@/lib/api-base';
+import {
+  buildCameraHealthRows,
+  cameraHealthStateLabel,
+  parseCameraHealthPayload,
+  parseStaleThreshold,
+  recordingDesiredLabel,
+  summarizeCameraHealth,
+  type CameraHealthEntry,
+  type CameraHealthState,
+} from '@/lib/camera-health';
 import { useAuthStore } from '@/store/authStore';
 import { useVmsDataStore } from '@/store/vmsDataStore';
 import { toast } from '../hooks/use-toast';
@@ -66,6 +77,13 @@ function severityTone(s: 'info' | 'warning' | 'critical') {
   return 'border-border bg-[hsl(var(--muted)_/_0.4)] text-muted-foreground';
 }
 
+/** Cor da pílula de estado da tabela de saúde por câmera (mesma paleta de severityTone). */
+function healthStateTone(state: CameraHealthState) {
+  if (state === 'critico') return 'border-[hsl(var(--destructive)_/_0.35)] bg-[hsl(var(--destructive)_/_0.08)] text-[hsl(var(--destructive))]';
+  if (state === 'atencao') return 'border-[hsl(var(--status-warning)_/_0.35)] bg-[hsl(var(--status-warning)_/_0.10)] text-[hsl(var(--status-warning))]';
+  return 'border-[hsl(var(--status-online)_/_0.30)] bg-[hsl(var(--status-online)_/_0.08)] text-[hsl(var(--status-online))]';
+}
+
 function fmtUptime(seconds?: number) {
   if (!seconds) return '—';
   const d = Math.floor(seconds / 86400);
@@ -87,6 +105,11 @@ export default function PerformancePage() {
   const [history, setHistory] = useState<Sample[]>([]);
   const [aiHealth, setAiHealth] = useState<any>(null);
   const [report, setReport] = useState<OptimizationReport | null>(null);
+  // Saúde por câmera (GET /observability/cameras). null = indisponível → a seção
+  // simplesmente não aparece e o resto da página continua idêntico ao de hoje.
+  const [cameraHealth, setCameraHealth] = useState<CameraHealthEntry[] | null>(null);
+  // Limiar de estagnação informado pelo servidor (varia com a duração do segmento).
+  const [staleThreshold, setStaleThreshold] = useState<number | undefined>(undefined);
   const [refreshing, setRefreshing] = useState(false);
   const [auto, setAuto] = useState(true);
   const [applying, setApplying] = useState(false);
@@ -109,12 +132,17 @@ export default function PerformancePage() {
       await load();
       if (accessToken) {
         const headers = { Authorization: `Bearer ${accessToken}` };
-        const [healthRes, diagRes] = await Promise.all([
+        const [healthRes, diagRes, obsRes] = await Promise.all([
           axios.get(`${API_URL}/ai/health`, { headers }).catch(() => null),
           axios.get(`${API_URL}/camera-stream/resource-diagnostics`, { headers }).catch(() => null),
+          // 404/500/timeout aqui NÃO pode afetar nada acima: cai em null e a seção some.
+          axios.get(`${API_URL}/observability/cameras`, { headers }).catch(() => null),
         ]);
         if (healthRes) setAiHealth(healthRes.data);
         if (diagRes) setReport(diagRes.data);
+        setCameraHealth(obsRes ? parseCameraHealthPayload(obsRes.data) : null);
+        setStaleThreshold(obsRes ? parseStaleThreshold(obsRes.data) : undefined);
+        setStaleThreshold(obsRes ? parseStaleThreshold(obsRes.data) : undefined);
       }
     } finally {
       refreshRef.current = false;
@@ -172,6 +200,9 @@ export default function PerformancePage() {
 
   const canApplySafely = isAdmin && Boolean(report?.optimizationPlan?.canApplySafely);
   const recommendations = report?.recommendations ?? [];
+
+  const healthRows = cameraHealth ? buildCameraHealthRows(cameraHealth, staleThreshold) : [];
+  const healthSummary = summarizeCameraHealth(healthRows);
 
   return (
     <div className="p-4 md:p-6 space-y-5">
@@ -280,6 +311,83 @@ export default function PerformancePage() {
                 {r.cameras?.length ? <p className="truncate text-[10px] text-muted-foreground/80">{r.cameras.join(', ')}</p> : null}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Saúde por câmera (GET /observability/cameras) ──
+          Aditivo: sem o endpoint (404/erro/corpo fora do contrato) healthRows
+          fica vazio e a seção inteira some — a página segue como antes. */}
+      {healthRows.length > 0 && (
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="flex flex-col gap-3 px-5 py-3.5 border-b border-border sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <HeartPulse className="h-4 w-4 text-muted-foreground" />
+              <h2 className="text-[13px] font-semibold">Saúde por câmera</h2>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {([
+                { state: 'critico' as CameraHealthState, count: healthSummary.critico },
+                { state: 'atencao' as CameraHealthState, count: healthSummary.atencao },
+                { state: 'ok' as CameraHealthState, count: healthSummary.ok },
+              ]).map((c) => (
+                <span
+                  key={c.state}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wider ${healthStateTone(c.state)}`}
+                >
+                  {cameraHealthStateLabel(c.state)}
+                  <span className="font-mono text-[11px] tabular-nums">{c.count}</span>
+                </span>
+              ))}
+              <span className="rounded-md border border-border bg-[hsl(var(--muted)_/_0.4)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                gravando <span className="font-mono text-[11px] tabular-nums">{healthSummary.recordingActive}/{healthSummary.total}</span>
+              </span>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border">
+                  {['Câmera', 'Estado', 'Gravando', 'Último segmento', 'Reinícios (1h)', 'Recuperações (1h)'].map((h) => (
+                    <th key={h} className="px-5 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {healthRows.map((row) => (
+                  <tr key={row.cameraId} className="border-b border-border/60 last:border-0 hover:bg-accent/40 transition-colors">
+                    <td className="px-5 py-3">
+                      <div className="text-[12.5px] font-medium">{row.displayName}</div>
+                      <div className="font-mono text-[10px] text-muted-foreground">
+                        {row.status === 'ONLINE' ? 'online' : row.status === 'OFFLINE' ? 'offline' : 'desconhecido'}
+                        {row.enabled ? '' : ' · desativada'}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3">
+                      <span className={`inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${healthStateTone(row.state)}`}>
+                        {cameraHealthStateLabel(row.state)}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3">
+                      <span className="inline-flex items-center gap-1.5 text-[11px]">
+                        <span className={`h-1.5 w-1.5 rounded-full ${row.recording.active ? 'bg-[hsl(var(--status-online))]' : 'bg-muted-foreground/40'}`} />
+                        {row.recording.active ? 'Sim' : 'Não'}
+                        <span className="text-muted-foreground">· {recordingDesiredLabel(row.recording.desired)}</span>
+                      </span>
+                    </td>
+                    <td className={`px-5 py-3 font-mono text-[11px] ${row.recording.stalled ? 'text-[hsl(var(--destructive))]' : 'text-muted-foreground'}`}>
+                      {row.sinceLabel}
+                    </td>
+                    <td className={`px-5 py-3 font-mono text-[11px] tabular-nums ${row.recording.restartsLastHour > 0 ? 'text-[hsl(var(--status-warning))]' : 'text-muted-foreground'}`}>
+                      {row.recording.restartsLastHour}
+                    </td>
+                    <td className={`px-5 py-3 font-mono text-[11px] tabular-nums ${row.stream.recoveriesLastHour > 0 ? 'text-[hsl(var(--status-warning))]' : 'text-muted-foreground'}`}>
+                      {row.stream.recoveriesLastHour}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
