@@ -65,3 +65,18 @@ test('mediamtx-proxy: registra a origem publicada ao preparar o path', async () 
   assert.match(block, /try \{/, 'o registro precisa ser best-effort (não pode derrubar o live)');
   assert.match(block, /liveViewModeToSourceProfile/, 'precisa traduzir o modo de entrega para o perfil');
 });
+
+// CAUSA-RAIZ medida em produção: o gateway ficou ativo com ZERO reroteamentos
+// porque a IA resolvia a fonte ANTES de qualquer origem ser publicada — sem
+// origem, o gateway (corretamente) caía no direto, e a economia nunca acontecia.
+// A IA passa a GARANTIR o path antes de perguntar.
+test('ai-manager: GARANTE o path do MediaMTX antes de consultar o gateway', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync('src/ai/ai-manager.service.ts', 'utf8');
+  const ensureAt = src.indexOf("ensurePathForCamera(cam.id, 'grid').catch");
+  const gatewayAt = src.indexOf('this.sourceGateway?.resolveSourceUrl');
+  assert.notEqual(ensureAt, -1, 'a IA precisa garantir a origem antes de perguntar');
+  assert.ok(ensureAt < gatewayAt, 'o ensure tem de vir ANTES da consulta ao gateway');
+  // E sem path garantido não se pergunta nada (evita URL interna inválida).
+  assert.match(src.slice(ensureAt, gatewayAt + 200), /ensured\?\.pathName/);
+});

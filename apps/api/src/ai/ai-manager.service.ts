@@ -850,15 +850,23 @@ export class AiManagerService implements OnModuleInit {
     // a IA só precisa de QUADROS (não do bitstream original, como a gravação), e o
     // fail-safe da IA já trata fonte indisponível gravando assim mesmo.
     // Com a flag OFF, resolveSourceUrl devolve `rtspUrl` sem tocar em nada.
-    const gatewayDecision = this.sourceGateway?.resolveSourceUrl({
-      cameraId: cam.id,
-      profile: 'sub',
-      consumer: 'ai',
-      directUrl: rtspUrl,
-      internalUrl: this.mediamtxProxy.buildInternalRtspUrl(
-        this.mediamtxProxy.pathNameFromCameraId(cam.id, 'grid'),
-      ),
-    });
+    // GARANTE a origem antes de perguntar. Sem isto havia uma corrida de ordem: se
+    // ninguém tivesse aberto o live daquela câmera ainda, não existia origem
+    // publicada, o gateway caía no fallback direto e a economia de conexão NUNCA
+    // acontecia (medido em produção: 0 reroteamentos). É o mesmo mecanismo que o
+    // fallback de HEVC logo acima já usa há tempos — a diferença é que agora vale
+    // para toda câmera, não só as HEVC. Best-effort: falhar aqui só significa
+    // seguir no direto, que é o comportamento de antes.
+    const ensured = await this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid').catch(() => null);
+    const gatewayDecision = ensured?.pathName
+      ? this.sourceGateway?.resolveSourceUrl({
+        cameraId: cam.id,
+        profile: 'sub',
+        consumer: 'ai',
+        directUrl: rtspUrl,
+        internalUrl: this.mediamtxProxy.buildInternalRtspUrl(ensured.pathName),
+      })
+      : undefined;
     if (gatewayDecision && gatewayDecision.url !== rtspUrl) {
       const gatewayUrlSanitized = sanitizeRtspUrl(gatewayDecision.url);
       this.logger.log(`IA roteada pelo Source Gateway para a origem interna de ${cam.name}: ${gatewayUrlSanitized}`);
