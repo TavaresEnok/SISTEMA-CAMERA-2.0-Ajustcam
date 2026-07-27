@@ -195,6 +195,11 @@ services:
       # SEM carregar/rodar o detector de objeto. A análise de stream já é só o MOG2
       # (AiSettings.mode='motion'). Reative com 'true' quando a IA de objeto estiver pronta.
       - AI_ONVIF_SEMANTIC_FILTER=${AI_ONVIF_SEMANTIC_FILTER:-false}
+      # Source Gateway: consumidores que só precisam de QUADROS (IA, grade, poster)
+      # leem da origem já republicada pelo MediaMTX em vez de abrir mais uma
+      # conexão na câmera. Gravação/pré-buffer/clipe NUNCA são reroteados (o
+      # `-c copy` do bitstream original é invariante de qualidade).
+      - CAMERA_SOURCE_GATEWAY_ENABLED=${CAMERA_SOURCE_GATEWAY_ENABLED:-true}
       - FFMPEG_RECORDING_CODEC_MODE=${FFMPEG_RECORDING_CODEC_MODE:-copy}
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
       - RECORDING_RETENTION_DAYS=${RECORDING_RETENTION_DAYS:-7}
