@@ -124,6 +124,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   private readonly preEventSeconds: number;
   private readonly preBufferProcs = new Map<string, { process: ChildProcessByStdio<null, null, Readable>; dir: string }>();
   private preBufferPruneTimer: NodeJS.Timeout | null = null;
+  /**
+   * Tentativas de remux JÁ GASTAS por arquivo .ts (chave = caminho absoluto).
+   * Não persiste entre reinícios de propósito — quem persiste é o marcador de
+   * quarentena em disco. Entradas somem no sucesso ou na quarentena, então o
+   * mapa é limitado ao punhado de segmentos falhando agora.
+   */
+  private readonly segmentRemuxFailures = new Map<string, number>();
 
   constructor(
     private readonly configService: ConfigService,
@@ -495,6 +502,14 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     });
     if (!camera || camera.recordingMode !== 'motion' || !camera.recordingEnabled) return;
 
+    // A câmera continua ARMADA: o ring de pré-evento volta a ser a cobertura.
+    // ORDEM É INVARIANTE — sobe o ring ANTES de parar a gravação. Os dois se
+    // sobrepõem por instantes (aceitável); um buraco em que nem o ring nem a
+    // gravação estão de pé, não. (Com MOTION_PRE_EVENT_SECONDS=0 isto é no-op.)
+    if (this.preEventSeconds > 0) {
+      await this.startPreBuffer(cameraId).catch(() => undefined);
+    }
+
     try {
       await this.stop(cameraId);
       await this.camerasService.registerEvent(
@@ -510,6 +525,9 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   async handleMotionDetected(cameraId: string, metadata?: Record<string, unknown>) {
+    // Instante do GATILHO, capturado antes de qualquer I/O: a janela do pré-roll
+    // é medida a partir do movimento, não de quando as consultas terminaram.
+    const triggeredAtMs = Date.now();
     const camera = await this.prisma.camera.findUnique({
       where: { id: cameraId },
       select: { id: true, name: true, recordingMode: true, recordingEnabled: true, enabled: true },
@@ -525,24 +543,27 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const postRollSeconds = this.getMotionPostRollSeconds();
     const segmentSeconds = this.getMotionSegmentSeconds();
 
-    // PRÉ-EVENTO: promove os segundos ANTERIORES ao gatilho (se habilitado). Best
-    // effort e isolado: se falhar, a gravação normal do movimento segue igual.
-    // Garante que o ring esteja de pé (auto-cura: 1º disparo pode não ter pré-roll).
-    if (this.preEventSeconds > 0) {
-      if (!this.preBufferProcs.has(cameraId)) {
-        await this.startPreBuffer(cameraId).catch(() => undefined);
-      } else {
-        await this.promotePreRoll(cameraId, Date.now()).catch(() => undefined);
-      }
-    }
-
     const runtimeStatus = await this.getStatus(cameraId).catch(() => ({ isRecording: false }));
     let startStatus = 'already_recording';
 
     if (!runtimeStatus.isRecording) {
+      // PRÉ-EVENTO: promove os segundos ANTERIORES ao gatilho (se habilitado). Best
+      // effort e isolado: se falhar, a gravação normal do movimento segue igual.
+      // Só faz sentido com o ring de pé — um ring criado AGORA não tem passado
+      // nenhum para promover, e subi-lo aqui seria só um ffmpeg extra na câmera.
+      if (this.preEventSeconds > 0 && this.preBufferProcs.has(cameraId)) {
+        await this.promotePreRoll(cameraId, triggeredAtMs).catch(() => undefined);
+      }
       try {
         const result = await this.start(cameraId, segmentSeconds);
         startStatus = result.status;
+        // UMA sessão RTSP de arquivamento por vez: o ring já cumpriu o papel (o
+        // pré-roll foi promovido) e a gravação cobre daqui para a frente. Manter
+        // os dois era um SEGUNDO ffmpeg concorrente na mesma câmera — as baratas
+        // travam em 2-4 sessões RTSP no total, e ainda faltam live e IA.
+        // ORDEM É INVARIANTE: derruba o ring SÓ DEPOIS de a gravação estar de pé;
+        // o inverso abriria uma janela sem NENHUMA cobertura.
+        await this.stopPreBuffer(cameraId).catch(() => undefined);
         await this.camerasService.registerEvent(
           cameraId,
           'MOTION_RECORDING_STARTED',
@@ -551,6 +572,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
           { postRollSeconds, segmentSeconds, trigger: metadata ?? {} },
         );
       } catch (error) {
+        // A gravação NÃO subiu: o ring é a única cobertura possível. Garante que
+        // ele esteja de pé (auto-cura, idempotente) e JAMAIS o derruba aqui.
+        if (this.preEventSeconds > 0) {
+          await this.startPreBuffer(cameraId).catch(() => undefined);
+        }
         await this.camerasService.registerEvent(
           cameraId,
           'MOTION_RECORDING_FAILED',
@@ -925,6 +951,59 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
   }
 
+  /** Duração que o segmento DEVERIA ter (a que o FFmpeg foi mandado produzir). */
+  private getExpectedSegmentSeconds(segmentSeconds?: number | null) {
+    const requested = Number(segmentSeconds);
+    if (Number.isFinite(requested) && requested > 0) return requested;
+    const configured = Number(this.configService.get<number>('recordingSegmentSeconds') ?? 300);
+    return Number.isFinite(configured) && configured > 0 ? configured : 300;
+  }
+
+  /**
+   * TETO de duração de UM segmento.
+   *
+   * Referência: Frigate (MIT) — Copyright (c) Frigate, Inc. — `MAX_SEGMENT_DURATION
+   * = 600` em frigate/const.py; lá, duração fora de (0, 600) DESCARTA o segmento.
+   * Aqui o teto existe, mas o desfecho é outro (ver o clamp em registerSegment).
+   *
+   * Nunca desce abaixo de 2× o segmento esperado: o FFmpeg fecha o segmento no
+   * próximo keyframe, então passar um pouco do alvo é NORMAL e não pode ser
+   * tratado como defeito (instalações com segmento longo ficariam clampadas
+   * indevidamente por um teto fixo).
+   */
+  private getMaxSegmentDurationSeconds(segmentSeconds?: number | null) {
+    const configured = Number(process.env.RECORDING_MAX_SEGMENT_DURATION_SECONDS ?? 600);
+    const base = Number.isFinite(configured) && configured > 0 ? configured : 600;
+    return Math.max(base, this.getExpectedSegmentSeconds(segmentSeconds) * 2);
+  }
+
+  /**
+   * Marcador de auditoria do clamp de duração (seam de I/O). Best-effort: falhar
+   * aqui NUNCA impede o registro do segmento.
+   *
+   * Nome próprio, `.duration-clamped.json`, e NÃO `.invalid.json`: este arquivo é
+   * BOM (só o timestamp mentiu), enquanto `.invalid.json` é lido por outras áreas
+   * como "não dá para usar" (pula miniatura, morre junto na retenção).
+   */
+  private async markSegmentDurationClamped(
+    cameraId: string,
+    filePath: string,
+    probedDurationSeconds: number,
+    appliedDurationSeconds: number,
+  ) {
+    await writeFile(
+      `${filePath}.duration-clamped.json`,
+      JSON.stringify(
+        { cameraId, filePath, probedDurationSeconds, appliedDurationSeconds, clampedAt: new Date().toISOString() },
+        null,
+        2,
+      ) + '\n',
+      { mode: 0o600 },
+    ).catch((error) => {
+      this.logger.warn(`Falha ao gravar marcador de duração clampada ${basename(filePath)}: ${sanitizeSensitiveText(error)}`);
+    });
+  }
+
   private async registerSegment(cameraId: string, filePath: string, segmentSeconds: number) {
     const fileName = basename(filePath);
     const match = fileName.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\./);
@@ -949,7 +1028,29 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     if (!metadata.hasVideoStream) {
       throw new Error('segmento_mp4_sem_stream_de_video');
     }
-    const durationSecondsExact = metadata.durationSecondsExact;
+    // TETO DE DURAÇÃO. Um salto de PTS (câmera que reinicia o relógio, RTSP com
+    // timestamp maluco) faz o ffprobe reportar HORAS para um segmento de minutos.
+    // Registrar isso vira #EXTINF mentiroso na playlist VOD: todos os segmentos
+    // seguintes passam a "sobrepor" este e o playback TRAVA em cima de gravação
+    // boa.
+    //
+    // CLAMPAMOS em vez de DESCARTAR (o Frigate descarta): o VÍDEO provavelmente
+    // está íntegro — quem mentiu foi o timestamp. Descartar destruiria gravação
+    // boa por causa de um metadado, exatamente o pior desfecho num VMS com valor
+    // probatório. O clamp usa a duração ESPERADA do segmento, fica no log e deixa
+    // marcador ao lado do arquivo para auditoria.
+    let durationSecondsExact = metadata.durationSecondsExact;
+    const maxSegmentDurationSeconds = this.getMaxSegmentDurationSeconds(segmentSeconds);
+    if (durationSecondsExact > maxSegmentDurationSeconds) {
+      const expectedSeconds = this.getExpectedSegmentSeconds(segmentSeconds);
+      this.logger.warn(
+        `Duração absurda no segmento camera=${cameraId} arquivo=${basename(filePath)}: `
+        + `${durationSecondsExact.toFixed(2)}s > teto ${maxSegmentDurationSeconds}s (salto de PTS). `
+        + `CLAMPADA para ${expectedSeconds}s — o vídeo é preservado, só o timestamp era inválido.`,
+      );
+      await this.markSegmentDurationClamped(cameraId, filePath, durationSecondsExact, expectedSeconds);
+      durationSecondsExact = expectedSeconds;
+    }
     const durationSeconds = Math.max(1, Math.round(durationSecondsExact));
     const endedAt = new Date(startedAt.getTime() + durationSecondsExact * 1000);
     const sizeBytes = BigInt(metadata.sizeBytes);
@@ -1082,6 +1183,82 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
   }
 
+  // ── QUARENTENA DE SEGMENTO (.ts que se recusa a virar MP4) ───────────────────
+  // Antes: o .ts que falhava no remux ficava FORA de `knownFiles` "para nova
+  // tentativa" — sem contador e sem teto. A varredura roda a cada 5s enquanto a
+  // câmera grava e `recoverOrphanedSegments` PULA câmera ativa (o caso normal
+  // 24/7), então ninguém nunca resolvia: um único arquivo envenenado gerava
+  // ffmpeg/ffprobe nascendo em LOOP para sempre, queimando CPU e inundando o log.
+  //
+  // Agora: teto de tentativas por arquivo e, estourado o teto, QUARENTENA —
+  // marcador `<arquivo>.invalid.json` ao lado (mesma convenção já usada pelo
+  // processador de miniaturas e pela retenção) e o arquivo sai do rodízio.
+  //
+  // DIVERGÊNCIA DELIBERADA DO FRIGATE: lá o segmento problemático é APAGADO
+  // (`drop_segment`, frigate/record/maintainer.py). Aqui NÃO se apaga. O DRAC é
+  // VMS com valor PROBATÓRIO: um .ts que o NOSSO remux não abre ainda pode ser
+  // recuperável por perícia com outra ferramenta, e um falso positivo que destrói
+  // gravação boa é pior que o problema original. Quarentena = para de custar CPU,
+  // continua no disco, com o motivo registrado ao lado.
+
+  private getSegmentRemuxMaxAttempts(): number {
+    const configured = Number(process.env.RECORDING_SEGMENT_REMUX_MAX_ATTEMPTS ?? 3);
+    return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 3;
+  }
+
+  private segmentQuarantineMarkerPath(filePath: string) {
+    return `${filePath}.invalid.json`;
+  }
+
+  /** Seam de I/O: há marcador de quarentena ao lado deste arquivo? Nunca lança. */
+  private isSegmentQuarantined(filePath: string): boolean {
+    try {
+      return existsSync(this.segmentQuarantineMarkerPath(filePath));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Contabiliza UMA falha de remux/registro do .ts.
+   * Devolve `true` quando o teto estourou e o arquivo foi posto em QUARENTENA
+   * (a partir daí ele não deve mais ser retentado).
+   */
+  private async registerSegmentRemuxFailure(cameraId: string, filePath: string, error: unknown): Promise<boolean> {
+    const attempts = (this.segmentRemuxFailures.get(filePath) ?? 0) + 1;
+    const maxAttempts = this.getSegmentRemuxMaxAttempts();
+    // sanitizeSensitiveText NÃO é decoração aqui: o texto vem do stderr do FFmpeg,
+    // que carrega a URL RTSP INTEIRA (com senha da câmera), e este motivo vai para
+    // o DISCO dentro do marcador.
+    const reason = sanitizeSensitiveText(error).slice(0, 2_000) || 'remux_ts_falhou';
+
+    if (attempts < maxAttempts) {
+      this.segmentRemuxFailures.set(filePath, attempts);
+      this.logger.warn(
+        `Falha ao remuxar segmento (tentativa ${attempts}/${maxAttempts}) camera=${cameraId} arquivo=${basename(filePath)}: ${reason}`,
+      );
+      return false;
+    }
+
+    this.segmentRemuxFailures.delete(filePath);
+    try {
+      await writeFile(
+        this.segmentQuarantineMarkerPath(filePath),
+        JSON.stringify({ cameraId, filePath, attempts, reason, quarantinedAt: new Date().toISOString() }, null, 2) + '\n',
+        { mode: 0o600 },
+      );
+    } catch (writeError) {
+      // Sem marcador a quarentena não sobrevive a um reinício, mas o contador em
+      // memória já cortou o loop nesta execução: avisa e segue.
+      this.logger.warn(`Falha ao gravar marcador de quarentena ${basename(filePath)}: ${sanitizeSensitiveText(writeError)}`);
+    }
+    this.logger.error(
+      `Segmento em QUARENTENA após ${attempts} tentativa(s) camera=${cameraId} arquivo=${basename(filePath)}: ${reason}. `
+      + 'O arquivo NÃO foi apagado (VMS probatório) e não será mais retentado.',
+    );
+    return true;
+  }
+
   private async recoverOrphanedSegments() {
     if (!this.checkFfmpegAvailable()) return;
     const graceSeconds = Math.max(60, Number(process.env.RECORDING_ORPHAN_RECOVERY_GRACE_SECONDS ?? 300));
@@ -1125,6 +1302,14 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       if (this.active.has(candidate.cameraId)) continue;
 
       if (candidate.kind === 'ts') {
+        // Em QUARENTENA: o teto de tentativas já foi gasto neste arquivo. Não
+        // remuxa de novo (era por aqui que o loop de ffmpeg renascia depois que a
+        // câmera parava de gravar) e NÃO apaga — nem pelo prazo de inválidos.
+        // O marcador `<...>.ts.invalid.json` é NOSSO; o `<...>.mp4.invalid.json`
+        // do processador de miniaturas tem outro significado e por isso o MP4
+        // órfão segue com o tratamento de sempre.
+        if (this.isSegmentQuarantined(candidate.filePath)) continue;
+
         const mp4Twin = candidate.filePath.replace(/\.ts$/i, '.mp4');
         if (registeredPaths.has(mp4Twin)) {
           await unlink(candidate.filePath).catch(() => undefined);
@@ -1188,12 +1373,24 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const candidates = finalize ? files : files.slice(0, -1);
     for (const fullPath of candidates) {
       if (knownFiles.has(fullPath)) continue;
+      // Quarentena persistida em disco: sobrevive ao reinício do processo (o
+      // contador em memória, não) e impede o loop de ffmpeg de renascer.
+      if (this.isSegmentQuarantined(fullPath)) {
+        knownFiles.add(fullPath);
+        continue;
+      }
       if (statSync(fullPath).size <= 0) continue;
       try {
         await this.remuxAndRegisterTsSegment(cameraId, fullPath, segmentSeconds);
         knownFiles.add(fullPath);
-      } catch {
-        // Mantém fora de knownFiles para uma nova tentativa na próxima varredura.
+        this.segmentRemuxFailures.delete(fullPath);
+      } catch (error) {
+        // Continua fora de knownFiles para uma nova tentativa na próxima
+        // varredura — MAS agora com teto: estourado, vai para quarentena e para
+        // de custar CPU (o arquivo permanece no disco).
+        if (await this.registerSegmentRemuxFailure(cameraId, fullPath, error)) {
+          knownFiles.add(fullPath);
+        }
       }
     }
   }
