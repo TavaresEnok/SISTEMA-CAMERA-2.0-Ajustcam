@@ -38,6 +38,21 @@ import { useVmsDataStore } from '../store/vmsDataStore';
 import { localDayRange } from '../lib/web-operational';
 import { minuteOfDay, hmsToMinute } from '../lib/timeline-time';
 import { recordingOffsetSeconds, spriteTileStyle, type TimelinePreviewMeta } from '../lib/timeline-preview';
+import {
+  absoluteToVodPosition,
+  isPlaybackTokenUsable,
+  locateVodSegment,
+  normalizeVodPlaylist,
+  refreshSegmentUrl,
+  resolveInitialSeekSeconds,
+  segmentTokens,
+  shouldAbortStalledSwap,
+  shouldPrefetchNextSegment,
+  shouldRenewPlaylist,
+  vodPositionToAbsoluteMs,
+  type VodPlaylist,
+  type VodPlaylistSegment,
+} from '../lib/vod-continuous';
 
 type TimelineSegment = {
   recordingId?: string;
@@ -141,6 +156,13 @@ type PaginatedResponse<T> = {
   total: number;
 };
 
+// Modo VOD contínuo: DOIS elementos <video> ("slots"). Um toca; o outro
+// pré-carrega o próximo segmento em silêncio. Na virada trocamos qual deles está
+// visível — sem recarregar nada, que é o que elimina a engasgada. Fora do modo
+// contínuo nada disso existe: o player segue com um <video> só, como sempre.
+type VodSlot = 'a' | 'b';
+type VodSlotSource = { recordingId: string; url: string } | null;
+
 const API_URL = getApiBaseUrl();
 const SPEEDS = ['0.25x', '0.5x', '1x', '2x', '4x', '8x'];
 // Mesmo limite do backend (tamanho do token JWT na URL do download).
@@ -170,6 +192,8 @@ const TOTAL_MINS = 24 * 60;
 const API_TIMEOUT_MS = 20000;
 const PLAYBACK_TIMEOUT_DIRECT_MS = 8000;
 const PLAYBACK_TIMEOUT_COMPAT_MS = 150000; // 150s: FFmpeg HEVC→H264 pode levar até 120s na primeira execução
+// Teto da espera pela playlist VOD antes de o playback seguir pelo caminho antigo.
+const VOD_PROBE_GRACE_MS = 2500;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -355,6 +379,95 @@ export default function PlaybackPage() {
   const [clipDownload, setClipDownload] = useState<{ url: string; clipId: string } | null>(null);
   const [clipDownloadReason, setClipDownloadReason] = useState('');
   const lastThumbnailRetryRef = useRef(0);
+
+  // ── VOD CONTÍNUO (ADITIVO) ────────────────────────────────────────────────
+  // UMA playlist por câmera+dia (GET /recordings/vod.m3u8?format=json) descreve o
+  // dia inteiro: ordem dos segmentos, duração real, offset acumulado e um token
+  // de playback por segmento. Com ela o front (a) monta a URL do próximo arquivo
+  // SEM ir ao servidor pedir token e (b) pré-carrega esse arquivo no segundo
+  // <video> para trocar na virada sem recarregar — o que mata a "engasgada".
+  //
+  // Sem playlist utilizável (404, erro, formato inesperado) ou depois de
+  // QUALQUER falha do modo contínuo, `vodActive` fica falso e o playback volta a
+  // ser exatamente o de sempre: arquivo por arquivo, token por token.
+  const [vodReady, setVodReady] = useState(false);
+  const [vodFallback, setVodFallback] = useState(false);
+  // Enquanto a playlist do dia está sendo buscada, o caminho antigo ESPERA (no
+  // máximo VOD_PROBE_GRACE_MS). Sem essa espera os dois carregariam o mesmo
+  // segmento e o operador veria o vídeo recomeçar do zero quando a playlist
+  // chegasse — pior que não ter modo contínuo nenhum.
+  const [vodProbing, setVodProbing] = useState(false);
+  const vodPlaylistRef = useRef<VodPlaylist | null>(null);
+  const vodTokensRef = useRef<Record<string, string>>({});
+  const vodRenewRef = useRef<{ inFlight: boolean; failures: number; lastAttemptAtMs: number | null }>({
+    inFlight: false,
+    failures: 0,
+    lastAttemptAtMs: null,
+  });
+  const vodInitialSeekRef = useRef(false);
+  const [vodSlots, setVodSlots] = useState<{ a: VodSlotSource; b: VodSlotSource }>({ a: null, b: null });
+  const [activeSlot, setActiveSlot] = useState<VodSlot>('a');
+  const activeSlotRef = useRef<VodSlot>('a');
+  const slotRefs = useRef<Record<VodSlot, HTMLVideoElement | null>>({ a: null, b: null });
+  // Vigia da troca: se o elemento novo não render progresso a tempo, desistimos
+  // do modo contínuo em vez de deixar o operador com a tela parada.
+  const swapStartedAtRef = useRef<number | null>(null);
+  const lastProgressAtRef = useRef<number | null>(null);
+  const vodActive = vodReady && !vodFallback;
+  const idleSlot: VodSlot = activeSlot === 'a' ? 'b' : 'a';
+  const activeVodSource = vodActive ? vodSlots[activeSlot] : null;
+  // Fonte que o elemento visível está tocando, venha ela do modo contínuo ou do
+  // caminho antigo. Fora do modo contínuo é literalmente `playbackUrl`.
+  const activeSourceUrl = activeVodSource?.url ?? playbackUrl;
+  // "Há vídeo carregado no player?" — vale para os dois modos.
+  const playerActive = Boolean(activeSourceUrl);
+
+  // URL do segmento com o token MAIS FRESCO que temos (a renovação periódica
+  // atualiza o mapa). `forceDirect` repete a regra do caminho antigo: navegador
+  // que decodifica HEVC pede o arquivo original em vez da versão transcodada.
+  const vodSegmentUrl = useCallback((segment: VodPlaylistSegment) => {
+    const path = refreshSegmentUrl(segment.playUrl, vodTokensRef.current);
+    const suffix = BROWSER_PLAYS_HEVC ? `${path.includes('?') ? '&' : '?'}forceDirect=1` : '';
+    return `${API_URL}${path}${suffix}`;
+  }, []);
+
+  const vodSegmentToken = useCallback((segment: VodPlaylistSegment) => (
+    vodTokensRef.current[segment.recordingId] ?? segment.token
+  ), []);
+
+  // `videoRef` continua apontando para o elemento QUE ESTÁ TOCANDO — todo o resto
+  // da página (controles, clipes, seek) fala com ele e não precisa saber que
+  // existem dois. Ao desmontar, só zera se o ponteiro era mesmo aquele elemento.
+  const bindSlotA = useCallback((element: HTMLVideoElement | null) => {
+    if (element) {
+      slotRefs.current.a = element;
+      if (activeSlotRef.current === 'a') videoRef.current = element;
+      return;
+    }
+    if (videoRef.current === slotRefs.current.a) videoRef.current = null;
+    slotRefs.current.a = null;
+  }, []);
+
+  const bindSlotB = useCallback((element: HTMLVideoElement | null) => {
+    if (element) {
+      slotRefs.current.b = element;
+      if (activeSlotRef.current === 'b') videoRef.current = element;
+      return;
+    }
+    if (videoRef.current === slotRefs.current.b) videoRef.current = null;
+    slotRefs.current.b = null;
+  }, []);
+
+  const legacyVideoElRef = useRef<HTMLVideoElement | null>(null);
+  const bindLegacyVideo = useCallback((element: HTMLVideoElement | null) => {
+    if (element) {
+      legacyVideoElRef.current = element;
+      videoRef.current = element;
+      return;
+    }
+    if (videoRef.current === legacyVideoElRef.current) videoRef.current = null;
+    legacyVideoElRef.current = null;
+  }, []);
 
   const requestedContext = useMemo(() => {
     if (typeof window === 'undefined') return null;
@@ -625,6 +738,99 @@ export default function PlaybackPage() {
     };
   }, [accessToken, client, selectedCamId, selectedDate]);
 
+  // Busca a playlist do dia. Falhar aqui é NORMAL e SILENCIOSO (404 = dia sem
+  // gravação reproduzível, erro de rede, endpoint antigo): o playback segue no
+  // caminho de sempre, sem aviso nem tela de erro.
+  const fetchVodPlaylist = useCallback(async () => {
+    const range = localDayRange(selectedDate);
+    const { data } = await client.get('/recordings/vod.m3u8', {
+      params: { cameraId: selectedCamId, from: range.from, to: range.to, format: 'json' },
+      timeout: API_TIMEOUT_MS,
+    });
+    return normalizeVodPlaylist(data, Date.now());
+  }, [client, selectedCamId, selectedDate]);
+
+  useEffect(() => {
+    vodPlaylistRef.current = null;
+    vodTokensRef.current = {};
+    vodRenewRef.current = { inFlight: false, failures: 0, lastAttemptAtMs: null };
+    vodInitialSeekRef.current = false;
+    swapStartedAtRef.current = null;
+    setVodSlots({ a: null, b: null });
+    setVodReady(false);
+    setVodFallback(false);
+    if (!accessToken || !selectedCamId || !selectedDate) {
+      setVodProbing(false);
+      return;
+    }
+    let cancelled = false;
+    setVodProbing(true);
+    const stopProbing = () => {
+      if (!cancelled) setVodProbing(false);
+    };
+    // Teto da espera: playlist lenta NUNCA pode atrasar o playback além disto.
+    const graceTimer = window.setTimeout(stopProbing, VOD_PROBE_GRACE_MS);
+    void fetchVodPlaylist()
+      .then((playlist) => {
+        if (cancelled || !playlist) return;
+        vodPlaylistRef.current = playlist;
+        vodTokensRef.current = segmentTokens(playlist);
+        setVodReady(true);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        window.clearTimeout(graceTimer);
+        stopProbing();
+      });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(graceTimer);
+    };
+  }, [accessToken, fetchVodPlaylist, selectedCamId, selectedDate]);
+
+  // Renovação: os tokens da playlist duram minutos e o dia dura horas. Rebuscar a
+  // MESMA playlist (endpoint idempotente) só troca o mapa de tokens em memória —
+  // a reprodução em curso não é tocada, porque a URL do elemento ativo não muda:
+  // o token novo só é usado no PRÓXIMO segmento carregado.
+  useEffect(() => {
+    if (!vodActive) return;
+    const tick = () => {
+      const playlist = vodPlaylistRef.current;
+      if (!playlist) return;
+      const video = videoRef.current;
+      const state = {
+        fetchedAtMs: playlist.fetchedAtMs,
+        tokenExpiresAtMs: playlist.tokenExpiresAtMs,
+        inFlight: vodRenewRef.current.inFlight,
+        consecutiveFailures: vodRenewRef.current.failures,
+        lastAttemptAtMs: vodRenewRef.current.lastAttemptAtMs,
+        documentVisible: typeof document === 'undefined' || document.visibilityState === 'visible',
+        playing: Boolean(video && !video.paused && !video.ended),
+      };
+      if (!shouldRenewPlaylist(state, Date.now())) return;
+      vodRenewRef.current.inFlight = true;
+      vodRenewRef.current.lastAttemptAtMs = Date.now();
+      void fetchVodPlaylist()
+        .then((next) => {
+          if (!next) {
+            vodRenewRef.current.failures += 1;
+            return;
+          }
+          vodRenewRef.current.failures = 0;
+          vodPlaylistRef.current = next;
+          vodTokensRef.current = segmentTokens(next);
+        })
+        .catch(() => {
+          vodRenewRef.current.failures += 1;
+        })
+        .finally(() => {
+          vodRenewRef.current.inFlight = false;
+        });
+    };
+    const timer = window.setInterval(tick, 15_000);
+    return () => window.clearInterval(timer);
+  }, [fetchVodPlaylist, vodActive]);
+
   useEffect(() => {
     if (!compareEnabled || !accessToken || !selectedDate || !cameras.length) {
       setCompareRecordingsByCamera({});
@@ -697,6 +903,20 @@ export default function PlaybackPage() {
     // fim do trecho, remontando o player e derrubando a reprodução no meio do vídeo.
     if (lastVideoPlayheadRef.current === playhead) return;
     const minuteTarget = playhead;
+    // Modo contínuo: quem responde "que arquivo toca neste instante e a partir de
+    // que segundo" é a PLAYLIST — ela traz a duração real de cada segmento (e o
+    // recorte por buraco), em vez do palpite por minuto-do-dia. Instante dentro de
+    // um buraco cai no começo do próximo segmento, que é o que o operador espera.
+    const vodPlaylist = vodActive ? vodPlaylistRef.current : null;
+    if (vodPlaylist) {
+      const position = absoluteToVodPosition(vodPlaylist, addMinutes(dayStart, minuteTarget));
+      if (position?.segment) {
+        const target = position.segment;
+        setSelectedRecordingId((current) => (current === target.recordingId ? current : target.recordingId));
+        setPendingSeekSeconds(position.offsetInSegmentSeconds);
+        return;
+      }
+    }
     const containing = playableRecordings.find((recording) => {
       const start = minuteOfDay(recording.startedAt);
       const end = minuteOfDay(recording.endedAt ?? recording.startedAt);
@@ -706,7 +926,7 @@ export default function PlaybackPage() {
     setSelectedRecordingId((current) => (current === next.id ? current : next.id));
     const offsetMinutes = Math.max(0, minuteTarget - minuteOfDay(next.startedAt));
     setPendingSeekSeconds(offsetMinutes * 60);
-  }, [recordings, playhead]);
+  }, [dayStart, recordings, playhead, vodActive]);
 
   const selectedRecording = useMemo(() => recordings.find((recording) => recording.id === selectedRecordingId) ?? null, [recordings, selectedRecordingId]);
   const selectedThumbnailUrl = selectedRecordingId ? thumbnailUrls[selectedRecordingId] ?? null : null;
@@ -719,6 +939,20 @@ export default function PlaybackPage() {
   useEffect(() => {
     if (!selectedRecordingId || !accessToken) {
       setPlaybackUrl(null);
+      return;
+    }
+    // Modo contínuo: a fonte do <video> vem dos slots (efeito logo abaixo), com o
+    // token que já veio na playlist — sem POST /play-token a cada segmento, que é
+    // uma das idas ao servidor que faziam a virada engasgar.
+    if (vodActive && vodPlaylistRef.current?.segments.some((segment) => segment.recordingId === selectedRecordingId)) {
+      setPlaybackUrl(null);
+      setLoadingPlayback(false);
+      return;
+    }
+    // Playlist do dia ainda em voo: espera (com teto) em vez de carregar o mesmo
+    // segmento duas vezes e fazer o vídeo recomeçar quando ela chegar.
+    if (vodProbing) {
+      setLoadingPlayback(true);
       return;
     }
     if (!selectedRecording?.fileExists) {
@@ -761,13 +995,141 @@ export default function PlaybackPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRecordingId, accessToken, compatMode, selectedRecording?.fileExists, selectedRecording?.fileUsable, reloadNonce]);
+  }, [selectedRecordingId, accessToken, compatMode, selectedRecording?.fileExists, selectedRecording?.fileUsable, reloadNonce, vodActive, vodProbing]);
+
+  // Coração do modo contínuo: decide QUAL elemento toca o segmento selecionado.
+  // Se o segmento já está PRÉ-CARREGADO no elemento ocioso, apenas TROCAMOS de
+  // slot — nenhum <video> recarrega, não há tela preta nem novo handshake. Se não
+  // está, carregamos no elemento ativo, que é o comportamento de hoje (menos o
+  // pedido de token). Token por vencer → devolve ao caminho antigo antes de
+  // arriscar um 401 no meio da reprodução.
+  useEffect(() => {
+    if (!vodActive || !selectedRecordingId) return;
+    const playlist = vodPlaylistRef.current;
+    const index = playlist?.segments.findIndex((item) => item.recordingId === selectedRecordingId) ?? -1;
+    // Gravação fora da playlist (ex.: nasceu depois dela): o modo contínuo não
+    // sabe tocar isso. Devolve TUDO ao caminho antigo — deixar como estava faria
+    // o player continuar exibindo o segmento anterior.
+    if (!playlist || index < 0) {
+      setVodFallback(true);
+      return;
+    }
+    const segment = playlist.segments[index];
+    if (vodSlots[activeSlot]?.recordingId === selectedRecordingId) return;
+    if (!isPlaybackTokenUsable(vodSegmentToken(segment), Date.now())) {
+      setVodFallback(true);
+      return;
+    }
+
+    const idleElement = slotRefs.current[idleSlot];
+    const idleHoldsSegment = vodSlots[idleSlot]?.recordingId === selectedRecordingId;
+    // readyState >= 3 (HAVE_FUTURE_DATA): dá para começar a tocar agora.
+    if (idleHoldsSegment && idleElement && idleElement.readyState >= 3) {
+      const outgoing = videoRef.current;
+      const rate = Number(speed.replace('x', ''));
+      idleElement.playbackRate = Number.isFinite(rate) ? rate : 1;
+      idleElement.volume = videoVolume;
+      idleElement.muted = videoMuted;
+      if (pendingSeekSeconds != null) {
+        idleElement.currentTime = pendingSeekSeconds;
+        setPendingSeekSeconds(null);
+      } else if (idleElement.currentTime > 0.5) {
+        idleElement.currentTime = 0;
+      }
+      if (outgoing && outgoing !== idleElement) outgoing.pause();
+      activeSlotRef.current = idleSlot;
+      videoRef.current = idleElement;
+      setActiveSlot(idleSlot);
+      setVideoDuration(Number.isFinite(idleElement.duration) ? idleElement.duration : 0);
+      setVideoCurrentTime(idleElement.currentTime);
+      // O elemento já provou que carrega: nada de cronômetro de "demorou demais".
+      playbackReadyRef.current = true;
+      setVideoError(null);
+      setLoadingPlayback(false);
+      const shouldResume = autoResumeRef.current || Boolean(outgoing && !outgoing.paused);
+      autoResumeRef.current = false;
+      if (shouldResume) {
+        swapStartedAtRef.current = Date.now();
+        lastProgressAtRef.current = null;
+        void idleElement.play().catch(() => {});
+      }
+      return;
+    }
+
+    // Sem pré-carga aproveitável: carrega no elemento ativo (o que o playback já
+    // fazia hoje). O <video> nasce parado, então zera o estado da barra como o
+    // reset que existe para o caminho antigo.
+    setVideoError(null);
+    setLoadingPlayback(false);
+    setPlaying(false);
+    setBuffering(false);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    setVodSlots((current) => ({ ...current, [activeSlot]: { recordingId: segment.recordingId, url: vodSegmentUrl(segment) } }));
+  }, [
+    activeSlot,
+    idleSlot,
+    pendingSeekSeconds,
+    selectedRecordingId,
+    speed,
+    videoMuted,
+    videoVolume,
+    vodActive,
+    vodSegmentToken,
+    vodSegmentUrl,
+    vodSlots,
+  ]);
+
+  // Vigia da troca: elemento novo que não anda em alguns segundos é pior que o
+  // comportamento antigo — abandona o modo contínuo e recarrega como sempre.
+  useEffect(() => {
+    if (!vodActive) return;
+    const timer = window.setInterval(() => {
+      if (!shouldAbortStalledSwap({
+        swapStartedAtMs: swapStartedAtRef.current,
+        lastProgressAtMs: lastProgressAtRef.current,
+        timeoutMs: 4000,
+      }, Date.now())) return;
+      swapStartedAtRef.current = null;
+      lastVideoPlayheadRef.current = null;
+      autoResumeRef.current = true;
+      setVodFallback(true);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [vodActive]);
+
+  // Link ?at= (fila de Revisão, alarme): a playlist sabe exatamente em que
+  // arquivo e em que segundo aquele instante caiu — inclusive quando ele cai num
+  // buraco. Aplica UMA vez por câmera+dia; sem ?at= o padrão de hoje (última
+  // gravação do dia) continua valendo.
+  useEffect(() => {
+    if (!vodActive || vodInitialSeekRef.current) return;
+    const playlist = vodPlaylistRef.current;
+    if (!playlist || !requestedAt) return;
+    const position = absoluteToVodPosition(playlist, requestedAt);
+    if (!position?.segment || position.placement === 'before' || position.placement === 'after') return;
+    vodInitialSeekRef.current = true;
+    const seekSeconds = resolveInitialSeekSeconds({ playlist, at: requestedAt });
+    const located = locateVodSegment(playlist, seekSeconds);
+    if (!located) return;
+    lastVideoPlayheadRef.current = null;
+    setSelectedRecordingId((current) => (current === located.segment.recordingId ? current : located.segment.recordingId));
+    setPendingSeekSeconds(located.offsetInSegmentSeconds);
+    setPlayhead(clamp(minuteOfDay(new Date(located.segment.startedAtMs + located.offsetInSegmentSeconds * 1000)), 0, TOTAL_MINS));
+  }, [requestedAt, vodActive]);
 
   useEffect(() => {
     setCompatMode(false);
     setReloadNonce(0);
     autoSkipTriedRef.current.clear();
   }, [selectedRecordingId]);
+
+  // Modo compatível (servidor transcodifica HEVC→H.264 sob demanda) é assunto do
+  // caminho antigo: quando ele entra, o modo contínuo sai — senão o botão
+  // "Preparar versão compatível" não teria efeito nenhum na tela.
+  useEffect(() => {
+    if (compatMode) setVodFallback(true);
+  }, [compatMode]);
 
   // O <video> remonta a cada URL (key). O elemento novo nasce PAUSADO — sem este
   // reset, o botão play/pause ficava mostrando o estado da gravação anterior
@@ -780,10 +1142,26 @@ export default function PlaybackPage() {
   }, [playbackUrl]);
 
   useEffect(() => {
-    if (!playbackUrl) return;
+    if (!activeSourceUrl) return;
+    // Troca para um elemento JÁ pré-carregado não tem o que cronometrar: ele
+    // provou que carrega. (Só no modo contínuo — o caminho antigo remonta o
+    // <video> a cada URL e continua exatamente como era.)
+    const preloadedVideo = videoRef.current;
+    if (vodActive && preloadedVideo && preloadedVideo.readyState >= 3) {
+      playbackReadyRef.current = true;
+      return;
+    }
     playbackReadyRef.current = false;
     const timeout = window.setTimeout(() => {
       if (playbackReadyRef.current) return;
+      // No modo contínuo, demora demais = devolve o segmento ao caminho antigo,
+      // que sabe negociar a versão compatível.
+      if (vodActive) {
+        lastVideoPlayheadRef.current = null;
+        autoResumeRef.current = true;
+        setVodFallback(true);
+        return;
+      }
       if (!playbackMayUseCompatible) {
         setVideoError('A reprodução direta demorou além do esperado. Preparando versão compatível...');
         setCompatMode(true);
@@ -793,14 +1171,14 @@ export default function PlaybackPage() {
     }, playbackMayUseCompatible ? PLAYBACK_TIMEOUT_COMPAT_MS : PLAYBACK_TIMEOUT_DIRECT_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [playbackUrl, playbackMayUseCompatible]);
+  }, [activeSourceUrl, playbackMayUseCompatible, vodActive]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const rate = Number(speed.replace('x', ''));
     video.playbackRate = Number.isFinite(rate) ? rate : 1;
-  }, [speed, playbackUrl]);
+  }, [speed, activeSourceUrl]);
 
   const syncVideoToPlayhead = useCallback(() => {
     if (!videoRef.current || pendingSeekSeconds == null) return;
@@ -817,7 +1195,12 @@ export default function PlaybackPage() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || pendingSeekSeconds == null) return;
-    if (!playbackUrl || !selectedRecordingId || !playbackUrl.includes(selectedRecordingId)) return;
+    // Mesma guarda nos dois modos: só busca no vídeo que JÁ é o da gravação
+    // selecionada (no modo contínuo quem diz isso é o slot ativo).
+    const sourceMatchesSelection = vodActive
+      ? activeVodSource?.recordingId === selectedRecordingId
+      : Boolean(playbackUrl && selectedRecordingId && playbackUrl.includes(selectedRecordingId));
+    if (!sourceMatchesSelection) return;
     if (video.readyState < 1) return; // vídeo novo: onLoadedMetadata aplica via syncVideoToPlayhead
     video.currentTime = pendingSeekSeconds;
     setPendingSeekSeconds(null);
@@ -825,7 +1208,7 @@ export default function PlaybackPage() {
       autoResumeRef.current = false;
       void video.play().catch(() => {});
     }
-  }, [pendingSeekSeconds, playbackUrl, selectedRecordingId]);
+  }, [activeVodSource?.recordingId, pendingSeekSeconds, playbackUrl, selectedRecordingId, vodActive]);
 
   const currentTime = addMinutes(dayStart, playhead);
   // A janela visível da timeline é independente do playhead: centrada em viewCenter,
@@ -1360,6 +1743,191 @@ export default function PlaybackPage() {
     }
   }, [accessToken, clipDownload, clipDownloadReason]);
 
+  // O elemento ocioso (pré-carga) dispara os MESMOS eventos do que está tocando —
+  // ended, error, timeupdate. Sem esta guarda, o vídeo escondido comandaria o
+  // player: trocaria de segmento sozinho e jogaria a página no modo compatível.
+  const isActiveVideoElement = (element: HTMLVideoElement) => element === videoRef.current;
+
+  const renderPlayerVideo = (options: {
+    elementKey: string;
+    bindRef: (element: HTMLVideoElement | null) => void;
+    src: string | null;
+    slot: VodSlot | null;
+  }) => {
+    const isActive = options.slot === null || options.slot === activeSlot;
+    return (
+      <video
+        key={options.elementKey}
+        ref={options.bindRef}
+        src={options.src ?? undefined}
+        poster={isActive ? selectedThumbnailUrl ?? undefined : undefined}
+        crossOrigin="use-credentials"
+        // O slot ocioso existe para AQUECER o próximo arquivo: preload='auto'.
+        preload={isActive ? 'metadata' : 'auto'}
+        // O slot ocioso fica FORA DA VISTA, mas RENDERIZADO: `display:none` pode
+        // fazer o navegador tratar a mídia como descartável e adiar a pré-carga.
+        className={isActive ? 'h-full w-full bg-black object-contain' : 'pointer-events-none absolute left-0 top-0 h-px w-px opacity-0'}
+        style={isActive ? { transform: `translate(${videoPan.x}px, ${videoPan.y}px) scale(${videoZoom})`, transformOrigin: 'center center' } : undefined}
+        onClick={togglePlay}
+        onLoadedMetadata={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          playbackReadyRef.current = true;
+          const video = videoRef.current;
+          if (video) {
+            setVideoDuration(Number.isFinite(video.duration) ? video.duration : 0);
+            video.volume = videoVolume;
+            video.muted = videoMuted;
+          }
+          syncVideoToPlayhead();
+        }}
+        onDurationChange={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          const video = videoRef.current;
+          if (video) setVideoDuration(Number.isFinite(video.duration) ? video.duration : 0);
+        }}
+        onVolumeChange={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          const video = videoRef.current;
+          if (!video) return;
+          setVideoVolume(video.volume);
+          setVideoMuted(video.muted);
+        }}
+        onCanPlay={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          playbackReadyRef.current = true;
+          setVideoError(null);
+          if (autoResumeRef.current) {
+            autoResumeRef.current = false;
+            void videoRef.current?.play().catch(() => {});
+          }
+        }}
+        onPlay={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          setPlaying(true);
+        }}
+        onPlaying={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          setPlaying(true);
+          setBuffering(false);
+        }}
+        onWaiting={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          setBuffering(true);
+        }}
+        onStalled={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          setBuffering(true);
+        }}
+        onPause={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          // Pausa é decisão do operador: não há troca travada para vigiar.
+          swapStartedAtRef.current = null;
+          setPlaying(false);
+          setBuffering(false);
+        }}
+        onEnded={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          setPlaying(false);
+          // Modo contínuo: o PRÓXIMO segmento vem da playlist (ordem e duração
+          // reais, já conferidas no disco). Se ele estiver pré-carregado, o efeito
+          // de slots só troca de elemento — sem recarregar, sem tela preta.
+          const playlist = vodActive ? vodPlaylistRef.current : null;
+          const activeRecordingId = activeVodSource?.recordingId ?? null;
+          if (playlist && activeRecordingId) {
+            const index = playlist.segments.findIndex((item) => item.recordingId === activeRecordingId);
+            const upcoming = index >= 0 ? playlist.segments[index + 1] ?? null : null;
+            if (upcoming) {
+              lastVideoPlayheadRef.current = null;
+              autoResumeRef.current = true;
+              setSelectedRecordingId(upcoming.recordingId);
+              setPendingSeekSeconds(0);
+              setPlayhead(clamp(minuteOfDay(new Date(upcoming.startedAtMs)), 0, TOTAL_MINS));
+              return;
+            }
+          }
+          // Continuidade: ao terminar o segmento, avança para o próximo trecho
+          // utilizável do dia e continua reproduzindo automaticamente.
+          const idx = recordings.findIndex((item) => item.id === selectedRecordingId);
+          if (idx < 0) return;
+          for (let i = idx + 1; i < recordings.length; i += 1) {
+            const item = recordings[i];
+            if (!(item.fileUsable ?? item.fileExists)) continue;
+            lastVideoPlayheadRef.current = null;
+            autoResumeRef.current = true;
+            setSelectedRecordingId(item.id);
+            setPendingSeekSeconds(0);
+            setPlayhead(clamp(minuteOfDay(item.startedAt), 0, TOTAL_MINS));
+            break;
+          }
+        }}
+        onTimeUpdate={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          const video = videoRef.current;
+          if (!video) return;
+          setVideoCurrentTime(video.currentTime);
+          lastProgressAtRef.current = Date.now();
+          if (swapStartedAtRef.current !== null && video.currentTime > 0) swapStartedAtRef.current = null;
+          const playlist = vodActive ? vodPlaylistRef.current : null;
+          const activeRecordingId = activeVodSource?.recordingId ?? null;
+          const index = playlist && activeRecordingId
+            ? playlist.segments.findIndex((item) => item.recordingId === activeRecordingId)
+            : -1;
+          if (playlist && index >= 0) {
+            const position = playlist.segments[index].offsetSeconds + video.currentTime;
+            const absoluteMs = vodPositionToAbsoluteMs(playlist, position);
+            if (absoluteMs !== null) {
+              const minute = clamp(Math.round(minuteOfDay(new Date(absoluteMs))), 0, TOTAL_MINS);
+              lastVideoPlayheadRef.current = minute;
+              setPlayhead(minute);
+            }
+            // Perto da virada: aquece o próximo arquivo no slot ocioso. É esta
+            // pré-carga que permite a troca instantânea no fim do segmento.
+            const upcoming = shouldPrefetchNextSegment(playlist, position);
+            if (upcoming && isPlaybackTokenUsable(vodSegmentToken(upcoming), Date.now())) {
+              setVodSlots((current) => (
+                current[idleSlot]?.recordingId === upcoming.recordingId
+                  ? current
+                  : { ...current, [idleSlot]: { recordingId: upcoming.recordingId, url: vodSegmentUrl(upcoming) } }
+              ));
+            }
+            return;
+          }
+          if (!selectedRecording) return;
+          const base = minuteOfDay(selectedRecording.startedAt);
+          const minute = clamp(Math.round(base + video.currentTime / 60), 0, TOTAL_MINS);
+          lastVideoPlayheadRef.current = minute;
+          setPlayhead(minute);
+        }}
+        onError={(event) => {
+          if (!isActiveVideoElement(event.currentTarget)) return;
+          // No modo contínuo, erro devolve o segmento ao caminho antigo: é ele que
+          // sabe negociar versão compatível e pular gravação quebrada.
+          if (vodActive) {
+            swapStartedAtRef.current = null;
+            lastVideoPlayheadRef.current = null;
+            autoResumeRef.current = true;
+            setVodFallback(true);
+            return;
+          }
+          if (!playbackMayUseCompatible) {
+            setVideoError('Falha na reprodução direta. Preparando versão compatível...');
+            setCompatMode(true);
+            return;
+          }
+          if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
+            autoSkipTriedRef.current.add(selectedRecordingId);
+            const switched = selectNextUsableRecording(selectedRecordingId);
+            if (switched) {
+              setVideoError('Segmento atual falhou. Avançando automaticamente para o próximo trecho válido.');
+              return;
+            }
+          }
+          setVideoError('Falha ao carregar a gravação selecionada, mesmo em modo compatível.');
+        }}
+      />
+    );
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto xl:overflow-hidden">
       <div className="toolbar">
@@ -1520,7 +2088,7 @@ export default function PlaybackPage() {
               {playing && <span className="rec-pulse h-2 w-2 rounded-full bg-[hsl(var(--destructive))]" />}
             </div>
 
-            {playbackUrl ? (
+            {playerActive ? (
               <div
                 className={`h-full w-full overflow-hidden ${videoZoom > 1 ? (draggingVideo ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'}`}
                 onWheel={handleVideoWheel}
@@ -1531,101 +2099,19 @@ export default function PlaybackPage() {
                 onMouseLeave={onVideoDragEnd}
                 style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
               >
-                <video
-                  key={playbackUrl}
-                  ref={videoRef}
-                  src={playbackUrl}
-                  poster={selectedThumbnailUrl ?? undefined}
-                  crossOrigin="use-credentials"
-                  preload="metadata"
-                  className="h-full w-full bg-black object-contain"
-                  style={{ transform: `translate(${videoPan.x}px, ${videoPan.y}px) scale(${videoZoom})`, transformOrigin: 'center center' }}
-                  onClick={togglePlay}
-                  onLoadedMetadata={() => {
-                    playbackReadyRef.current = true;
-                    const video = videoRef.current;
-                    if (video) {
-                      setVideoDuration(Number.isFinite(video.duration) ? video.duration : 0);
-                      video.volume = videoVolume;
-                      video.muted = videoMuted;
-                    }
-                    syncVideoToPlayhead();
-                  }}
-                  onDurationChange={() => {
-                    const video = videoRef.current;
-                    if (video) setVideoDuration(Number.isFinite(video.duration) ? video.duration : 0);
-                  }}
-                  onVolumeChange={() => {
-                    const video = videoRef.current;
-                    if (!video) return;
-                    setVideoVolume(video.volume);
-                    setVideoMuted(video.muted);
-                  }}
-                  onCanPlay={() => {
-                    playbackReadyRef.current = true;
-                    setVideoError(null);
-                    if (autoResumeRef.current) {
-                      autoResumeRef.current = false;
-                      void videoRef.current?.play().catch(() => {});
-                    }
-                  }}
-                  onPlay={() => setPlaying(true)}
-                  onPlaying={() => {
-                    setPlaying(true);
-                    setBuffering(false);
-                  }}
-                  onWaiting={() => setBuffering(true)}
-                  onStalled={() => setBuffering(true)}
-                  onPause={() => {
-                    setPlaying(false);
-                    setBuffering(false);
-                  }}
-                  onEnded={() => {
-                    setPlaying(false);
-                    // Continuidade: ao terminar o segmento, avança para o próximo trecho
-                    // utilizável do dia e continua reproduzindo automaticamente.
-                    const idx = recordings.findIndex((item) => item.id === selectedRecordingId);
-                    if (idx < 0) return;
-                    for (let i = idx + 1; i < recordings.length; i += 1) {
-                      const item = recordings[i];
-                      if (!(item.fileUsable ?? item.fileExists)) continue;
-                      lastVideoPlayheadRef.current = null;
-                      autoResumeRef.current = true;
-                      setSelectedRecordingId(item.id);
-                      setPendingSeekSeconds(0);
-                      setPlayhead(clamp(minuteOfDay(item.startedAt), 0, TOTAL_MINS));
-                      break;
-                    }
-                  }}
-                  onTimeUpdate={() => {
-                    if (!selectedRecording || !videoRef.current) return;
-                    setVideoCurrentTime(videoRef.current.currentTime);
-                    const base = minuteOfDay(selectedRecording.startedAt);
-                    const minute = clamp(Math.round(base + videoRef.current.currentTime / 60), 0, TOTAL_MINS);
-                    lastVideoPlayheadRef.current = minute;
-                    setPlayhead(minute);
-                  }}
-                  onError={() => {
-                    if (!playbackMayUseCompatible) {
-                      setVideoError('Falha na reprodução direta. Preparando versão compatível...');
-                      setCompatMode(true);
-                      return;
-                    }
-                    if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
-                      autoSkipTriedRef.current.add(selectedRecordingId);
-                      const switched = selectNextUsableRecording(selectedRecordingId);
-                      if (switched) {
-                        setVideoError('Segmento atual falhou. Avançando automaticamente para o próximo trecho válido.');
-                        return;
-                      }
-                    }
-                    setVideoError('Falha ao carregar a gravação selecionada, mesmo em modo compatível.');
-                  }}
-                />
+                {/* Modo contínuo: dois elementos vivos (um toca, o outro aquece o
+                    próximo segmento). Caminho antigo: UM elemento, remontado por
+                    URL, exatamente como sempre foi. */}
+                {vodActive
+                  ? renderPlayerVideo({ elementKey: 'vod-slot-a', bindRef: bindSlotA, src: vodSlots.a?.url ?? null, slot: 'a' })
+                  : renderPlayerVideo({ elementKey: playbackUrl ?? 'legacy', bindRef: bindLegacyVideo, src: playbackUrl, slot: null })}
+                {vodActive
+                  ? renderPlayerVideo({ elementKey: 'vod-slot-b', bindRef: bindSlotB, src: vodSlots.b?.url ?? null, slot: 'b' })
+                  : null}
               </div>
             ) : null}
 
-            {!playbackUrl && !loadingPlayback && !loadingRecordings && (
+            {!playerActive && !loadingPlayback && !loadingRecordings && (
               <div className="absolute inset-0 flex items-center justify-center">
                 {standbyThumbnailUrl ? <img src={standbyThumbnailUrl} onError={retryExpiredThumbnails} alt="Prévia da gravação" className="absolute inset-0 h-full w-full object-cover opacity-60" /> : null}
                 {standbyThumbnailUrl ? <div className="absolute inset-0 bg-black/35" /> : null}
@@ -1638,7 +2124,7 @@ export default function PlaybackPage() {
               </div>
             )}
 
-            {buffering && playbackUrl && !videoError && !loadingPlayback && !loadingRecordings && (
+            {buffering && playerActive && !videoError && !loadingPlayback && !loadingRecordings && (
               <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
                 <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/55 px-3 py-2 text-xs text-white/80">
                   <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -1665,6 +2151,10 @@ export default function PlaybackPage() {
                     onClick={() => {
                       playbackReadyRef.current = false;
                       setVideoError(null);
+                      // Retentar é sempre pelo caminho antigo (token novo, URL
+                      // nova, elemento remontado) — inclusive saindo do contínuo.
+                      lastVideoPlayheadRef.current = null;
+                      setVodFallback(true);
                       setReloadNonce((current) => current + 1);
                     }}
                     className="mt-2 rounded border border-[hsl(var(--destructive)_/_0.4)] px-2.5 py-1 text-[10px] text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)_/_0.2)]"
@@ -1878,7 +2368,7 @@ export default function PlaybackPage() {
                 step={0.1}
                 value={Math.min(videoCurrentTime, videoDuration || selectedRecordingDuration || 0)}
                 onChange={(event) => seekVideoTo(Number(event.target.value))}
-                disabled={!playbackUrl}
+                disabled={!playerActive}
                 aria-label="Posição no segmento"
                 className="playback-scrubber h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-[hsl(var(--muted))] accent-[hsl(var(--primary))] disabled:cursor-not-allowed disabled:opacity-50"
               />
@@ -1894,17 +2384,17 @@ export default function PlaybackPage() {
               {/* Transporte central */}
               <div className="mx-auto flex items-center gap-1.5">
                 <button type="button" onClick={() => setPlayheadFromMinute(playhead - 15)} title="Voltar 15 min" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground"><SkipBack className="h-4 w-4" /></button>
-                <button type="button" onClick={() => seekVideoTo(getCurrentVideoSeconds() - 10)} disabled={!playbackUrl} title="Voltar 10s" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground disabled:opacity-45"><StepBack className="h-4 w-4" /></button>
+                <button type="button" onClick={() => seekVideoTo(getCurrentVideoSeconds() - 10)} disabled={!playerActive} title="Voltar 10s" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground disabled:opacity-45"><StepBack className="h-4 w-4" /></button>
                 <button
                   type="button"
                   onClick={togglePlay}
-                  disabled={!playbackUrl}
+                  disabled={!playerActive}
                   title={playing ? 'Pausar' : 'Reproduzir'}
                   className="flex h-11 w-11 items-center justify-center rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90 disabled:opacity-45"
                 >
                   {playing ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}
                 </button>
-                <button type="button" onClick={() => seekVideoTo(getCurrentVideoSeconds() + 10)} disabled={!playbackUrl} title="Avançar 10s" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground disabled:opacity-45"><StepForward className="h-4 w-4" /></button>
+                <button type="button" onClick={() => seekVideoTo(getCurrentVideoSeconds() + 10)} disabled={!playerActive} title="Avançar 10s" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground disabled:opacity-45"><StepForward className="h-4 w-4" /></button>
                 <button type="button" onClick={() => setPlayheadFromMinute(playhead + 15)} title="Avançar 15 min" className="flex h-8 w-8 items-center justify-center rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground"><SkipForward className="h-4 w-4" /></button>
               </div>
 
