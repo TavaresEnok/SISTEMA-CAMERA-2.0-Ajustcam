@@ -12,6 +12,14 @@ from model_registry import registry
 from runtime_profiles import exposed_profiles
 from onnxruntime_session import inference_threading_status
 from confirm_motion import run_confirm_motion, capture_and_detect
+from detectors import describe_detector_runtimes
+from inference_watchdog import (
+    enforcement_enabled,
+    inference_degraded_ids,
+    merge_degraded,
+    safe_inference_state,
+    watchdog_settings,
+)
 
 logging.basicConfig(
     level=(os.getenv("AI_LOG_LEVEL", "INFO") or "INFO").strip().upper(),
@@ -61,18 +69,46 @@ def validate_internal_token(x_service_token: Optional[str]):
 @app.get("/health")
 def health_check():
     max_frame_age = max(5.0, float(os.getenv("AI_READINESS_MAX_FRAME_AGE_SECONDS", "20")))
+    # UM snapshot do dict global: start/stop concorrente pode inserir/remover
+    # câmera no meio da montagem da resposta, e ler `processors` mais de uma vez
+    # produziria dicts com chaves diferentes (KeyError → 500 no /health, que o
+    # api leria como "ai-service caiu").
+    snapshot = list(processors.items())
     readiness = {
         camera_id: processor.readiness_state(max_frame_age)
-        for camera_id, processor in processors.items()
+        for camera_id, processor in snapshot
     }
-    degraded = [camera_id for camera_id, state in readiness.items() if not state["ready"]]
+    capture_degraded = [camera_id for camera_id, state in readiness.items() if not state["ready"]]
+    # Watchdog de INFERÊNCIA: captura viva não prova que o detector enxerga.
+    # Com a IA de objeto/face desligada o estado é 'not_applicable' — nunca
+    # degradado (ver inference_watchdog.py).
+    now = time.time()
+    inference_states = {
+        camera_id: safe_inference_state(
+            processor,
+            capture_ready=bool(readiness[camera_id]["ready"]),
+            now=now,
+        )
+        for camera_id, processor in snapshot
+    }
+    inference_degraded = inference_degraded_ids(inference_states)
+    # `degraded_processors` REINICIA a análise no api (ai-manager.service.ts).
+    # Por isso a inferência travada só entra nessa lista com a flag
+    # AI_INFERENCE_WATCHDOG_ENFORCE ligada; por padrão ela sai IDÊNTICA à de
+    # antes deste watchdog, e o sinal novo mora em inference_degraded_processors.
+    enforce = enforcement_enabled()
+    degraded = merge_degraded(capture_degraded, inference_states, enforce)
     return {
         "status": "degraded" if degraded else "online",
         "service": "ai-service",
         "ready": not degraded,
         "degraded_processors": degraded,
-        "active_processors": list(processors.keys()),
+        "capture_degraded_processors": capture_degraded,
+        "inference_degraded_processors": inference_degraded,
+        "inference_watchdog": {**watchdog_settings(), "enforce": enforce},
+        "active_processors": [camera_id for camera_id, _ in snapshot],
         "static_profiles": exposed_profiles(),
+        "detector_runtimes": describe_detector_runtimes(),
         "model_registry": registry.status(),
         "inference_threading": inference_threading_status(),
         "processors": {
@@ -97,8 +133,9 @@ def health_check():
                 "live_view": processor.live_view_state(),
                 "performance": processor.performance_state(),
                 "readiness": readiness[camera_id],
+                "inference": inference_states[camera_id],
             }
-            for camera_id, processor in processors.items()
+            for camera_id, processor in snapshot
         },
     }
 
