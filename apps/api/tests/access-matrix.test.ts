@@ -29,6 +29,14 @@ const CAMERAS = [
   { id: 'cam-other', groupId: 'g-other', isPrivate: false, ownerUserId: null },
 ];
 
+// Grupos com o estado COMERCIAL (bloqueio por falta de pagamento do cliente
+// final). Ambos ativos aqui: a matriz base mede permissão, não cobrança — os
+// testes de bloqueio ficam em group-access-block.test.ts.
+const GROUPS = [
+  { id: 'g-shared', isActive: true, accessStatus: 'ACTIVE' },
+  { id: 'g-other', isActive: true, accessStatus: 'ACTIVE' },
+];
+
 const V = CameraPermissionLevel.VIEW;
 const C = CameraPermissionLevel.CONTROL;
 
@@ -64,6 +72,17 @@ function makeService() {
         }
         return rows.map((c) => ({ ...c }));
       },
+    },
+    cameraGroup: {
+      findMany: async (args: any) => {
+        const where = args?.where ?? {};
+        return GROUPS.filter((g) =>
+          (!where.id?.in || where.id.in.includes(g.id))
+          && (where.isActive === undefined || g.isActive === where.isActive)
+          && (!where.accessStatus?.not || g.accessStatus !== where.accessStatus.not))
+          .map((g) => ({ ...g }));
+      },
+      findUnique: async (args: any) => GROUPS.find((g) => g.id === args.where.id) ?? null,
     },
     cameraPermission: {
       findMany: async (args: any) => {
@@ -248,13 +267,6 @@ test('anti-regressão: todo derivado de câmera passa pelo gate de acesso', () =
     ['camera-stream poster', cameraStream, "@Get(':cameraId/poster')"],
     ['camera-stream flv', cameraStream, "@Get(':cameraId/flv')"],
     ['camera-stream clip/start', cameraStream, "@Post(':cameraId/clip/start')"],
-    ['recordings thumbnail', recordings, "@Get('recordings/:id/thumbnail')"],
-    ['recordings preview-sprite', recordings, "@Get('recordings/:id/preview-sprite')"],
-    ['recordings preview-meta', recordings, "@Get('recordings/:id/preview-meta')"],
-    ['recordings snapshot', recordings, "@Get('recordings/:id/snapshot')"],
-    ['recordings play', recordings, "@Get('recordings/:id/play')"],
-    ['recordings download', recordings, "@Get('recordings/:id/download')"],
-    ['recordings clips/export (evidência)', recordings, "@Post('recordings/:id/clips/export')"],
     ['recordings clips/:clipId/download (evidência)', recordings, "@Get('recordings/clips/:clipId/download')"],
     ['ai detections/latest', ai, "@Get('detections/latest/:cameraId')"],
     // Produtores de conteúdo/token que também devem ser vigiados (estavam corretos
@@ -268,6 +280,26 @@ test('anti-regressão: todo derivado de câmera passa pelo gate de acesso', () =
       routeBody(source, route),
       /assertCanViewCamera\(/,
       `derivado "${label}" (${route}) deve gatear por assertCanViewCamera antes de servir conteúdo`,
+    );
+  }
+
+  // ROTAS DE HISTÓRICO: gate MAIS ESTRITO. Um grupo RESTRITO (cliente final em
+  // atraso) mantém o ao vivo mas perde o acervo, então estas rotas passam por
+  // assertCanPlaybackCamera — que já inclui o assertCanViewCamera por dentro.
+  const playbackRoutes: Array<[string, string]> = [
+    ['recordings thumbnail', "@Get('recordings/:id/thumbnail')"],
+    ['recordings preview-sprite', "@Get('recordings/:id/preview-sprite')"],
+    ['recordings preview-meta', "@Get('recordings/:id/preview-meta')"],
+    ['recordings snapshot', "@Get('recordings/:id/snapshot')"],
+    ['recordings play', "@Get('recordings/:id/play')"],
+    ['recordings download', "@Get('recordings/:id/download')"],
+    ['recordings clips/export (evidência)', "@Post('recordings/:id/clips/export')"],
+  ];
+  for (const [label, route] of playbackRoutes) {
+    assert.match(
+      routeBody(recordings, route),
+      /assertCanPlaybackCamera\(/,
+      `rota de histórico "${label}" (${route}) deve usar o gate de PLAYBACK`,
     );
   }
 

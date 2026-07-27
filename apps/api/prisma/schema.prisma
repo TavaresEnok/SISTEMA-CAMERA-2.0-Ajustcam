@@ -14,6 +14,19 @@ enum CameraStatus {
   ERROR
 }
 
+/// Estado COMERCIAL do grupo, para o dono da instalação cortar um cliente final
+/// que parou de pagar — o mesmo escalonamento que a Central aplica sobre a
+/// instalação inteira, mas um nível abaixo.
+///   ACTIVE     acesso normal.
+///   RESTRICTED vê o AO VIVO, mas não playback/gravações/exportação.
+///   SUSPENDED  não vê nada (o grupo deixa de conceder acesso).
+/// O ADMIN da instalação nunca é afetado: ele precisa gerenciar o que bloqueou.
+enum GroupAccessStatus {
+  ACTIVE
+  RESTRICTED
+  SUSPENDED
+}
+
 enum UserRole {
   SUPER_ADMIN
   ADMIN
@@ -473,6 +486,11 @@ model CameraGroup {
   name        String
   description String?
   isActive    Boolean  @default(true)
+  /// Bloqueio comercial do grupo (ver GroupAccessStatus). Default ACTIVE: todo
+  /// grupo existente continua exatamente como está após a migração.
+  accessStatus GroupAccessStatus @default(ACTIVE)
+  /// Motivo mostrado ao cliente final quando o grupo está restrito/suspenso.
+  accessMessage String?
   /// Cota de câmeras PRIVADAS que os usuários deste grupo podem cadastrar pelo
   /// app ("+ Adicionar câmera"). É o "acordado" com o cliente. 0 = não pode
   /// cadastrar câmera privada (padrão seguro: liberado só quando o admin define).

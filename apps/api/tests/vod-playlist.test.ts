@@ -319,6 +319,9 @@ function makeServiceFixture(records: FakeRec[], filesOnDisk: string[], canView =
   // Gate único de conteúdo, espelhando a inversão da câmera privada: quem não
   // pode VER leva ForbiddenException (mesmo contrato do AccessControlService).
   svc.accessControlService = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async () => {
       if (!canView) throw new ForbiddenException('Sem acesso ao conteúdo desta câmera.');
     },
@@ -537,6 +540,9 @@ function makeRes() {
 
 function makeController(opts: { canView: boolean; order: string[] }) {
   const access = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async (_u: AuthUser, cameraId: string) => {
       opts.order.push(`access:${cameraId}`);
       if (!opts.canView) throw new ForbiddenException('Sem acesso à câmera.');
@@ -625,6 +631,9 @@ test('vod controller: alias /play.mp4 delega ao MESMO playback (mesmo token, mes
     },
   };
   const access = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async (_u: AuthUser, cameraId: string) => order.push(`access:${cameraId}`),
   };
   const audit = { log: async () => order.push('audit') };

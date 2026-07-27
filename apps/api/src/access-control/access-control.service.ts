@@ -56,8 +56,15 @@ export class AccessControlService {
       select: { groupId: true },
     });
     const groupIds = byGroup.map((item) => item.groupId).filter((id): id is string => Boolean(id));
-    const groupCameras = groupIds.length
-      ? await this.prisma.camera.findMany({ where: { groupId: { in: groupIds } }, select: { id: true, isPrivate: true } })
+    // BLOQUEIO COMERCIAL DO GRUPO: um grupo SUSPENSO (ou desativado) deixa de
+    // conceder acesso — é como o dono da instalação corta um cliente final que
+    // parou de pagar. Antes, `isActive:false` só escondia o grupo das listagens
+    // enquanto o conteúdo continuava acessível: bloqueio puramente cosmético.
+    // Precisa valer AQUI e no getMaxPermissionLevel: bloquear só um dos dois
+    // esconderia a câmera da lista mas deixaria o acesso direto passar.
+    const allowedGroupIds = groupIds.length ? await this.filterAllowedGroupIds(groupIds) : [];
+    const groupCameras = allowedGroupIds.length
+      ? await this.prisma.camera.findMany({ where: { groupId: { in: allowedGroupIds } }, select: { id: true, isPrivate: true } })
       : [];
 
     const candidate = Array.from(new Set([
@@ -99,16 +106,36 @@ export class AccessControlService {
     }
   }
 
+  /**
+   * Dos grupos informados, quais AINDA concedem acesso. Um grupo SUSPENSO (ou
+   * `isActive:false`, o estado legado) não concede nada. RESTRICTED continua
+   * concedendo — ele limita playback/exportação, não o ao vivo (ver
+   * `canPlaybackCamera`).
+   */
+  private async filterAllowedGroupIds(groupIds: string[]): Promise<string[]> {
+    if (!groupIds.length) return [];
+    const groups = await this.prisma.cameraGroup.findMany({
+      where: { id: { in: groupIds }, isActive: true, accessStatus: { not: 'SUSPENDED' } },
+      select: { id: true },
+    });
+    return groups.map((group) => group.id);
+  }
+
   private async getMaxPermissionLevel(userId: string, cameraId: string): Promise<CameraPermissionLevel | null> {
     const camera = await this.prisma.camera.findUnique({ where: { id: cameraId }, select: { groupId: true } });
     if (!camera) return null;
+
+    // Mesmo bloqueio da lista: um grupo suspenso não pode conceder permissão por
+    // grupo. A permissão DIRETA na câmera continua valendo — ela é um vínculo
+    // pessoa↔câmera, não do contrato do grupo.
+    const allowedGroupIds = camera.groupId ? await this.filterAllowedGroupIds([camera.groupId]) : [];
 
     const perms = await this.prisma.cameraPermission.findMany({
       where: {
         userId,
         OR: [
           { cameraId },
-          ...(camera.groupId ? [{ groupId: camera.groupId }] : []),
+          ...(allowedGroupIds.length ? [{ groupId: allowedGroupIds[0] }] : []),
         ],
       },
       select: { level: true },
@@ -178,6 +205,35 @@ export class AccessControlService {
   async assertCanViewCamera(user: AuthUser, cameraId: string): Promise<void> {
     if (!(await this.canViewCamera(user, cameraId))) {
       throw new ForbiddenException('Sem permissão para visualizar esta câmera.');
+    }
+  }
+
+  /**
+   * Acesso ao HISTÓRICO (playback, gravações, exportação) — mais estrito que o
+   * ao vivo. Um grupo RESTRITO segue vendo a câmera em tempo real, mas perde o
+   * acervo: é a "meia-cobrança" que o dono da instalação aplica antes de cortar
+   * de vez, espelhando o que a Central faz com a instalação inteira.
+   *
+   * O ADMIN da instalação nunca é barrado por aqui: ele precisa administrar o
+   * cliente que bloqueou. A privacidade da câmera privada continua acima de
+   * tudo — se `canViewCamera` nega, isto nega junto.
+   */
+  async canPlaybackCamera(user: AuthUser, cameraId: string): Promise<boolean> {
+    if (!(await this.canViewCamera(user, cameraId))) return false;
+    if (this.isPrivileged(user)) return true;
+
+    const camera = await this.prisma.camera.findUnique({ where: { id: cameraId }, select: { groupId: true } });
+    if (!camera?.groupId) return true;
+    const group = await this.prisma.cameraGroup.findUnique({
+      where: { id: camera.groupId },
+      select: { accessStatus: true },
+    });
+    return group?.accessStatus !== 'RESTRICTED';
+  }
+
+  async assertCanPlaybackCamera(user: AuthUser, cameraId: string): Promise<void> {
+    if (!(await this.canPlaybackCamera(user, cameraId))) {
+      throw new ForbiddenException('Acesso ao histórico indisponível para este grupo. Fale com o administrador.');
     }
   }
 

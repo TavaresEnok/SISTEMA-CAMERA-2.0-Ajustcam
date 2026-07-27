@@ -244,6 +244,15 @@ function makeAccessControlService() {
       },
       findUnique: async (args: any) => cameras.find((camera) => camera.id === args.where.id) ?? null,
     },
+    // Grupos ATIVOS: o bloqueio comercial por grupo (accessStatus) tem suíte
+    // própria; aqui todos concedem acesso, como antes de o campo existir.
+    cameraGroup: {
+      findMany: async (args: any) => {
+        const ids = args?.where?.id?.in ?? [...new Set(cameras.map((c: any) => c.groupId).filter(Boolean))];
+        return ids.map((id: string) => ({ id, isActive: true, accessStatus: 'ACTIVE' }));
+      },
+      findUnique: async (args: any) => ({ id: args.where.id, isActive: true, accessStatus: 'ACTIVE' }),
+    },
     cameraPermission: {
       findMany: async (args: any) => {
         const where = args.where ?? {};
@@ -729,6 +738,9 @@ test('camera-stream controller: cria token somente apos validar permissao de vis
   const user: AuthUser = { id: 'operator', email: 'op@test.local', name: 'Operador', role: UserRole.OPERATOR };
   const order: string[] = [];
   const access = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async (_user: AuthUser, cameraId: string) => {
       order.push(`access:${cameraId}`);
     },
@@ -976,6 +988,9 @@ test('recordings controller: play-token valida camera da gravacao e grava cookie
     },
   };
   const access = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async (_user: AuthUser, cameraId: string) => {
       order.push(`access:${cameraId}`);
     },
@@ -1026,6 +1041,9 @@ test('recordings controller: download valida permissao e audita antes de enviar 
     },
   };
   const access = {
+    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
+    // é que o gate seja chamado antes de servir conteúdo).
+    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
     assertCanViewCamera: async (_user: AuthUser, cameraId: string) => {
       order.push(`access:${cameraId}`);
     },

@@ -499,7 +499,7 @@ export class RecordingsController {
     @Res() res: Response,
   ) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     const frameSeconds = Math.max(0, Math.floor(Number(seconds ?? 0)));
     await this.auditService.log(user.id, 'recording.snapshot', 'Recording', id, { seconds: frameSeconds }, req);
     return this.recordingsService.streamSnapshotFrame(id, frameSeconds, res);
@@ -546,7 +546,7 @@ export class RecordingsController {
     }
     const tokenUser = await this.authService.me(payload.sub);
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(tokenUser, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(tokenUser, recording.cameraId);
     const compatibleFlag = ['1', 'true', 'yes'].includes(String(compatible ?? '').toLowerCase());
     const forceDirectFlag = ['1', 'true', 'yes'].includes(String(forceDirect ?? '').toLowerCase());
     const autoPreferCompatible = forceDirectFlag ? false : await this.recordingsService.shouldPreferCompatiblePlayback(id);
@@ -593,7 +593,7 @@ export class RecordingsController {
     @Res() res: Response,
   ) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     await this.auditService.log(user.id, 'recording.download', 'Recording', id, { immediate: true }, req);
     return this.recordingsService.downloadRecording(id, res);
   }
@@ -656,7 +656,7 @@ export class RecordingsController {
     const exportReason = dto.notes?.trim() ?? '';
     if (!exportReason) throw new BadRequestException('Motivo é obrigatório para exportar clip.');
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     const clip = await this.recordingsService.exportClip(user, id, dto);
 
     let investigationItemId: string | null = null;
@@ -736,7 +736,7 @@ export class RecordingsController {
     }
     const tokenUser = await this.authService.me(payload.sub);
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(tokenUser, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(tokenUser, recording.cameraId);
     return this.recordingsService.streamThumbnail(id, res);
   }
 
@@ -755,7 +755,7 @@ export class RecordingsController {
   @Get('recordings/:id/preview-meta')
   async getTimelinePreviewMeta(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     return this.recordingsService.getTimelinePreviewMeta(id);
   }
 
@@ -782,7 +782,7 @@ export class RecordingsController {
     }
     const tokenUser = await this.authService.me(payload.sub);
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(tokenUser, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(tokenUser, recording.cameraId);
     return this.recordingsService.streamTimelinePreview(id, res);
   }
 
