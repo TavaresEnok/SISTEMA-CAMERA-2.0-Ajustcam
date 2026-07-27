@@ -223,6 +223,30 @@
   .t-mid .mag-fill { background: var(--tier-mid); }
   .t-high .mag-fill { background: var(--tier-high); }
 
+  /* ── Tabelas no celular ─────────────────────────────────────────────
+     Três garantias para quem lê numa tela estreita:
+     1. dica explícita de que a tabela desliza para o lado;
+     2. primeira coluna fixa (a linha nunca perde o nome ao rolar);
+     3. legenda presa à tela, em vez de esticada na largura da tabela. */
+  @media (max-width: 700px) {
+    .tw::before {
+      content: "Deslize a tabela para o lado \2192";
+      position: sticky; left: 0; display: block;
+      font-family: var(--mono); font-size: 10px; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--tx-4); padding: 9px 17px 0;
+    }
+    caption { position: sticky; left: 0; max-width: calc(100vw - 80px); }
+    tbody td:first-child, thead th:first-child {
+      position: sticky; left: 0; z-index: 2;
+      background: var(--surf-1);
+      box-shadow: 5px 0 7px -5px rgba(20, 30, 50, .22);
+    }
+    thead th:first-child { background: var(--surf-2); z-index: 3; }
+    tbody tr.hl td:first-child {
+      background: color-mix(in srgb, var(--primary) 9%, var(--surf-1));
+    }
+  }
+
   .pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
     font-family: var(--mono); font-size: 11px; white-space: nowrap; font-weight: 500;
