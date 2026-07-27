@@ -54,6 +54,44 @@ export type RecordingProcessState = {
    * precisa estar registrada no estado antes do kill. Não altera o fluxo.
    */
   stopRequested?: boolean;
+  /**
+   * Última observação do arquivo de segmento EM ESCRITA (detecção de gravação
+   * travada por progresso de arquivo). Opcional: nasce indefinida e só é
+   * preenchida quando alguém consulta o progresso.
+   */
+  writeSample?: { filePath: string; sizeBytes: number; mtimeMs: number; observedAtMs: number };
+};
+
+/**
+ * Diagnóstico de PROGRESSO DE ARQUIVO da gravação em andamento.
+ *
+ * Por que existe: o único sinal de "gravação viva" que tínhamos era o ÚLTIMO
+ * SEGMENTO FECHADO, e um segmento só fecha a cada `segmentSeconds` (300s em
+ * produção). Com o limiar de estagnação em `max(180s, segmento×1,25)` = 375s e o
+ * health-check rodando a cada 60s, uma gravação parada ficava até ~7min sem
+ * ninguém perceber. Mas o FFmpeg escreve CONTINUAMENTE no arquivo do segmento em
+ * andamento — se esse arquivo para de crescer, a gravação travou AGORA.
+ */
+export type RecordingWriteProgress = {
+  /** Existe processo local de gravação para avaliar? (false ⇒ a regra não se aplica) */
+  applicable: boolean;
+  /** Arquivo .ts observado como "em escrita" (o de mtime mais recente na pasta do processo). */
+  filePath: string | null;
+  sizeBytes: number | null;
+  /** Segundos desde a última escrita observada no arquivo em andamento. */
+  secondsSinceLastWrite: number | null;
+  stallThresholdSeconds: number;
+  graceSeconds: number;
+  /** VEREDITO: o processo está vivo mas parou de escrever bytes. */
+  stalled: boolean;
+  reason:
+    | 'no_active_process'
+    | 'startup_grace'
+    | 'no_segment_file'
+    | 'probe_failed'
+    | 'growing'
+    | 'writing'
+    | 'stalled';
 };
 
 type WorkerRecordingCommand = {
@@ -274,6 +312,152 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const effectiveSegmentSeconds = Number(segmentSeconds && segmentSeconds > 0 ? segmentSeconds : defaultSegmentSeconds);
     const graceSeconds = Math.max(60, Math.round(effectiveSegmentSeconds * 0.25));
     return Math.max(configuredThreshold, effectiveSegmentSeconds + graceSeconds);
+  }
+
+  // ── GRAVAÇÃO TRAVADA POR PROGRESSO DE ARQUIVO ────────────────────────────────
+  // Regra de OURO desta seção: FALSO POSITIVO AQUI MATA GRAVAÇÃO BOA — é pior que
+  // o problema original (demorar a reiniciar uma gravação já morta). Toda dúvida
+  // resolve para "saudável". As escolhas conservadoras estão documentadas caso a
+  // caso abaixo.
+
+  /**
+   * Segundos sem NENHUMA escrita no segmento em andamento para considerar travado.
+   *
+   * Default 45s (piso duro de 20s, mesmo se alguém configurar menos): o FFmpeg
+   * esvazia o buffer de I/O do muxer (~32KB) a cada poucos segundos mesmo em cena
+   * estática de bitrate baixíssimo (32KB a 64kbps ≈ 4s; a 16kbps ≈ 16s), então 45s
+   * é ~3x a pior janela plausível de uma câmera viva — sobra folga para jitter de
+   * filesystem, contenção de disco e granularidade de mtime.
+   */
+  private getWriteStallSeconds() {
+    const configured = Number(process.env.RECORDING_WRITE_STALL_SECONDS ?? 45);
+    return Number.isFinite(configured) ? Math.max(20, configured) : 45;
+  }
+
+  /**
+   * Janela de graça DEPOIS do start, na qual nunca acusamos travamento.
+   *
+   * Logo após o spawn o arquivo do segmento pode simplesmente não existir ainda
+   * (conexão RTSP, negociação, cabeçalho do container). Acusar aqui reiniciaria em
+   * loop uma câmera que só está lenta para conectar. Nunca menor que o limiar de
+   * travamento.
+   */
+  private getWriteStallGraceSeconds(stallThresholdSeconds: number) {
+    const configured = Number(process.env.RECORDING_WRITE_STALL_GRACE_SECONDS ?? 90);
+    const base = Number.isFinite(configured) ? configured : 90;
+    return Math.max(30, stallThresholdSeconds, base);
+  }
+
+  /**
+   * Lista os `.ts` da pasta de saída DESTE processo com tamanho e mtime.
+   * Seam de I/O (sobrescrevível nos testes). Não recursivo de propósito: o padrão
+   * de saída é fixado no spawn (`camera-<id>/YYYY/MM/DD/HH`), então todo segmento
+   * do processo cai nessa única pasta — varrer a árvore inteira da câmera seria
+   * caro e traria arquivos de outros processos.
+   */
+  private listSegmentWriteCandidates(outputDir: string) {
+    const candidates: Array<{ filePath: string; sizeBytes: number; mtimeMs: number }> = [];
+    for (const entry of readdirSync(outputDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+      const filePath = join(outputDir, entry.name);
+      try {
+        const stat = statSync(filePath);
+        candidates.push({ filePath, sizeBytes: stat.size, mtimeMs: stat.mtimeMs });
+      } catch {
+        // Corrida com a rotação/remoção do segmento: ignora este arquivo.
+      }
+    }
+    return candidates;
+  }
+
+  /**
+   * Detecta gravação TRAVADA pelo progresso do arquivo em escrita — em ~1 ciclo do
+   * health-check, e não depois de um segmento inteiro + folga.
+   *
+   * Decisões conservadoras (cada uma evita um falso positivo real):
+   * - sem processo local ativo → NÃO se aplica (quem cobra isso é o limiar antigo);
+   * - dentro da janela de graça pós-start → NUNCA acusa;
+   * - nenhum `.ts` na pasta → NÃO acusa (pode ser o intervalo entre o remux do
+   *   segmento anterior e a criação do próximo, ou o start ainda escrevendo o 1º);
+   * - o "arquivo em escrita" é o de MTIME MAIS RECENTE, não o de nome mais novo:
+   *   se qualquer `.ts` da pasta recebeu bytes agora, a gravação está viva. Escolher
+   *   pelo nome deixaria um `.ts` residual (remux que falhou, pré-roll promovido)
+   *   mascarar o arquivo vivo e acusar travamento numa gravação sadia;
+   * - se o arquivo CRESCEU desde a observação anterior, é prova direta de progresso
+   *   e vence o mtime (blinda contra filesystem com mtime preguiçoso);
+   * - mtime no futuro (relógio torto) vira idade 0 → saudável.
+   */
+  getRecordingWriteProgress(cameraId: string, nowMs = Date.now()): RecordingWriteProgress {
+    const stallThresholdSeconds = this.getWriteStallSeconds();
+    const graceSeconds = this.getWriteStallGraceSeconds(stallThresholdSeconds);
+    const base = {
+      filePath: null,
+      sizeBytes: null,
+      secondsSinceLastWrite: null,
+      stallThresholdSeconds,
+      graceSeconds,
+      stalled: false,
+    };
+
+    const state = this.active.get(cameraId);
+    if (!state) return { ...base, applicable: false, reason: 'no_active_process' };
+
+    const uptimeSeconds = (nowMs - new Date(state.startedAt).getTime()) / 1000;
+    // Negado de propósito: NaN cai na graça (não acusa) em vez de acusar.
+    if (!(uptimeSeconds >= graceSeconds)) {
+      return { ...base, applicable: true, reason: 'startup_grace' };
+    }
+
+    let candidates: Array<{ filePath: string; sizeBytes: number; mtimeMs: number }>;
+    try {
+      candidates = this.listSegmentWriteCandidates(state.outputDir);
+    } catch {
+      return { ...base, applicable: true, reason: 'probe_failed' };
+    }
+    if (!candidates.length) return { ...base, applicable: true, reason: 'no_segment_file' };
+
+    const current = candidates.reduce((newest, item) => (item.mtimeMs > newest.mtimeMs ? item : newest));
+    const previous = state.writeSample;
+    state.writeSample = {
+      filePath: current.filePath,
+      sizeBytes: current.sizeBytes,
+      mtimeMs: current.mtimeMs,
+      observedAtMs: nowMs,
+    };
+
+    const secondsSinceLastWrite = Math.max(0, (nowMs - current.mtimeMs) / 1000);
+    const observed = {
+      applicable: true,
+      filePath: current.filePath,
+      sizeBytes: current.sizeBytes,
+      secondsSinceLastWrite: Math.round(secondsSinceLastWrite),
+      stallThresholdSeconds,
+      graceSeconds,
+    };
+
+    const grew = Boolean(previous && previous.filePath === current.filePath && current.sizeBytes > previous.sizeBytes);
+    if (grew) return { ...observed, stalled: false, reason: 'growing' };
+    if (secondsSinceLastWrite >= stallThresholdSeconds) return { ...observed, stalled: true, reason: 'stalled' };
+    return { ...observed, stalled: false, reason: 'writing' };
+  }
+
+  /** Igual ao anterior, mas JAMAIS lança: observabilidade não derruba gravação. */
+  private safeRecordingWriteProgress(cameraId: string): RecordingWriteProgress {
+    try {
+      return this.getRecordingWriteProgress(cameraId);
+    } catch {
+      const stallThresholdSeconds = this.getWriteStallSeconds();
+      return {
+        applicable: false,
+        filePath: null,
+        sizeBytes: null,
+        secondsSinceLastWrite: null,
+        stallThresholdSeconds,
+        graceSeconds: this.getWriteStallGraceSeconds(stallThresholdSeconds),
+        stalled: false,
+        reason: 'probe_failed',
+      };
+    }
   }
 
   private getMotionPostRollSeconds() {
@@ -1323,6 +1507,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       orderBy: { occurredAt: 'desc' },
       select: { type: true, occurredAt: true },
     });
+    // ADITIVO: diagnóstico de progresso do arquivo em escrita. Só faz I/O quando
+    // existe processo local ativo; nos demais casos devolve applicable=false.
+    // NENHUM campo existente muda por causa dele — em especial `stale` continua
+    // significando exatamente o que significava antes.
+    const writeProgress = this.safeRecordingWriteProgress(cameraId);
 
     if (this.controlMode === 'worker') {
       const intended = Boolean(cam?.recordingEnabled);
@@ -1350,6 +1539,8 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         pid: null,
         currentOutputPattern: latestRecording?.filePath ?? null,
         mode: 'worker',
+        writeStalled: writeProgress.stalled,
+        writeProgress,
       };
     }
 
@@ -1379,6 +1570,8 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         statusDetail: !intended ? 'disabled' : autoRecovering ? 'auto_reconnecting' : isRecording ? 'recording_ok' : 'enabled_but_idle',
         pid: null,
         currentOutputPattern: latestRecording?.filePath ?? null,
+        writeStalled: writeProgress.stalled,
+        writeProgress,
       };
     }
 
@@ -1396,6 +1589,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       statusDetail: processAlive ? 'recording_ok_local_process' : 'local_process_dead',
       pid: state.pid,
       currentOutputPattern: state.outputPattern,
+      // ADITIVO: processo VIVO que parou de escrever bytes. Deliberadamente fora de
+      // `stale` — quem decide reiniciar é o health-check (com cooldown e grace),
+      // e mudar `stale` aqui alteraria o comportamento de quem já consome o status.
+      writeStalled: writeProgress.stalled,
+      writeProgress,
     };
   }
 

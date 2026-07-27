@@ -128,6 +128,13 @@ export class CameraHealthCheckProcessor extends WorkerHost {
       configuredThresholdSeconds,
       defaultSegmentSeconds + Math.max(60, Math.round(defaultSegmentSeconds * 0.25)),
     );
+    // DETECÇÃO RÁPIDA (opt-in): o limiar acima só enxerga o ÚLTIMO SEGMENTO
+    // FECHADO — com segmento de 300s ele só acusa após ~375s, e com o job a cada
+    // 60s uma gravação parada podia ficar ~7min sem reinício. O progresso do
+    // ARQUIVO EM ESCRITA acusa em ~1 ciclo. Default DESLIGADO: ligar troca o
+    // comportamento de produção (reinício mais agressivo), então é decisão
+    // explícita do dono via HEALTH_RECORDING_WRITE_STALL_ENABLED=true.
+    const writeStallEnabled = String(process.env.HEALTH_RECORDING_WRITE_STALL_ENABLED ?? 'false') === 'true';
     const staleCooldownSeconds = Number(process.env.HEALTH_RECORDING_STALE_COOLDOWN_SECONDS ?? 300);
     const envAutoReconnectEnabled = String(process.env.HEALTH_RECORDING_STALE_AUTO_RECONNECT_ENABLED ?? 'true') !== 'false';
     const autoReconnectEnabled = envAutoReconnectEnabled;
@@ -157,7 +164,14 @@ export class CameraHealthCheckProcessor extends WorkerHost {
 
     for (const camera of cameras) {
       const latest = latestByCamera.get(camera.id);
-      const stale = !latest || latest < staleAt;
+      const segmentStale = !latest || latest < staleAt;
+      // O detector rápido NÃO substitui o limiar antigo: ele só antecipa o mesmo
+      // veredito. O limiar por último segmento continua valendo como rede (ele
+      // cobre também o caso "processo nem existe", em que não há arquivo a medir).
+      const writeProgress = writeStallEnabled && !segmentStale ? this.readRecordingWriteProgress(camera.id) : null;
+      const writeStalled = Boolean(writeProgress?.stalled);
+      const stale = segmentStale || writeStalled;
+      const detectedBy = segmentStale ? 'last_segment' : 'write_progress';
       const staleAgeSeconds = latest ? Math.max(0, Math.floor((Date.now() - latest.getTime()) / 1000)) : null;
       const lastStaleEvent = await this.prisma.cameraEvent.findFirst({
         where: {
@@ -180,6 +194,9 @@ export class CameraHealthCheckProcessor extends WorkerHost {
               staleThresholdSeconds,
               latestSegmentAt: latest ? latest.toISOString() : null,
               cameraStatus: camera.status,
+              detectedBy,
+              writeStalled,
+              writeProgress,
             },
           );
         }
@@ -195,10 +212,14 @@ export class CameraHealthCheckProcessor extends WorkerHost {
               staleAgeSeconds,
               latestSegmentAt: latest ? latest.toISOString() : null,
               cameraStatus: camera.status,
+              detectedBy,
+              writeStalled,
+              writeProgress,
               diagnosis: {
                 recordingEnabled: true,
                 lastSegmentMissing: !latest,
-                staleBeyondThreshold: true,
+                staleBeyondThreshold: segmentStale,
+                writeStalled,
               },
             },
           );
@@ -219,7 +240,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
               'HEALTH_RECORDING_RECONNECT_REQUESTED',
               'INFO',
               'Auto-reconexão de gravação iniciada pelo health-check.',
-              { autoReconnectCooldownSeconds, staleThresholdSeconds },
+              { autoReconnectCooldownSeconds, staleThresholdSeconds, detectedBy, writeStalled, writeProgress },
             );
             try {
               const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
@@ -269,6 +290,21 @@ export class CameraHealthCheckProcessor extends WorkerHost {
           cameraStatus: camera.status,
         },
       );
+    }
+  }
+
+  /**
+   * Consulta o progresso do arquivo em escrita no gerenciador de gravação.
+   * Blindado: qualquer falha (I/O, gerenciador em modo worker, versão antiga sem o
+   * método) devolve `null` e o health-check segue exatamente como antes.
+   */
+  private readRecordingWriteProgress(cameraId: string) {
+    try {
+      const manager = this.recordingManager as Partial<RecordingProcessManagerService>;
+      return manager.getRecordingWriteProgress?.(cameraId) ?? null;
+    } catch (error) {
+      this.logger.warn(`Progresso de gravação indisponível camera=${cameraId}: ${(error as Error).message}`);
+      return null;
     }
   }
 
