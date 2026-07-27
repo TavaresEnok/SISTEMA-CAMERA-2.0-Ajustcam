@@ -14,6 +14,18 @@ const REVIEWABLE_TYPES = [
   'FACE_UNKNOWN',
 ];
 
+// Teto da janela do casamento evento→gravação em lote. A query em lote (que matou o
+// N+1) busca os segmentos que cobrem [min(evento), max(evento)]; numa página que
+// abranja MUITOS dias (site quieto, filtro raro, offset profundo) isso carregaria
+// dezenas de milhares de linhas — pior que o N+1 que substituiu. Com o teto, uma
+// página assim é resolvida em BLOCOS por janela, mantendo o ganho no caso comum.
+const RECORDING_MATCH_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+
+// Recorte do badge de não-vistos. Sem janela, um usuário novo entra com a contagem
+// do histórico INTEIRO e o custo cresce sem teto. 30 dias cobre a utilidade real do
+// badge ("tem coisa nova pra ver?") com custo previsível.
+const UNSEEN_WINDOW_DAYS = Number(process.env.REVIEW_UNSEEN_WINDOW_DAYS ?? 30);
+
 type ReviewFilters = {
   cameraId?: string;
   label?: string;        // 'pessoa' | 'carro' | ...
@@ -86,12 +98,24 @@ export class ReviewService {
     // [startedAt, endedAt|∞) contém o instante do evento.
     const recordingsByCamera = new Map<string, Array<{ id: string; startedAt: Date; endedAt: Date | null }>>();
     if (rows.length) {
-      const times = rows.map((event) => event.occurredAt.getTime());
+      // Agrupa os instantes dos eventos em BLOCOS contíguos de no máximo
+      // RECORDING_MATCH_WINDOW_MS. Uma página densa (caso comum) vira 1 bloco =
+      // a mesma query única de antes; uma página esparsa vira N blocos estreitos
+      // em vez de UMA janela gigante varrendo semanas de segmentos.
+      const times = rows.map((event) => event.occurredAt.getTime()).sort((a, b) => a - b);
+      const windows: Array<{ min: number; max: number }> = [];
+      for (const t of times) {
+        const current = windows[windows.length - 1];
+        if (current && t - current.min <= RECORDING_MATCH_WINDOW_MS) current.max = t;
+        else windows.push({ min: t, max: t });
+      }
       const candidates = await this.prisma.recording.findMany({
         where: {
           cameraId: { in: [...new Set(rows.map((event) => event.cameraId))] },
-          startedAt: { lte: new Date(Math.max(...times)) },
-          OR: [{ endedAt: null }, { endedAt: { gte: new Date(Math.min(...times)) } }],
+          OR: windows.map((w) => ({
+            startedAt: { lte: new Date(w.max) },
+            OR: [{ endedAt: null }, { endedAt: { gte: new Date(w.min) } }],
+          })),
         },
         orderBy: { startedAt: 'desc' },
         select: { id: true, cameraId: true, startedAt: true, endedAt: true },
@@ -173,8 +197,17 @@ export class ReviewService {
   async unseenCount(user: AuthUser) {
     const accessible = await this.accessControl.getAccessibleCameraIds(user);
     if (!accessible.length) return { count: 0 };
+    // Recorte temporal: o badge responde "tem coisa nova?", não "quantos eventos já
+    // existiram". Sem a janela, um usuário novo entrava com a contagem do histórico
+    // inteiro e o custo crescia sem teto conforme o acervo.
+    const since = new Date(Date.now() - UNSEEN_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     const count = await this.prisma.cameraEvent.count({
-      where: { cameraId: { in: accessible }, type: { in: REVIEWABLE_TYPES }, userReviews: { none: { userId: user.id } } },
+      where: {
+        cameraId: { in: accessible },
+        type: { in: REVIEWABLE_TYPES },
+        occurredAt: { gte: since },
+        userReviews: { none: { userId: user.id } },
+      },
     });
     return { count };
   }

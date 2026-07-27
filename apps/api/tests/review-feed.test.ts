@@ -24,16 +24,23 @@ const events = [
   { id: 'E4', cameraId: 'cam-1', occurredAt: D(9, 59, 0), metadata: {}, camera: { name: 'Cam 1' }, type: 'MOTION_DETECTED', severity: 'INFO', reviewedAt: null }, // antes de qualquer gravação
 ];
 
+// Modela as DUAS formas de where que o serviço emite, para o fake continuar fiel:
+//  - findFirst (por evento): { startedAt: {lte}, OR: [{endedAt:null},{endedAt:{gte}}] }
+//  - findMany em lote: { OR: [ <mesma forma, uma por JANELA> ] }
+function matchesRange(r: any, range: any) {
+  const lte = range.startedAt?.lte ? new Date(range.startedAt.lte).getTime() : Infinity;
+  const gteRaw = range.OR?.find((o: any) => o.endedAt?.gte)?.endedAt?.gte;
+  const gte = gteRaw ? new Date(gteRaw).getTime() : null;
+  return r.startedAt.getTime() <= lte
+    && (r.endedAt == null || (gte == null ? true : r.endedAt.getTime() >= gte));
+}
+
 function filterRecs(where: any) {
   const camMatch = (r: any) => (where.cameraId?.in ? where.cameraId.in.includes(r.cameraId) : r.cameraId === where.cameraId);
-  const lte = where.startedAt?.lte ? new Date(where.startedAt.lte).getTime() : Infinity;
-  const gteRaw = where.OR?.find((o: any) => o.endedAt?.gte)?.endedAt?.gte;
-  const gte = gteRaw ? new Date(gteRaw).getTime() : null;
+  // Lote por janelas: o OR de topo carrega os intervalos (cada um com seu startedAt).
+  const windows = Array.isArray(where.OR) && where.OR.some((o: any) => o.startedAt) ? where.OR : [where];
   return recordingsDb
-    .filter((r) =>
-      camMatch(r) &&
-      r.startedAt.getTime() <= lte &&
-      (r.endedAt == null || (gte == null ? true : r.endedAt.getTime() >= gte)))
+    .filter((r) => camMatch(r) && windows.some((w: any) => matchesRange(r, w)))
     .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 }
 
