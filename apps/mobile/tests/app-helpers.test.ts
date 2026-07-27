@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { buildOperationalMessages } from '../src/utils/operational';
 import { shiftDateKey, localDateKey } from '../src/utils/format';
 import { cameraPosterUrl, recordingThumbnailUrl, clipDownloadUrl } from '../src/utils/media-endpoints';
+import { reviewFeedPath } from '../src/utils/review';
 import type { Camera } from '../src/types';
 
 function assert(condition: unknown, message: string) {
@@ -61,4 +62,14 @@ test('media URLs: base sem barra final e cache-buster default numérico', () => 
   const auto = cameraPosterUrl('https://api.local', 'c', 't');
   const version = auto.split('&v=')[1];
   assert(/^\d+$/.test(version), `cache-buster default deve ser numérico (got ${version})`);
+});
+
+// Paginação da Revisão: sem offset, a tela só alcançava os primeiros `limit`
+// eventos — com 500 não revisados, os demais eram inatingíveis.
+test('reviewFeedPath: offset entra na query e é omitido na primeira página', () => {
+  assert(!reviewFeedPath({}).includes('offset='), 'primeira página não deve mandar offset');
+  assert(reviewFeedPath({ offset: 48 }).includes('offset=48'), 'offset deve ir na query');
+  assert(!reviewFeedPath({ offset: 0 }).includes('offset='), 'offset 0 é a primeira página');
+  assert(!reviewFeedPath({ offset: -5 }).includes('offset='), 'offset negativo é ignorado');
+  assert(reviewFeedPath({ offset: 10.7 }).includes('offset=10'), 'offset fracionário é truncado');
 });

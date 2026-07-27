@@ -36,6 +36,9 @@ export type ReviewFilters = {
   onlyConfirmed?: boolean;
   unseenOnly?: boolean;
   limit?: number;
+  /** Deslocamento da página (paginação). Sem ele, a tela só alcançava os primeiros
+   *  `limit` eventos — com 500 não revisados, os demais eram inatingíveis. */
+  offset?: number;
 };
 
 export const REVIEW_LABEL_OPTIONS: Array<{ key: ReviewLabelFilter; label: string }> = [
@@ -82,6 +85,8 @@ export function reviewFeedPath(filters: ReviewFilters = {}): string {
   const params: string[] = [];
   const limit = Number.isFinite(filters.limit) && (filters.limit as number) > 0 ? Math.floor(filters.limit as number) : DEFAULT_LIMIT;
   params.push(`limit=${encodeURIComponent(String(limit))}`);
+  const offset = Number.isFinite(filters.offset) && (filters.offset as number) > 0 ? Math.floor(filters.offset as number) : 0;
+  if (offset > 0) params.push(`offset=${encodeURIComponent(String(offset))}`);
   if (filters.cameraId) params.push(`cameraId=${encodeURIComponent(filters.cameraId)}`);
   if (filters.label && filters.label !== 'all') params.push(`label=${encodeURIComponent(filters.label)}`);
   if (filters.onlyConfirmed) params.push('onlyConfirmed=true');

@@ -39,6 +39,10 @@ interface ReviewScreenProps {
   reviewPlayback: ReviewPlayback | null;
   onChangeFilters: (next: ReviewFilters) => void;
   onRefresh: () => void;
+  /** Carrega a próxima página (paginação). Sem isto, os eventos além do primeiro
+   *  lote eram inatingíveis: a lista não tinha onEndReached nem offset. */
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
   onOpenItem: (item: ReviewItem) => void;
   onCloseReviewPlayback: () => void;
   onMarkSeen: (item: ReviewItem, seen: boolean) => void;
@@ -67,7 +71,7 @@ function EventThumb({ apiUrl, token, item, onError }: { apiUrl: string; token: s
 }
 
 export function ReviewScreen({
-  items, total, unseenCount, loading, refreshing, error, filters, cameras, apiUrl, token, canPlayback,
+  items, total, unseenCount, loading, refreshing, loadingMore, onLoadMore, error, filters, cameras, apiUrl, token, canPlayback,
   reviewPlayback, onChangeFilters, onRefresh, onOpenItem, onCloseReviewPlayback, onMarkSeen,
 }: ReviewScreenProps) {
   const { theme } = useTheme();
@@ -186,6 +190,12 @@ export function ReviewScreen({
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={header}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />}
+        onEndReachedThreshold={0.4}
+        onEndReached={() => {
+          // Só pede mais se ainda há o que buscar e não há carga em voo (senão o
+          // FlatList dispara em rajada durante a rolagem).
+          if (onLoadMore && !loadingMore && !loading && !refreshing && items.length < total) onLoadMore();
+        }}
         renderItem={({ item }) => {
           const confidence = formatConfidence(item);
           const failed = thumbFailed[item.id];
@@ -253,7 +263,11 @@ export function ReviewScreen({
             <Text style={[styles.emptyHint, { color: theme.textMuted }]}>Ajuste os filtros ou aguarde novas detecções.</Text>
           </View>
         ) : null}
-        ListFooterComponent={<View style={{ height: 14 }} />}
+        ListFooterComponent={loadingMore ? (
+          <View style={styles.footerLoading}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        ) : <View style={{ height: 14 }} />}
       />
 
       <Modal visible={pickerOpen} transparent animationType="slide" onRequestClose={() => setPickerOpen(false)}>
@@ -337,6 +351,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 27, fontWeight: '800', letterSpacing: -0.5 },
   subtitle: { fontSize: 12.5, fontWeight: '600', marginTop: 3 },
   refreshBtn: { width: 40, height: 40, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
+  footerLoading: { paddingVertical: 20, alignItems: 'center' },
   selector: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, paddingVertical: 12, paddingHorizontal: 15 },
   selectorLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
   selectorText: { fontSize: 14, fontWeight: '700', flex: 1 },

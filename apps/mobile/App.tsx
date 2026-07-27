@@ -119,6 +119,7 @@ function AppInner() {
   // Revisão (item 2.7): fila de eventos + reprodução no instante em modal próprio.
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
   const [reviewTotal, setReviewTotal] = useState(0);
+  const [reviewLoadingMore, setReviewLoadingMore] = useState(false);
   const [reviewUnseenCount, setReviewUnseenCount] = useState(0);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewRefreshing, setReviewRefreshing] = useState(false);
@@ -1204,6 +1205,37 @@ function AppInner() {
     }
   };
 
+  /** Próxima página da Revisão: ANEXA ao que já está na tela (offset = itens
+   *  atuais). Sem isto só os primeiros `limit` eventos eram alcançáveis. */
+  const loadMoreReview = async () => {
+    if (!session || !capabilities.playback) return;
+    if (reviewLoading || reviewRefreshing || reviewLoadingMore) return;
+    if (reviewItems.length >= reviewTotal) return;
+    const token = session.token;
+    const generation = reviewRequestRef.current; // não invalida a página em curso
+    setReviewLoadingMore(true);
+    try {
+      const data = await request<ReviewFeedResponse>(
+        session.apiUrl,
+        reviewFeedPath({ ...reviewFilters, offset: reviewItems.length }),
+        token,
+      );
+      // Descarta se a sessão mudou ou se um refresh/filtro reiniciou a lista.
+      if (sessionTokenRef.current !== token || reviewRequestRef.current !== generation) return;
+      const next = Array.isArray(data.items) ? data.items : [];
+      setReviewItems((current) => {
+        const known = new Set(current.map((it) => it.id));
+        return [...current, ...next.filter((it) => !known.has(it.id))];
+      });
+      if (Number.isFinite(data.total)) setReviewTotal(Number(data.total));
+    } catch {
+      // Falha ao paginar não derruba o que já está na tela — o usuário pode rolar
+      // de novo para tentar. Erro de página inteira segue sendo o do loadReview.
+    } finally {
+      setReviewLoadingMore(false);
+    }
+  };
+
   const loadReviewUnseen = async () => {
     if (!session || !capabilities.playback) { setReviewUnseenCount(0); return; }
     const token = session.token;
@@ -1677,6 +1709,8 @@ function AppInner() {
             reviewPlayback={reviewPlayback}
             onChangeFilters={changeReviewFilters}
             onRefresh={() => { void loadReview(reviewFilters, 'refresh'); void loadReviewUnseen(); }}
+            loadingMore={reviewLoadingMore}
+            onLoadMore={() => { void loadMoreReview(); }}
             onOpenItem={(item) => { void openReviewItem(item); }}
             onCloseReviewPlayback={closeReviewPlayback}
             onMarkSeen={(item, seen) => { void markReviewSeen(item, seen); }}
