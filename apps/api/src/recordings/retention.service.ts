@@ -22,7 +22,49 @@ type CleanupResult = {
   eventsDeleted: number;
   orphanThumbnailsDeleted: number;
   orphanCompatibleFilesDeleted: number;
+  // Campos da retenção em dois níveis: só aparecem quando a feature está ATIVA,
+  // para que o resultado (e o JSON que vai ao log) continue idêntico ao atual
+  // enquanto a flag estiver desligada.
+  recordingsWouldDelete?: number;
+  wouldFreeBytes?: number;
+  motionRetained?: number;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retenção em DOIS NÍVEIS — ideia derivada do Frigate (MIT), Copyright (c)
+// Frigate, Inc. (`frigate/record/cleanup.py::expire_existing_camera_recordings`
+// mantém dois cortes por câmera, `continuous_expire_date` e `motion_expire_date`,
+// e só expira cedo o segmento cujo `motion == 0`). Nenhuma linha de código foi
+// copiada; a regra foi reescrita e ENDURECIDA para VMS com valor probatório.
+//
+// DIFERENÇA DELIBERADA DO DRAC: o Frigate trata ausência de sinal como zero.
+// Aqui, `motionScore == -1` significa DESCONHECIDO (backfill, IA desligada, erro
+// ao contar) e entra em QUARENTENA: é tratado como se TIVESSE movimento e nunca
+// expira no corte curto. Apagar de menos custa disco; apagar de mais é
+// irreversível e pode destruir prova.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Atividade desconhecida: quarentena, nunca expira no corte curto. */
+export const MOTION_SCORE_UNKNOWN = -1;
+
+export type TwoTierPolicy = {
+  /** Feature inteira; desligada por padrão. */
+  enabled: boolean;
+  /** Quando true, apenas CONTA o que apagaria. Padrão true mesmo com a flag on. */
+  dryRun: boolean;
+  /** Corte curto — "N dias de tudo". 0 = herda `Camera.retentionDays`. */
+  allDays: number;
+  /** Corte longo — "M dias do que teve movimento". 0 = herda `Camera.retentionDays`. */
+  motionDays: number;
+};
+
+export type RetentionWindow = { allDays: number; motionDays: number };
+
+function positiveDays(raw: string | undefined): number {
+  const value = Number(raw ?? 0);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
 
 @Injectable()
 export class RetentionService implements OnModuleInit, OnModuleDestroy {
@@ -121,6 +163,59 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     return { recordingIds, clipIds, eventIds };
   }
 
+  /**
+   * Lê a política do ambiente. Desligada por padrão e, mesmo ligada, em DRY-RUN
+   * até alguém escrever `RETENTION_TWO_TIER_DRY_RUN=false` — ninguém liga isso
+   * no escuro. Qualquer valor inválido cai no lado seguro (desligado/herdado).
+   */
+  private readTwoTierPolicy(): TwoTierPolicy {
+    return {
+      enabled: String(process.env.RETENTION_TWO_TIER_ENABLED ?? 'false') === 'true',
+      dryRun: String(process.env.RETENTION_TWO_TIER_DRY_RUN ?? 'true') !== 'false',
+      allDays: positiveDays(process.env.RETENTION_ALL_DAYS),
+      motionDays: positiveDays(process.env.RETENTION_MOTION_DAYS),
+    };
+  }
+
+  /**
+   * Os dois cortes efetivos de UMA câmera. Com a flag desligada os dois cortes
+   * colapsam no corte histórico (`Camera.retentionDays`), o que torna a regra
+   * nova byte a byte equivalente à antiga.
+   */
+  private resolveRetentionWindow(baseDays: number, policy: TwoTierPolicy): RetentionWindow {
+    if (!policy.enabled) return { allDays: baseDays, motionDays: baseDays };
+    const allDays = policy.allDays > 0 ? policy.allDays : baseDays;
+    const motionDays = policy.motionDays > 0 ? policy.motionDays : baseDays;
+    // INVARIANTE: o corte de movimento nunca fica ABAIXO do corte de tudo, senão
+    // uma gravação COM movimento morreria antes de uma sem movimento.
+    return { allDays, motionDays: Math.max(allDays, motionDays) };
+  }
+
+  /**
+   * Normaliza `Recording.motionScore`. Campo ausente (banco/cliente anterior à
+   * migração), nulo, negativo ou não-inteiro ⇒ DESCONHECIDO.
+   */
+  private readMotionScore(recording: unknown): number {
+    const raw = (recording as { motionScore?: unknown } | null)?.motionScore;
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) return MOTION_SCORE_UNKNOWN;
+    return raw;
+  }
+
+  /**
+   * Veredito por gravação. A comparação é estritamente `>` para reproduzir a
+   * fronteira histórica (`startedAt < now - dias`).
+   */
+  private isExpiredByAge(startedAt: Date, motionScore: number, now: number, window: RetentionWindow): boolean {
+    const ageMs = now - startedAt.getTime();
+    // Corte longo: passou daqui, expira independente da atividade.
+    if (ageMs > window.motionDays * 86_400_000) return true;
+    // Dentro do corte curto: intocável.
+    if (ageMs <= window.allDays * 86_400_000) return false;
+    // Entre os dois cortes só morre o que SABEMOS ter ficado vazio. -1 (e
+    // qualquer valor > 0) fica em quarentena até o corte longo.
+    return motionScore === 0;
+  }
+
   private derivedThumbnailPath(filePath: string) {
     const extension = extname(filePath);
     return `${extension ? filePath.slice(0, -extension.length) : filePath}.thumb.jpg`;
@@ -191,6 +286,21 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const now = Date.now();
     this.logger.log(`Iniciando retenção (${source}, global=${globalDays} dias, holds=${protection.recordingIds.size}).`);
 
+    const policy = this.readTwoTierPolicy();
+    if (policy.enabled) {
+      result.recordingsWouldDelete = 0;
+      result.wouldFreeBytes = 0;
+      result.motionRetained = 0;
+      this.logger.log(
+        `Retenção em dois níveis ATIVA: tudo=${policy.allDays || 'herdado'} dia(s), movimento=${policy.motionDays || 'herdado'} dia(s).`,
+      );
+      if (policy.dryRun) {
+        this.logger.warn(
+          'Retenção em dois níveis em DRY-RUN: nenhuma gravação será apagada por idade nesta passagem (o guardião de disco continua ativo).',
+        );
+      }
+    }
+
     // Clips vêm primeiro: excluir a gravação causaria cascade no banco e deixaria
     // o arquivo exportado órfão no disco.
     const clips = await this.prisma.exportedClip.findMany({
@@ -214,8 +324,25 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       orderBy: { startedAt: 'asc' },
     });
     for (const recording of recordings) {
-      const retentionDays = recording.camera?.retentionDays ?? globalDays;
-      if (recording.startedAt.getTime() >= now - retentionDays * 86_400_000) continue;
+      const baseDays = recording.camera?.retentionDays ?? globalDays;
+      const cutoffs = this.resolveRetentionWindow(baseDays, policy);
+      const motionScore = this.readMotionScore(recording);
+      if (!this.isExpiredByAge(recording.startedAt, motionScore, now, cutoffs)) {
+        // Sobreviveu ao corte curto por ter (ou poder ter) movimento: é o ganho
+        // que a feature vende, então vira número no relatório.
+        if (policy.enabled && now - recording.startedAt.getTime() > cutoffs.allDays * 86_400_000) {
+          result.motionRetained = (result.motionRetained ?? 0) + 1;
+        }
+        continue;
+      }
+      if (policy.enabled && policy.dryRun) {
+        // Proteções continuam acima de tudo, inclusive na simulação: o que tem
+        // hold não entra na conta do que "seria apagado".
+        if (protection.recordingIds.has(recording.id)) continue;
+        result.recordingsWouldDelete = (result.recordingsWouldDelete ?? 0) + 1;
+        result.wouldFreeBytes = (result.wouldFreeBytes ?? 0) + Number(recording.sizeBytes ?? 0);
+        continue;
+      }
       try {
         if (await this.deleteRecording(recording, protection)) result.recordingsDeleted += 1;
       } catch (error) {

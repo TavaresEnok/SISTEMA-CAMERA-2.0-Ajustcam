@@ -168,6 +168,11 @@ model Recording {
   filePath        String
   durationSeconds Int?
   sizeBytes       BigInt?
+  // Retenção em dois níveis. Quantidade de eventos de movimento cobertos pelo
+  // segmento: -1 = DESCONHECIDO (backfill, IA desligada, erro ao contar),
+  // 0 = sem movimento, > 0 = quantidade de eventos. O DESCONHECIDO fica em
+  // QUARENTENA: nunca expira no corte curto (ver retention.service.ts).
+  motionScore     Int             @default(-1)
   createdAt       DateTime        @default(now())
 
   @@unique([filePath])
