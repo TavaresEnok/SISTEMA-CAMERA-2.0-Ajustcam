@@ -335,8 +335,10 @@ test('D2 pré-evento: ao gravar por movimento o ring é DESLIGADO — mas só DE
 
   assert.deepEqual(
     events.filter((e) => e !== 'post_roll_agendado'),
-    ['promote', 'rec_start', 'ring_stop'],
-    'ordem obrigatória: promove o pré-roll → sobe a gravação → só então derruba o ring',
+    // O SEGUNDO 'promote' É a correção — ver o bloco D5 no fim do arquivo.
+    // A invariante que este teste protege é a da asserção seguinte, intacta.
+    ['promote', 'rec_start', 'promote', 'ring_stop'],
+    'ordem: promove o pré-roll → sobe a gravação → recolhe o que o ring gravou nesse meio → derruba o ring',
   );
   assert.ok(
     events.indexOf('ring_stop') > events.indexOf('rec_start'),
@@ -550,4 +552,88 @@ test('D4 órfão: a quarentena tem TETO — o mesmo arquivo não gasta ffprobe p
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── O RING NÃO PODE APAGAR O COMEÇO DO FATO ─────────────────────────────────
+//
+// A ordem em `handleMotionDetected` é: promove o pré-roll → sobe a gravação →
+// derruba o ring. `promotePreRoll` só alcança segmentos com mtime ≤ gatilho+2s.
+//
+// Mas `start()` NÃO é instantâneo: faz probe RTSP (timeout de 12s), write-probe,
+// statfs e queries. O ring CONTINUA gravando esse tempo todo — e esses segundos
+// são o COMEÇO DO EVENTO. Logo depois, `stopPreBuffer` fazia `unlink`
+// INCONDICIONAL de todo .ts da pasta.
+//
+// Ou seja: o material do fato era destruído DEPOIS de já existir em disco. Com
+// uma câmera lenta o buraco chegava a ~14s. O comentário da ordem ("nunca pode
+// existir instante sem cobertura") estava certo sobre a ordem e cego sobre o
+// conteúdo — a cobertura era apagada logo após existir.
+//
+// A correção é uma SEGUNDA promoção, com corte em `Date.now()`, entre o start e
+// o stop. `promotePreRoll` MOVE os arquivos, então ela não duplica nada.
+
+function preRollSpy(preEventSeconds: number, opts?: { comRing?: boolean }) {
+  const cortes: number[] = [];
+  const ordem: string[] = [];
+  const mgr = motionManager(preEventSeconds);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  if (opts?.comRing !== false) mgr.preBufferProcs.set('cam-1', { process: { kill() {} }, dir: '/tmp' });
+  mgr.promotePreRoll = async (_id: string, ate: number) => { cortes.push(ate); ordem.push('promote'); };
+  mgr.stopPreBuffer = async () => { ordem.push('stop_ring'); };
+  mgr.startPreBuffer = async () => { ordem.push('start_ring'); };
+  mgr.scheduleMotionStop = () => undefined;
+  mgr.getStatus = async () => ({ isRecording: false });
+  mgr.start = async () => { ordem.push('rec_start'); return { status: 'recording_started' }; };
+  mgr.prisma = {
+    camera: {
+      findUnique: async () => ({ id: 'cam-1', name: 'Portaria', recordingMode: 'motion', recordingEnabled: true, enabled: true }),
+    },
+  };
+  mgr.camerasService = { registerEvent: async () => undefined };
+  return { mgr, cortes, ordem };
+}
+
+test('D5 pré-evento: há uma SEGUNDA promoção, depois do start e antes de derrubar o ring', async () => {
+  const { mgr, ordem } = preRollSpy(10);
+
+  await mgr.handleMotionDetected('cam-1');
+
+  assert.deepEqual(
+    ordem,
+    ['promote', 'rec_start', 'promote', 'stop_ring'],
+    'sem a 2ª promoção, o stop_ring apaga o que o ring gravou enquanto a gravação subia',
+  );
+});
+
+test('D5 pré-evento: o corte da 2ª promoção é POSTERIOR ao do gatilho — é isso que fecha o buraco', async () => {
+  const { mgr, cortes } = preRollSpy(10);
+  const antes = Date.now();
+
+  await mgr.handleMotionDetected('cam-1');
+
+  assert.equal(cortes.length, 2);
+  assert.ok(
+    cortes[1] >= cortes[0],
+    `a 2ª promoção precisa alcançar mais tarde que a 1ª (${cortes[0]} → ${cortes[1]}), senão não recolhe nada de novo`,
+  );
+  assert.ok(cortes[1] >= antes, 'o 2º corte é "agora", já com a gravação de pé');
+});
+
+test('D5 pré-evento: com o recurso DESLIGADO nada de promoção (produção intocada)', async () => {
+  const { mgr, ordem } = preRollSpy(0, { comRing: false });
+
+  await mgr.handleMotionDetected('cam-1');
+
+  assert.deepEqual(
+    ordem, ['rec_start', 'stop_ring'],
+    'MOTION_PRE_EVENT_SECONDS=0 é o padrão de produção: nenhuma promoção pode aparecer',
+  );
+});
+
+test('D5 pré-evento: sem ring de pé não tenta promover (nada a recolher)', async () => {
+  const { mgr, ordem } = preRollSpy(10, { comRing: false });
+
+  await mgr.handleMotionDetected('cam-1');
+
+  assert.equal(ordem.filter((e) => e === 'promote').length, 0, 'promover sem ring seria trabalho e log à toa');
 });

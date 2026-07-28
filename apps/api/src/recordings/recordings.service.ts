@@ -61,8 +61,19 @@ import {
   type HwaccelPreset,
 } from '../camera-stream/helpers/hwaccel-presets.helper';
 import archiver from 'archiver';
+import {
+  recoverPendingFileDeletions,
+  stageFileDeletion,
+  type StagedFileDeletion,
+} from './helpers/transactional-file-delete.helper';
 
 const execFileAsync = promisify(execFile);
+
+function requireStagedDeletion(value: StagedFileDeletion | null): StagedFileDeletion {
+  if (!value) throw new Error('Exclusão física não foi preparada dentro da transação.');
+  return value;
+}
+
 type RecordingHealthCacheEntry = {
   checkedAt: string;
   diagnostics?: Record<string, unknown>;
@@ -95,7 +106,33 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(RECORDING_EXPORT_QUEUE) private readonly rangeExportQueue: Queue,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    try {
+      const recovery = await recoverPendingFileDeletions(recordingsRoot, async (guard) => {
+        if (guard.model === 'recording') {
+          return Boolean(await this.prisma.recording.findUnique({
+            where: { id: guard.id },
+            select: { id: true },
+          }));
+        }
+        return Boolean(await this.prisma.exportedClip.findUnique({
+          where: { id: guard.id },
+          select: { id: true },
+        }));
+      });
+      if (recovery.scanned > 0) {
+        this.logger.log(
+          `Recuperação do journal de exclusão: scanned=${recovery.scanned} restored=${recovery.restored} cleaned=${recovery.cleaned} failed=${recovery.failed}`,
+        );
+      }
+    } catch (error) {
+      // Falhar fechado: não remove nada sem conseguir consultar o banco.
+      this.logger.error(
+        `Falha ao reconciliar exclusões pendentes: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     // Varredura periódica de INTEGRIDADE: hoje só descobrimos que uma gravação
     // está corrompida quando alguém tenta reproduzi-la — normalmente no pior
     // momento possível (precisando da prova). Aqui uma amostra pequena é
@@ -812,9 +849,36 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
             result.probeFailed += 1;
             continue;
           }
+          // MARCADOR DE CLAMP: `registerSegment` detecta salto de PTS (a câmera
+          // reinicia o relógio RTSP no meio do segmento), clampa a duração e
+          // deixa `<arquivo>.duration-clamped.json` ao lado. O marcador existe
+          // justamente para dizer "aqui o ffprobe MENTE".
+          //
+          // Sem esta checagem, este job (cron da meia-noite, 2.000 gravações
+          // mais recentes) re-executava o mesmo probe, obtinha o mesmo valor
+          // absurdo e desfazia o clamp: a correção durava no máximo 24h. Com
+          // durationSeconds=25200 num segmento de 300s, o VOD emite
+          // `#EXTINF:25200` e marca os ~84 segmentos seguintes como
+          // sobreposição — o player trava em cima de gravação ÍNTEGRA. O mesmo
+          // valor contamina os `outpoint` do concat da exportação para perícia.
+          //
+          // O TAMANHO continua sendo reconciliado: o byte no disco não mente,
+          // quem mentiu foi o timestamp.
+          const clamped = existsSync(`${filePath}.duration-clamped.json`);
+          const currentSize = Number(recording.sizeBytes ?? 0n);
+
+          if (clamped) {
+            if (currentSize === metadata.sizeBytes) continue;
+            await this.prisma.recording.update({
+              where: { id: recording.id },
+              data: { sizeBytes: BigInt(metadata.sizeBytes) },
+            });
+            result.updated += 1;
+            continue;
+          }
+
           const durationSeconds = Math.max(1, Math.round(metadata.durationSecondsExact));
           const endedAt = new Date(recording.startedAt.getTime() + metadata.durationSecondsExact * 1000);
-          const currentSize = Number(recording.sizeBytes ?? 0n);
           const endedDiffMs = Math.abs((recording.endedAt?.getTime() ?? 0) - endedAt.getTime());
           if (currentSize === metadata.sizeBytes && recording.durationSeconds === durationSeconds && endedDiffMs < 1_000) continue;
           await this.prisma.recording.update({
@@ -1620,7 +1684,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     // Defesa em profundidade (mesmo princípio de createThumbnailTokens): quem
     // EMITE token de conteúdo confere o gate por conta própria — a playlist gera
     // N tokens de uma vez, então não pode depender de o chamador ter conferido.
-    await this.accessControlService.assertCanViewCamera(user, cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
 
     const maxSegments = Math.max(1, Math.min(2_000, Number(params.maxSegments ?? process.env.VOD_PLAYLIST_MAX_SEGMENTS ?? 720)));
     const lookbackMinutes = envNumber('VOD_PLAYLIST_LOOKBACK_MINUTES', 60, { min: 1, max: 360 });
@@ -2746,17 +2810,12 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, cameraId: true, camera: { select: { isPrivate: true } } },
     });
 
-    const isPrivileged = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
     const tokenMap: Record<string, string> = {};
     for (const rec of recordings) {
-      // Gate único do conteúdo (invariante 1.2.i): o atalho de admin/super-admin
-      // vale SÓ para câmera NÃO-privada. A câmera privada respeita canViewCamera
-      // (admin GERENCIA mas NÃO vê) — nunca emitir token de conteúdo privado a quem
-      // não pode ver, mesmo que todo consumidor de token hoje re-cheque o gate.
-      const canView = isPrivileged && !rec.camera?.isPrivate
-        ? true
-        : await this.accessControlService.canViewCamera(user, rec.cameraId);
-      if (!canView) continue;
+      // Emissão de token é acesso ao histórico: respeita tanto privacidade
+      // quanto RESTRICTED, mesmo que o consumidor revalide novamente.
+      const canPlayback = await this.accessControlService.canPlaybackCamera(user, rec.cameraId);
+      if (!canPlayback) continue;
       const token = await this.authService.createPlaybackToken(user.id, rec.id);
       tokenMap[rec.id] = token.playToken;
     }
@@ -2767,47 +2826,80 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   async deleteAllRecordings() {
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const [recordings, clips] = await Promise.all([
-      this.prisma.recording.findMany({ select: { id: true, filePath: true, sizeBytes: true } }),
+      this.prisma.recording.findMany({ select: { id: true, cameraId: true, filePath: true, sizeBytes: true } }),
       this.prisma.exportedClip.findMany({ select: { id: true, filePath: true, sizeBytes: true } }),
     ]);
 
-    let deletedFiles = 0;
-    let failedFiles = 0;
     let deletedBytes = BigInt(0);
-    const paths = [...recordings, ...clips].map((item) => ({ filePath: item.filePath, sizeBytes: item.sizeBytes }));
+    for (const item of [...recordings, ...clips]) {
+      deletedBytes += item.sizeBytes ?? BigInt(0);
+    }
+    const filePaths = [
+      ...clips.map((clip) => ensureFileUnderRoot(recordingsRoot, clip.filePath)),
+      ...recordings.flatMap((recording) => {
+        const fullPath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+        const extension = extname(fullPath);
+        const base = extension ? fullPath.slice(0, -extension.length) : fullPath;
+        return [
+          fullPath,
+          `${base}.thumb.jpg`,
+          buildTimelinePreviewPath(fullPath),
+          `${fullPath}.invalid.json`,
+          `${fullPath}.orphan-quarantine.json`,
+          join(recordingsRoot, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`),
+        ];
+      }),
+      ensureFileUnderRoot(recordingsRoot, '.playback-compatible'),
+      ensureFileUnderRoot(recordingsRoot, '.diagnostics-cache'),
+    ];
 
-    for (const item of paths) {
-      try {
-        const fullPath = ensureFileUnderRoot(recordingsRoot, item.filePath);
-        if (existsSync(fullPath)) {
-          rmSync(fullPath, { force: true });
-          deletedFiles += 1;
-          deletedBytes += item.sizeBytes ?? BigInt(0);
+    let staged: StagedFileDeletion | null = null;
+    let dbResult: { clipsDeleted: number; recordingsDeleted: number };
+    try {
+      dbResult = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(
+          "SELECT pg_advisory_xact_lock(hashtext('drac:recordings:file-delete'))",
+        );
+        staged = await stageFileDeletion(
+          recordingsRoot,
+          filePaths,
+          [
+            ...recordings.map((recording) => ({ model: 'recording' as const, id: recording.id })),
+            ...clips.map((clip) => ({ model: 'exportedClip' as const, id: clip.id })),
+          ],
+        );
+        const clipsDeleted = await tx.exportedClip.deleteMany({});
+        const recordingsDeleted = await tx.recording.deleteMany({});
+        return {
+          clipsDeleted: clipsDeleted.count,
+          recordingsDeleted: recordingsDeleted.count,
+        };
+      });
+    } catch (error) {
+      if (staged) {
+        try {
+          await requireStagedDeletion(staged).rollback();
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            'Falha no banco e na restauração dos arquivos de gravação.',
+          );
         }
-      } catch {
-        failedFiles += 1;
       }
+      throw error;
     }
-
-    for (const cacheDir of ['.playback-compatible', '.diagnostics-cache']) {
-      try {
-        const fullPath = ensureFileUnderRoot(recordingsRoot, cacheDir);
-        if (existsSync(fullPath)) rmSync(fullPath, { recursive: true, force: true });
-      } catch {
-        failedFiles += 1;
-      }
+    const committedStage = requireStagedDeletion(staged);
+    const cleanup = await committedStage.commit();
+    if (cleanup.cleanupDeferred) {
+      this.logger.warn('Limpeza física do delete-all ficou pendente no journal para o próximo boot.');
     }
-
-    const [clipsDeleted, recordingsDeleted] = await this.prisma.$transaction([
-      this.prisma.exportedClip.deleteMany({}),
-      this.prisma.recording.deleteMany({}),
-    ]);
 
     return {
-      recordingsDeleted: recordingsDeleted.count,
-      clipsDeleted: clipsDeleted.count,
-      filesDeleted: deletedFiles,
-      fileDeleteFailures: failedFiles,
+      recordingsDeleted: dbResult.recordingsDeleted,
+      clipsDeleted: dbResult.clipsDeleted,
+      filesDeleted: committedStage.movedFiles,
+      filesMissing: committedStage.missingFiles,
+      fileDeleteFailures: cleanup.cleanupDeferred ? 1 : 0,
       bytesDeleted: deletedBytes.toString(),
     };
   }

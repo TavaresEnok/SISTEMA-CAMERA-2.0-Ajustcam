@@ -704,6 +704,18 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         // travam em 2-4 sessões RTSP no total, e ainda faltam live e IA.
         // ORDEM É INVARIANTE: derruba o ring SÓ DEPOIS de a gravação estar de pé;
         // o inverso abriria uma janela sem NENHUMA cobertura.
+        //
+        // SEGUNDA PROMOÇÃO, e ela não é redundante: `start()` não é instantâneo
+        // (probe RTSP com timeout de 12s, write-probe, statfs, queries) e o ring
+        // CONTINUA gravando esse tempo todo. Esses segundos são o COMEÇO DO
+        // EVENTO. A primeira promoção só alcança até `gatilho + 2s`, e logo
+        // abaixo `stopPreBuffer` apaga INCONDICIONALMENTE o que sobrou — ou
+        // seja, o material do fato era destruído depois de já existir em disco.
+        // `promotePreRoll` MOVE os arquivos, então chamar de novo não duplica
+        // nada: só alcança o que nasceu enquanto a gravação subia.
+        if (this.preEventSeconds > 0 && this.preBufferProcs.has(cameraId)) {
+          await this.promotePreRoll(cameraId, Date.now()).catch(() => undefined);
+        }
         await this.stopPreBuffer(cameraId).catch(() => undefined);
         await this.camerasService.registerEvent(
           cameraId,
