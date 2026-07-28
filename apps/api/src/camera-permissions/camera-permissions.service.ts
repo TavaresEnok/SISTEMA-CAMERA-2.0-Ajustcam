@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { AccessControlService } from '../access-control/access-control.service';
 import { AuthUser } from '../common/types/auth-user.type';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -119,14 +119,41 @@ export class CameraPermissionsService {
       });
     }
 
-    return this.prisma.cameraPermission.create({
-      data: dto,
-      include: {
-        user: { select: { id: true, name: true, email: true, role: true, isActive: true } },
-        camera: { select: { id: true, name: true, groupId: true } },
-        group: { select: { id: true, name: true } },
-      },
-    });
+    try {
+      return await this.prisma.cameraPermission.create({
+        data: dto,
+        include: {
+          user: { select: { id: true, name: true, email: true, role: true, isActive: true } },
+          camera: { select: { id: true, name: true, groupId: true } },
+          group: { select: { id: true, name: true } },
+        },
+      });
+    } catch (error) {
+      // A constraint parcial no PostgreSQL é a autoridade contra dois grants
+      // concorrentes. O perdedor da corrida transforma a operação em update
+      // idempotente, em vez de devolver 500 ou deixar autorização duplicada.
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+        throw error;
+      }
+      const winner = await this.prisma.cameraPermission.findFirst({
+        where: {
+          userId: dto.userId,
+          cameraId: dto.cameraId ?? null,
+          groupId: dto.groupId ?? null,
+        },
+        select: { id: true },
+      });
+      if (!winner) throw error;
+      return this.prisma.cameraPermission.update({
+        where: { id: winner.id },
+        data: { level: dto.level },
+        include: {
+          user: { select: { id: true, name: true, email: true, role: true, isActive: true } },
+          camera: { select: { id: true, name: true, groupId: true } },
+          group: { select: { id: true, name: true } },
+        },
+      });
+    }
   }
 
   async update(actor: AuthUser, id: string, dto: UpdateCameraPermissionDto) {

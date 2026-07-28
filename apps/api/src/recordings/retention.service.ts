@@ -9,6 +9,11 @@ import { ensureFileUnderRoot } from './helpers/safe-file.helper';
 import { envBool, envNumber } from '../common/config/env-number.helper';
 import { buildTimelinePreviewPath } from './helpers/timeline-preview.helper';
 import { buildCameraRootDir, parseCameraIdFromDirName } from './helpers/recording-path.helper';
+import {
+  type DeletionGuard,
+  stageFileDeletion,
+  type StagedFileDeletion,
+} from './helpers/transactional-file-delete.helper';
 
 type ProtectionSets = {
   recordingIds: Set<string>;
@@ -103,6 +108,11 @@ type RecordingExpiryDelegate = {
 };
 
 const DAY_MS = 86_400_000;
+
+function requireStagedDeletion(value: StagedFileDeletion | null): StagedFileDeletion {
+  if (!value) throw new Error('Exclusão física não foi preparada dentro da transação.');
+  return value;
+}
 
 @Injectable()
 export class RetentionService implements OnModuleInit, OnModuleDestroy {
@@ -384,11 +394,52 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async deleteRowsWithFiles<T>(
+    root: string,
+    paths: string[],
+    guards: DeletionGuard[],
+    deleteRows: (tx: any) => Promise<T>,
+  ): Promise<T> {
+    let staged: StagedFileDeletion | null = null;
+    try {
+      const result = await this.prisma.$transaction(async (tx) => {
+        // Uma única exclusão DB↔FS por instalação. O lock também coordena duas
+        // instâncias da API apontando para o mesmo PostgreSQL/storage.
+        await tx.$queryRawUnsafe(
+          "SELECT pg_advisory_xact_lock(hashtext('drac:recordings:file-delete'))",
+        );
+        staged = await stageFileDeletion(root, paths, guards);
+        return deleteRows(tx);
+      });
+      const cleanup = await requireStagedDeletion(staged).commit();
+      if (cleanup.cleanupDeferred) {
+        this.logger.warn('Limpeza física confirmada ficou pendente no journal para o próximo boot.');
+      }
+      return result;
+    } catch (error) {
+      if (staged) {
+        try {
+          await requireStagedDeletion(staged).rollback();
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            'Falha no banco e na restauração dos arquivos de retenção.',
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
   private async deleteClip(clip: { id: string; filePath: string }) {
     const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const fullPath = ensureFileUnderRoot(root, clip.filePath);
-    this.removeFile(fullPath);
-    await this.prisma.exportedClip.delete({ where: { id: clip.id } });
+    await this.deleteRowsWithFiles(
+      root,
+      [fullPath],
+      [{ model: 'exportedClip', id: clip.id }],
+      (tx) => tx.exportedClip.delete({ where: { id: clip.id } }),
+    );
   }
 
   private async deleteRecording(
@@ -401,22 +452,31 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, filePath: true },
     });
     if (clips.some((clip) => protection.clipIds.has(clip.id))) return false;
-    for (const clip of clips) await this.deleteClip(clip);
-
     const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const fullPath = ensureFileUnderRoot(root, recording.filePath);
-    this.removeFile(fullPath);
-    this.removeFile(this.derivedThumbnailPath(fullPath));
-    // Sprite de scrubbing (2.9): mora ao lado do MP4 e DEVE morrer com ele — senão
-    // sobra derivado de conteúdo no disco após a retenção apagar a origem.
-    this.removeFile(buildTimelinePreviewPath(fullPath));
-    this.removeFile(`${fullPath}.invalid.json`);
-    // Marcador de quarentena da recuperação de órfãos. Nome próprio porque
-    // `.invalid.json` já é do processador de miniaturas — ver
-    // `segmentQuarantineMarkerPath`. Some com o vídeo, senão sobra sidecar órfão.
-    this.removeFile(`${fullPath}.orphan-quarantine.json`);
-    this.removeFile(join(root, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`));
-    await this.prisma.recording.delete({ where: { id: recording.id } });
+    const paths = [
+      ...clips.map((clip) => ensureFileUnderRoot(root, clip.filePath)),
+      fullPath,
+      this.derivedThumbnailPath(fullPath),
+      buildTimelinePreviewPath(fullPath),
+      `${fullPath}.invalid.json`,
+      `${fullPath}.orphan-quarantine.json`,
+      join(root, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`),
+    ];
+    await this.deleteRowsWithFiles(
+      root,
+      paths,
+      [
+        { model: 'recording', id: recording.id },
+        ...clips.map((clip) => ({ model: 'exportedClip' as const, id: clip.id })),
+      ],
+      async (tx) => {
+        if (clips.length) {
+          await tx.exportedClip.deleteMany({ where: { id: { in: clips.map((clip) => clip.id) } } });
+        }
+        await tx.recording.delete({ where: { id: recording.id } });
+      },
+    );
     return true;
   }
 

@@ -13,7 +13,7 @@ services:
 
   web:
     ports:
-      - "${DRAC_WEB_BIND:-127.0.0.1}:5173:80"
+      - "${DRAC_WEB_BIND:-127.0.0.1}:5173:8080"
 
   mediamtx:
     ports:

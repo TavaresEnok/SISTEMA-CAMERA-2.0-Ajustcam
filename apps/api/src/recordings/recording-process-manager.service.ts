@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { RecordingSource, type Camera } from '@prisma/client';
 import { type Queue } from 'bullmq';
-import { execFile, spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
+import { execFile, spawnSync, type ChildProcessByStdio } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { open, rename, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -25,6 +25,7 @@ import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { envNumber } from '../common/config/env-number.helper';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
+import { spawnWithSecretUrl } from '../common/process/secret-url-process.helper';
 // Registro de métricas por câmera. Importado como SINGLETON de módulo (e não por
 // DI) de propósito: instrumentar não pode exigir mexer no construtor deste
 // serviço crítico. Toda chamada é síncrona, trivial e envolvida em try/catch —
@@ -810,8 +811,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       '-segment_time', '2', '-reset_timestamps', '1', '-strftime', '1',
       join(dir, '%Y-%m-%d_%H-%M-%S.ts'),
     ];
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    proc.stderr.on('data', () => {});
+    const proc = spawnWithSecretUrl(
+      'ffmpeg',
+      args,
+      rtspUrl,
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    ) as ChildProcessByStdio<null, null, Readable>;
+    proc.stderr!.on('data', () => {});
     proc.on('close', () => {
       if (this.preBufferProcs.get(cameraId)?.process === proc) this.preBufferProcs.delete(cameraId);
     });
@@ -939,14 +945,14 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   private async probeSourceCodec(rtspUrl: string, transport: string): Promise<string | null> {
     return await new Promise((resolve) => {
-      const proc = spawn('ffprobe', [
+      const proc = spawnWithSecretUrl('ffprobe', [
         '-v', 'error',
         '-rtsp_transport', transport,
         '-i', rtspUrl,
         '-select_streams', 'v:0',
         '-show_entries', 'stream=codec_name',
         '-of', 'default=noprint_wrappers=1:nokey=1',
-      ]);
+      ], rtspUrl);
       let stdout = '';
       let settled = false;
       const finish = (codec: string | null) => {
@@ -960,7 +966,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         finish(null);
       }, 12000);
       timeout.unref();
-      proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+      proc.stdout!.on('data', (chunk) => { stdout += chunk.toString(); });
       proc.on('error', () => finish(null));
       proc.on('close', (code) => {
         const codec = stdout.trim().split('\n')[0]?.trim().toLowerCase() || null;
@@ -1933,7 +1939,12 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     // A GRAVAÇÃO é o caminho crítico: spawn DIRETO do ffmpeg, em prioridade
     // NORMAL. Quem cede a vez (nice) são os ffmpeg auxiliares do recordings.service.
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const proc = spawnWithSecretUrl(
+      'ffmpeg',
+      args,
+      rtspUrl,
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    ) as ChildProcessByStdio<null, null, Readable>;
     let state: RecordingProcessState | null = null;
     // Ring do stderr: teto rígido de linhas, despejado só se o processo MORRER
     // anormalmente. Em produção o nível DEBUG abaixo fica desligado — sem o ring

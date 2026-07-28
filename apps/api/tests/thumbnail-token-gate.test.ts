@@ -28,7 +28,7 @@ function makeService() {
   svc.accessControlService = {
     // Espelha a inversão da privada: só o dono (u-owner) vê a privada; a comum é
     // visível a quem chega aqui. Admin cai neste caminho SÓ para a privada.
-    canViewCamera: async (u: AuthUser, cameraId: string) =>
+    canPlaybackCamera: async (u: AuthUser, cameraId: string) =>
       cameraId === 'cam-private' ? u.id === 'u-owner' : true,
   };
   return svc as RecordingsService;

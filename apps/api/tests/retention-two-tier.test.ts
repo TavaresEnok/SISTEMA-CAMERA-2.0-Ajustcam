@@ -273,6 +273,10 @@ function buildHarness(seed: SeedRecording[], options: HarnessOptions = {}): Harn
       deleteMany: async () => ({ count: 0 }),
     },
   };
+  (prisma as any).$transaction = async (callback: (tx: any) => unknown) => callback({
+    ...prisma,
+    $queryRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
+  });
 
   const svc: any = Object.create(RetentionService.prototype);
   svc.logger = {

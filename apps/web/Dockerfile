@@ -31,7 +31,10 @@ COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
 
 # Add custom nginx config for SPA routing
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
+RUN chown -R nginx:nginx /var/cache/nginx /var/run /etc/nginx/conf.d
 
-EXPOSE 80
+USER nginx
+
+EXPOSE 8080
 
 CMD ["nginx", "-g", "daemon off;"]

@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -21,12 +21,12 @@ type RecordingRegistration struct {
 	SizeBytes       int64   `json:"sizeBytes"`
 }
 
-func startRecording(cam Camera, apiURL, secretToken string) {
+func startRecording(ctx context.Context, cam Camera, apiURL, secretToken string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[%s] CRASH RECUPERADO: %v", cam.Name, r)
 			mu.Lock()
-			delete(activeRecordings, cam.ID)
+			stopRecordingLocked(cam.ID)
 			mu.Unlock()
 		}
 	}()
@@ -37,7 +37,7 @@ func startRecording(cam Camera, apiURL, secretToken string) {
 
 	for {
 		currentCam := cam
-		if refreshed, err := fetchCameraByID(apiURL, cam.ID); err == nil && refreshed != nil {
+		if refreshed, err := fetchCameraByID(ctx, apiURL, secretToken, cam.ID); err == nil && refreshed != nil {
 			currentCam = *refreshed
 		}
 
@@ -54,7 +54,9 @@ func startRecording(cam Camera, apiURL, secretToken string) {
 		dirPath := filepath.Join(storageRoot, currentCam.ID, now.Format("2006/01/02"))
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			log.Printf("[%s] Erro ao criar diretório: %v", currentCam.Name, err)
-			time.Sleep(10 * time.Second)
+			if !waitForContext(ctx, 10*time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -71,9 +73,9 @@ func startRecording(cam Camera, apiURL, secretToken string) {
 			segmentSeconds = configured
 		}
 		mu.Unlock()
-		
+
 		fmt.Printf("[%s] Iniciando segmento: %s\n", currentCam.Name, fileName)
-		
+
 		rtspTransport := currentCam.PreferredRtspTransport
 		if rtspTransport == "" {
 			rtspTransport = "tcp"
@@ -143,15 +145,39 @@ func startRecording(cam Camera, apiURL, secretToken string) {
 			fileName,
 		)
 
-		cmd := exec.Command("ffmpeg", args...)
+		segmentCtx, cancelSegment := context.WithTimeout(
+			ctx,
+			time.Duration(segmentSeconds)*time.Second+30*time.Second,
+		)
+		cmd, cleanupSecretInput, err := secretURLCommand(
+			segmentCtx,
+			"ffmpeg",
+			args,
+			rtspURL,
+		)
+		if err != nil {
+			cancelSegment()
+			log.Printf("[%s] URL RTSP recusada pelo canal privado: %v", currentCam.Name, err)
+			if !waitForContext(ctx, 5*time.Second) {
+				return
+			}
+			continue
+		}
 
 		startTime := time.Now()
-		err := cmd.Run()
+		err = cmd.Run()
+		cleanupSecretInput()
+		cancelSegment()
 		endTime := time.Now()
 
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Printf("[%s] Erro na gravação: %v", currentCam.Name, err)
-			time.Sleep(5 * time.Second)
+			if !waitForContext(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -171,19 +197,32 @@ func startRecording(cam Camera, apiURL, secretToken string) {
 			SizeBytes:       size,
 		}
 
-		if err := registerRecording(apiURL, secretToken, registration); err != nil {
+		if err := registerRecording(ctx, apiURL, secretToken, registration); err != nil {
 			log.Printf("[%s] Falha ao registrar gravação: %v", currentCam.Name, err)
 		}
 	}
 }
 
-func registerRecording(apiURL, secretToken string, reg RecordingRegistration) error {
+func waitForContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func registerRecording(ctx context.Context, apiURL, secretToken string, reg RecordingRegistration) error {
 	jsonData, err := json.Marshal(reg)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", apiURL+"/recordings/internal/register", bytes.NewBuffer(jsonData))
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, "POST", apiURL+"/recordings/internal/register", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return err
 	}

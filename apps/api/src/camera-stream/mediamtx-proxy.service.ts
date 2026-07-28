@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { spawn } from 'child_process';
 import { type Request } from 'express';
 import { CamerasService } from '../cameras/cameras.service';
 import {
@@ -12,6 +11,7 @@ import {
 import { CryptoService } from '../common/crypto/crypto.service';
 import { SettingsService } from '../settings/settings.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
+import { spawnWithSecretUrl } from '../common/process/secret-url-process.helper';
 // Métricas por câmera: singleton de módulo (sem DI, para não mexer no construtor
 // deste serviço) e sempre em try/catch — observabilidade não derruba stream.
 import { cameraMetrics } from '../observability/camera-metrics.service';
@@ -371,6 +371,9 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   private assertStrongApiCredentials() {
     const user = (this.configService.get<string>('mediaMtxApiUser') ?? '').trim();
     const pass = (this.configService.get<string>('mediaMtxApiPass') ?? '').trim();
+    const callbackToken = (
+      this.configService.get<string>('mediaMtxAuthCallbackToken') ?? ''
+    ).trim();
     // O USUÁRIO não é segredo: basta existir e não ser o valor de exemplo (não exigir
     // tamanho — nomes curtos como "nexusguard" são legítimos). A SENHA é o segredo.
     if (!user || user.startsWith('change_me')) {
@@ -379,6 +382,14 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     if (!pass || pass.startsWith('change_me') || pass.length < 24) {
       throw new Error(
         'MEDIAMTX_API_PASS inválida. Defina um segredo forte (>= 24 chars) e não use o valor de exemplo (change_me_*).',
+      );
+    }
+    if (
+      !/^[a-f0-9]{48,128}$/i.test(callbackToken)
+      || callbackToken.startsWith('change_me')
+    ) {
+      throw new Error(
+        'MEDIAMTX_AUTH_CALLBACK_TOKEN inválido. Defina um token hexadecimal dedicado com pelo menos 24 bytes.',
       );
     }
   }
@@ -392,12 +403,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   }
 
   private buildInternalPublishRtspUrl(pathName = '$MTX_PATH') {
-    const publishUser = (this.configService.get<string>('mediaMtxApiUser') ?? '').trim();
-    const publishPass = (this.configService.get<string>('mediaMtxApiPass') ?? '').trim();
-    if (!publishUser || !publishPass) {
-      throw new Error('Credenciais de publish do MediaMTX nao configuradas (MEDIAMTX_API_USER/MEDIAMTX_API_PASS).');
-    }
-    return `rtsp://${encodeURIComponent(publishUser)}:${encodeURIComponent(publishPass)}@localhost:$RTSP_PORT/${pathName}`;
+    return `rtsp://127.0.0.1:$RTSP_PORT/${pathName}`;
   }
 
   private shellQuote(value: string) {
@@ -427,6 +433,54 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     if (deliveryMode === 'grid') return `${base}_grid`;
     if (deliveryMode === 'original') return `${base}_orig`;
     return base;
+  }
+
+  private privateSourcePathName(pathName: string) {
+    return `${pathName}_source`;
+  }
+
+  private async ensurePrivateSourcePath(
+    pathName: string,
+    sourceUrl: string,
+    rtspTransport: string,
+    sourceOnDemandStartTimeout: string,
+    sourceOnDemandCloseAfter: string,
+  ) {
+    const sourcePathName = this.privateSourcePathName(pathName);
+    const encoded = encodeURIComponent(sourcePathName);
+    const desired = {
+      source: sourceUrl,
+      sourceOnDemand: true,
+      sourceOnDemandStartTimeout,
+      sourceOnDemandCloseAfter,
+      rtspTransport,
+    };
+    try {
+      const current: any = await this.getPath(sourcePathName);
+      if (
+        current.source === desired.source
+        && current.sourceOnDemand === true
+        && current.rtspTransport === desired.rtspTransport
+        && this.sameDuration(
+          current.sourceOnDemandStartTimeout,
+          desired.sourceOnDemandStartTimeout,
+        )
+        && this.sameDuration(
+          current.sourceOnDemandCloseAfter,
+          desired.sourceOnDemandCloseAfter,
+        )
+      ) {
+        return sourcePathName;
+      }
+    } catch {
+      // Ausente: criação abaixo.
+    }
+    await this.apiRequest(
+      'DELETE',
+      `/v3/config/paths/delete/${encoded}`,
+    ).catch(() => undefined);
+    await this.apiRequest('POST', `/v3/config/paths/add/${encoded}`, desired);
+    return sourcePathName;
   }
 
   getPathNameForCamera(cameraId: string, deliveryMode: LiveViewMode = 'selected') {
@@ -463,16 +517,16 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         resolve(value);
       };
       try {
-        const proc = spawn('ffprobe', [
+        const proc = spawnWithSecretUrl('ffprobe', [
           '-v', 'error',
           '-rtsp_transport', transport,
           '-i', sourceUrl,
           '-select_streams', 'v:0',
           '-show_entries', 'stream=codec_name',
           '-of', 'default=noprint_wrappers=1:nokey=1',
-        ]);
+        ], sourceUrl);
         let stdout = '';
-        proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+        proc.stdout!.on('data', (chunk) => { stdout += chunk.toString(); });
         const killTimer = setTimeout(() => {
           try { proc.kill('SIGKILL'); } catch { /* ignore */ }
           finish(null);
@@ -513,16 +567,16 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         resolve(value);
       };
       try {
-        const proc = spawn('ffprobe', [
+        const proc = spawnWithSecretUrl('ffprobe', [
           '-v', 'error',
           '-rtsp_transport', transport,
           '-timeout', '5000000',
           '-show_entries', 'stream=codec_name,codec_type,width,height',
           '-of', 'json',
           sourceUrl,
-        ]);
+        ], sourceUrl);
         let stdout = '';
-        proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+        proc.stdout!.on('data', (chunk) => { stdout += chunk.toString(); });
         const killTimer = setTimeout(() => {
           try { proc.kill('SIGKILL'); } catch { /* ignore */ }
           finish(null);
@@ -1016,6 +1070,10 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       const pathName = this.pathNameFromCameraId(cameraId, mode);
       this.pathEnsureCache.delete(this.buildEnsureKey(cameraId, mode));
       await this.apiRequest('DELETE', `/v3/config/paths/delete/${encodeURIComponent(pathName)}`).catch(() => undefined);
+      await this.apiRequest(
+        'DELETE',
+        `/v3/config/paths/delete/${encodeURIComponent(this.privateSourcePathName(pathName))}`,
+      ).catch(() => undefined);
     }
     this.invalidateMainCodecCache(cameraId);
   }
@@ -1132,6 +1190,15 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     };
 
     if (needsPublisher) {
+      const sourcePathName = await this.ensurePrivateSourcePath(
+        pathName,
+        sourceUrl,
+        rtspTransport,
+        sourceOnDemandStartTimeout,
+        sourceOnDemandCloseAfter,
+      );
+      const privateSourceUrl =
+        `rtsp://127.0.0.1:$RTSP_PORT/${sourcePathName}`;
       // Navegadores não reproduzem H.265 via WebRTC/HLS, e WebRTC não aceita o AAC
       // vindo dessas câmeras neste pipeline. O source vira 'publisher' e runOnDemand
       // sobe um ffmpeg que publica H.264 + Opus quando áudio estiver habilitado.
@@ -1198,7 +1265,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         // instead of passing corrupted NAL units downstream (which causes
         // green frames in the browser until the next IDR keyframe arrives).
         `-flags low_delay -err_detect careful -rtsp_transport ${rtspTransport} ` +
-        `-i "${sourceUrl}" -map 0:v:0 -map 0:a:0? ${videoArgs} ${audioArgs} ` +
+        `-i "${privateSourceUrl}" -map 0:v:0 -map 0:a:0? ${videoArgs} ${audioArgs} ` +
         `-f rtsp -rtsp_transport tcp -muxdelay 0.1 -pkt_size 1200 "${publishUrl}"`;
       // AUTO-RECUPERAÇÃO (anti-travamento). Antes de iniciar o restream, mata
       // qualquer ffmpeg ENCRAVADO deste MESMO path. Um ffmpeg que parou de publicar

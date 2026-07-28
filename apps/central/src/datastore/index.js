@@ -5,6 +5,7 @@ const { PgStore } = require('./pg-store');
 const { mergeDb } = require('./dual-read');
 const { writeSigningBackup } = require('./signing-backup');
 const { TimeseriesStore, NoopTimeseriesStore } = require('./timeseries-store');
+const { JsonInstanceLock } = require('./singleton-lock');
 const { DEFAULT_RAW_RETENTION_HOURS, DEFAULT_HOURLY_RETENTION_DAYS, toNumber } = require('./timeseries');
 
 // Orquestrador do datastore da Central. Escolhe o backend por env e expõe a MESMA
@@ -68,6 +69,7 @@ function createDatastore({ legacy, config, store } = {}) {
   const cfg = config || resolveConfig();
   const usesPg = cfg.mode === 'dual' || cfg.mode === 'pg';
   const pg = usesPg ? (store || new PgStore({ connectionString: cfg.databaseUrl })) : null;
+  const jsonLock = !usesPg ? new JsonInstanceLock(`${cfg.dataFile}.instance.lock`) : null;
   // Série temporal: real só quando há Postgres E a flag não foi desligada.
   // Sem isso (o DEFAULT), é o NO-OP silencioso — nenhuma consulta, nenhum log.
   const tsConfig = cfg.timeseries || resolveTimeseriesConfig(process.env, cfg.mode);
@@ -126,10 +128,26 @@ function createDatastore({ legacy, config, store } = {}) {
   }
 
   async function close() {
+    if (jsonLock) await jsonLock.release();
     if (pg) await pg.close();
   }
 
-  return { mode: cfg.mode, config: cfg, load, save, ensureInit, close, store: pg, timeseries };
+  async function acquireInstanceLock() {
+    if (pg) return pg.acquireInstanceLock();
+    return jsonLock.acquire();
+  }
+
+  return {
+    mode: cfg.mode,
+    config: cfg,
+    load,
+    save,
+    ensureInit,
+    acquireInstanceLock,
+    close,
+    store: pg,
+    timeseries,
+  };
 }
 
 module.exports = {

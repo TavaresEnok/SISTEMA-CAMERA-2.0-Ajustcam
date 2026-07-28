@@ -523,12 +523,17 @@
                     <input id="install-license" readonly placeholder="Gerada pela central" />
                   </div>
                   <div class="field">
+                    <label for="install-token">Token temporário do instalador</label>
+                    <input id="install-token" type="password" readonly autocomplete="off" placeholder="Gerado por poucos minutos" />
+                  </div>
+                  <div class="field">
                     <label for="install-notes">Observação interna</label>
                     <textarea id="install-notes" placeholder="Opcional: técnico responsável, endereço, observações da implantação"></textarea>
                   </div>
                   <div class="license-actions">
                     <button id="generate-installation">Gerar instalação oficial</button>
                     <button id="copy-install" class="primary">Copiar comando</button>
+                    <button id="copy-install-token">Copiar token temporário</button>
                   </div>
                 </div>
               </div>
@@ -537,7 +542,7 @@
               <div class="panel-head">
                 <div>
                   <div class="panel-title">Comando oficial</div>
-                  <div class="panel-subtitle">Execute no terminal do servidor Linux do cliente</div>
+                  <div class="panel-subtitle">Execute no terminal e cole o token temporário somente quando solicitado</div>
                 </div>
               </div>
               <div class="detail-body">
@@ -800,6 +805,7 @@
         installId: document.querySelector('#install-id'),
         installServer: document.querySelector('#install-server'),
         installLicense: document.querySelector('#install-license'),
+        installToken: document.querySelector('#install-token'),
         installNotes: document.querySelector('#install-notes'),
         installCommand: document.querySelector('#install-command'),
         toast: document.querySelector('#toast'),
@@ -2004,9 +2010,11 @@
         if (!state.provision) {
           els.installCommand.value = 'Clique em "Gerar instalação oficial" para criar o comando único do cliente.';
           els.installLicense.value = '';
+          els.installToken.value = '';
         } else {
           els.installCommand.value = state.provision.installCommand || '';
           els.installLicense.value = state.provision.licenseKey || '';
+          els.installToken.value = state.provision.installerToken || '';
         }
         document.querySelector('#install-local-url').textContent = server === 'IP_DO_SERVIDOR' ? 'detectado pelo instalador' : `http://${server}:5173`;
         document.querySelector('#install-central-url').textContent = state.provision?.centralUrl || `${window.location.origin}${CENTRAL_BASE_PATH}`;
@@ -2208,17 +2216,10 @@
             showToast(data.message || 'Não foi possível gerar o instalador.');
             return;
           }
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(data.installCommand);
-          } else {
-            state.provision = data;
-            setView('instalacao');
-            renderInstallCommand();
-            els.installCommand.focus();
-            els.installCommand.select();
-            document.execCommand('copy');
-          }
-          showToast('Instalador copiado.');
+          state.provision = data;
+          setView('instalacao');
+          renderInstallCommand();
+          showToast('Novo comando gerado. Copie o comando e o token separadamente.');
         } catch {
           showToast('Falha ao copiar instalador.');
         }
@@ -2308,6 +2309,25 @@
           els.installCommand.select();
           document.execCommand('copy');
           showToast('Comando selecionado para cópia.');
+        }
+      });
+      document.querySelector('#copy-install-token').addEventListener('click', async () => {
+        const token = state.provision?.installerToken || '';
+        if (!token) {
+          showToast('Gere um novo instalador para obter um token temporário.');
+          return;
+        }
+        try {
+          if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable');
+          await navigator.clipboard.writeText(token);
+          showToast('Token temporário copiado. Cole-o apenas no prompt do instalador.');
+        } catch {
+          els.installToken.type = 'text';
+          els.installToken.focus();
+          els.installToken.select();
+          document.execCommand('copy');
+          els.installToken.type = 'password';
+          showToast('Token temporário selecionado para cópia.');
         }
       });
 

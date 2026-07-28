@@ -11,7 +11,14 @@ const { collectSigningIdentities, writeSigningBackup } = require('../src/datasto
 
 const sampleDb = {
   installations: {
-    'cli-a': { id: 'cli-a', licenseKey: 'drac-aaa', installerToken: 'tok-a', sshHostKeys: { '1.2.3.4:22': 'SHA256:xyz' }, customerName: 'A' },
+    'cli-a': {
+      id: 'cli-a',
+      licenseKey: 'drac-aaa',
+      installerToken: 'token-legado-que-nao-deve-ser-copiado',
+      installerTokenHash: 'a'.repeat(64),
+      sshHostKeys: { '1.2.3.4:22': 'SHA256:xyz' },
+      customerName: 'A',
+    },
     'cli-b': { id: 'cli-b', licenseKey: 'drac-bbb' },
     'cli-nada': { id: 'cli-nada', customerName: 'sem segredo' },
   },
@@ -21,15 +28,16 @@ const sampleDb = {
   },
 };
 
-test('collectSigningIdentities coleta licenseKey/installerToken/sshHostKeys e hashes; ignora registros sem segredo', () => {
+test('collectSigningIdentities coleta digest do token, nunca token em claro', () => {
   const backup = collectSigningIdentities(sampleDb);
   assert.equal(backup.kind, 'drac-central-signing-backup');
   assert.deepEqual(Object.keys(backup.installations).sort(), ['cli-a', 'cli-b']); // cli-nada excluído
   assert.equal(backup.installations['cli-a'].licenseKey, 'drac-aaa');
-  assert.equal(backup.installations['cli-a'].installerToken, 'tok-a');
+  assert.equal(backup.installations['cli-a'].installerTokenHash, 'a'.repeat(64));
+  assert.equal(backup.installations['cli-a'].installerToken, undefined);
   assert.deepEqual(backup.installations['cli-a'].sshHostKeys, { '1.2.3.4:22': 'SHA256:xyz' });
   assert.equal(backup.installations['cli-b'].licenseKey, 'drac-bbb');
-  assert.equal(backup.installations['cli-b'].installerToken, undefined);
+  assert.equal(backup.installations['cli-b'].installerTokenHash, undefined);
   assert.deepEqual(Object.keys(backup.users), ['admin2@drac.local']); // sem-hash excluído
   assert.equal(backup.users['admin2@drac.local'].passwordHash, 'pbkdf2_sha256$600000$s$h');
   assert.deepEqual(backup.counts, { installations: 2, users: 1 });
@@ -41,6 +49,7 @@ test('collectSigningIdentities NÃO vaza senha em claro (só o hash)', () => {
   assert.equal(asText.includes('pbkdf2_sha256'), true);
   // nenhum campo "password" solto (só passwordHash)
   assert.equal(/"password"\s*:/.test(asText), false);
+  assert.equal(asText.includes('token-legado-que-nao-deve-ser-copiado'), false);
 });
 
 test('writeSigningBackup grava arquivo durável com timestamp, sem sobrescrever', async () => {

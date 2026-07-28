@@ -53,7 +53,7 @@ Por padrao o datastore e o arquivo JSON (`DRAC_CENTRAL_DATA_FILE`). Para migrar 
 
 Fluxo de migracao segura:
 
-1. **Backup das identidades de assinatura ANTES de migrar.** Na primeira subida em modo Postgres, a Central grava `signing-backup-<timestamp>.json` em `DRAC_CENTRAL_BACKUP_DIR` (default `<dir do data file>/backups`) com `licenseKey`, `installerToken`, `sshHostKeys` de cada instalacao e os hashes de senha admin — sem senha em claro. E durável (fsync).
+1. **Backup das identidades de assinatura ANTES de migrar.** Na primeira subida em modo Postgres, a Central grava `signing-backup-<timestamp>.json` em `DRAC_CENTRAL_BACKUP_DIR` (default `<dir do data file>/backups`) com `licenseKey`, digest do token do instalador, `sshHostKeys` de cada instalacao e os hashes de senha admin — sem senha ou token em claro. E durável (fsync).
 2. **Reconciliacao (backfill).** Copia para o Postgres tudo que existe no JSON legado e falta no banco. Idempotente (o marker `migration` na tabela `central_meta` impede repetir).
 3. **Dual-read (`DRAC_CENTRAL_STORE_MODE=dual`, default quando ha URL).** Le do Postgres e cai para o JSON legado (read-only) quando um registro ainda nao existe no banco. Escreve SO no Postgres; o JSON nunca e reescrito — e a **janela de rollback**.
 4. **Cutover (`pg`).** Depois de validar alguns ciclos, mude para `DRAC_CENTRAL_STORE_MODE=pg` (so Postgres).
@@ -86,10 +86,12 @@ A central:
 - cria a instalacao como `Aguardando instalação`;
 - gera a chave/licenca no servidor;
 - grava auditoria;
-- entrega um comando unico `curl ... | bash` para executar no servidor do cliente;
+- entrega um comando que baixa para arquivo temporario, valida SHA-256 e
+  executa exatamente o descritor validado;
 - usa `https://github.com/TavaresEnok/DRAC.git` por padrao, sem exigir chave SSH no cliente;
 - detecta automaticamente o IP local quando o campo de servidor nao for preenchido;
-- publica o instalador temporario em `/install/:installationId/:installerToken`;
+- publica o instalador temporario em `/install/:installationId`, autorizado por
+  bearer no cabeçalho (o token não entra na URL);
 - permite copiar novamente o instalador oficial pela instalacao selecionada;
 - permite cancelar uma instalacao pendente antes do primeiro heartbeat.
 
@@ -105,6 +107,69 @@ DELETE /api/admin/installations/:id
 O `DELETE` remove apenas instalacoes que ainda nao enviaram heartbeat.
 
 O diagnostico sanitizado nao inclui chave de licenca, token de instalador nem segredos. Ele consolida estado da instalacao, readiness, cameras, armazenamento, servidor, alertas ativos e ultimos heartbeats.
+
+### Raiz de confiança do instalador
+
+A geração fica desabilitada até configurar:
+
+```bash
+DRAC_CENTRAL_INSTALLER_COMMIT=COMMIT_GIT_COMPLETO_DE_40_HEXADECIMAIS
+DRAC_CENTRAL_INSTALLER_SHA256=SHA256_COMPLETO_DE_64_HEXADECIMAIS
+DRAC_CENTRAL_INSTALLER_URL_TEMPLATE=https://raw.githubusercontent.com/TavaresEnok/DRAC/{commit}/scripts/install-drac.sh
+DRAC_CENTRAL_INSTALLER_TOKEN_TTL_SECONDS=1800
+```
+
+O commit e o SHA-256 devem ser produzidos/aprovados pelo pipeline ou operador
+de release e entregues à configuração da Central por canal administrativo
+protegido. O hash **não** é buscado ao lado do script. Nesta primeira versão,
+a configuração protegida da Central é a raiz de confiança; quem puder alterar
+simultaneamente commit e hash ainda poderá aprovar outro conteúdo. A evolução
+recomendada é um manifesto de release assinado, verificado por chave pública
+pinada na Central e também no host.
+
+Ao provisionar, a Central persiste no registro da instalação:
+
+- commit imutável;
+- URL resultante do template;
+- SHA-256 esperado;
+- instante de aprovação/vínculo;
+- expiração do token.
+- somente o digest SHA-256 do token; o bearer em claro não é persistido.
+
+Reconfigurar a Central não muda comandos já emitidos. Um reprovisionamento
+administrativo cria um novo vínculo e token, invalidando o comando anterior.
+O token pode ser reutilizado para repetir download interrompido somente até a
+expiração (30 minutos por padrão). Depois disso o endpoint responde como
+inexistente; o administrador precisa copiar um novo comando.
+Solicitar outro comando administrativo rotaciona o token e invalida o anterior.
+Somente seu digest SHA-256 é persistido ou incluído no backup de identidades.
+
+O comando:
+
+1. exige hash completo;
+2. exige `curl` e `sha256sum` ou `shasum -a 256`;
+3. usa `mktemp`, timeout e zero redirects;
+4. baixa sem executar;
+5. rejeita arquivo vazio ou hash divergente;
+6. abre dois descritores para o mesmo inode, remove o nome temporário, calcula
+   o hash por um descritor e executa pelo outro;
+7. não imprime URL, token, licença ou hash em mensagens de erro.
+
+Comandos antigos baseados em pipe não são mantidos: após a atualização,
+registros legados precisam ter um novo comando emitido por administrador.
+Compatibilidade é por commit exato; não existe resolução de branch, `latest`
+ou downgrade automático.
+
+Rollback da **mudança de código** consiste em reverter somente os arquivos
+alterados por ela; não existe feature flag nem fluxo vulnerável paralelo. Essa
+reversão restaura o comportamento antigo e inseguro, portanto exige decisão
+explícita de emergência. Comandos seguros já emitidos falham por divergência
+se o endpoint revertido passar a entregar outro wrapper; eles não executam
+silenciosamente conteúdo diferente. Digests e expirações persistidos continuam
+no datastore, mas o código antigo não consegue recuperar o bearer original; um
+novo comando seguro terá de ser emitido depois de reaplicar a correção. Para
+rollback normal de uma versão do produto, selecione um commit anterior aprovado
+e seu SHA-256 usando o mesmo fluxo seguro, sem reverter esta proteção.
 
 Estados comerciais suportados:
 

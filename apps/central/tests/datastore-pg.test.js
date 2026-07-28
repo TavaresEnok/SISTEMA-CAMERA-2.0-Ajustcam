@@ -23,7 +23,7 @@ function sampleDb() {
       'cli-a': {
         id: 'cli-a', licenseKey: 'drac-aaa', customerName: 'Cliente A', licenseStatus: 'ACTIVE',
         lastHeartbeatAt: '2026-07-24T10:00:00.000Z', updatedAt: '2026-07-24T10:05:00.000Z',
-        installerToken: 'tok-a', sshHostKeys: { '1.2.3.4:22': 'SHA256:xyz' },
+        installerTokenHash: 'a'.repeat(64), sshHostKeys: { '1.2.3.4:22': 'SHA256:xyz' },
         metrics: { cameras: { total: 3, online: 2, offline: 1 }, openAlarms: 0 },
         alertHistory: [{ id: 'al1', key: 'x:y', status: 'ACTIVE', occurrences: 2 }],
         heartbeatHistory: [{ at: '2026-07-24T10:00:00.000Z', status: 'ok', cameraTotal: 3 }],

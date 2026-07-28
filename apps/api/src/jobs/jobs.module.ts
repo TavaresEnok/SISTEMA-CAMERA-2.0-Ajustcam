@@ -25,6 +25,28 @@ import { EvidenceModule } from '../evidence/evidence.module';
 import { RecordingsModule } from '../recordings/recordings.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AlarmsModule } from '../alarms/alarms.module';
+import { envNumber } from '../common/config/env-number.helper';
+
+export async function withStartupTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} excedeu o prazo de ${timeoutMs}ms.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 @Module({
   imports: [
@@ -41,6 +63,14 @@ import { AlarmsModule } from '../alarms/alarms.module';
         connection: {
           host: configService.get<string>('redisHost') ?? process.env.REDIS_HOST ?? 'localhost',
           port: Number(configService.get<string | number>('redisPort') ?? process.env.REDIS_PORT ?? 6379),
+          connectTimeout: envNumber('REDIS_CONNECT_TIMEOUT_MS', 5_000, {
+            min: 500,
+            max: 60_000,
+            integer: true,
+          }),
+          retryStrategy: (attempt: number) => (
+            attempt > 5 ? null : Math.min(250 * 2 ** (attempt - 1), 2_000)
+          ),
         },
       }),
     }),
@@ -64,8 +94,13 @@ export class JobsModule implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    const timeoutMs = envNumber('REDIS_STARTUP_TIMEOUT_MS', 10_000, {
+      min: 1_000,
+      max: 120_000,
+      integer: true,
+    });
     // Agendar verificação de saúde a cada 1 minuto
-    await this.healthCheckQueue.add(
+    await withStartupTimeout(this.healthCheckQueue.add(
       'check',
       {},
       {
@@ -74,11 +109,11 @@ export class JobsModule implements OnModuleInit {
         removeOnComplete: true,
         removeOnFail: 50,
       },
-    );
+    ), timeoutMs, 'Agendamento do health-check no Redis');
 
     // Agendar limpeza a cada dia à meia-noite (se habilitada via BullMQ)
     if (String(process.env.RETENTION_USE_BULLMQ ?? 'true') !== 'false') {
-      await this.cleanupQueue.add(
+      await withStartupTimeout(this.cleanupQueue.add(
         'cleanup',
         {},
         {
@@ -87,11 +122,11 @@ export class JobsModule implements OnModuleInit {
           removeOnComplete: true,
           removeOnFail: 50,
         },
-      );
+      ), timeoutMs, 'Agendamento da retenção no Redis');
     }
 
     // Reprocessar assinaturas pendentes de pacotes de evidência a cada 5 minutos
-    await this.evidenceExportQueue.add(
+    await withStartupTimeout(this.evidenceExportQueue.add(
       'retry-all-pending-signatures',
       {},
       {
@@ -100,6 +135,6 @@ export class JobsModule implements OnModuleInit {
         removeOnComplete: true,
         removeOnFail: 50,
       },
-    );
+    ), timeoutMs, 'Agendamento de evidências no Redis');
   }
 }

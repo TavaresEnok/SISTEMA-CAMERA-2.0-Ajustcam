@@ -36,7 +36,7 @@ test('config: sem nenhuma URL o default segue json', () => {
 });
 
 // ── P0: backup de identidades de assinatura é SEGREDO ────────────────────────
-// Guarda licenseKey, installerToken, chaves SSH e hash de senha. Não pode nascer
+// Guarda licenseKey, digest do token, chaves SSH e hash de senha. Não pode nascer
 // legível por outros usuários do host.
 
 test('signing-backup: arquivo 0600 e diretório 0700 mesmo com umask permissivo', async () => {
@@ -44,7 +44,9 @@ test('signing-backup: arquivo 0600 e diretório 0700 mesmo com umask permissivo'
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'drac-signbk-'));
   try {
     const db = {
-      installations: { i1: { licenseKey: 'LIC-SECRET', installerToken: 'TOK-SECRET' } },
+      installations: {
+        i1: { licenseKey: 'LIC-SECRET', installerTokenHash: 'a'.repeat(64) },
+      },
       users: { 'a@b.c': { passwordHash: 'hash' } },
     };
     const { file } = await writeSigningBackup(db, path.join(dir, 'backups'));

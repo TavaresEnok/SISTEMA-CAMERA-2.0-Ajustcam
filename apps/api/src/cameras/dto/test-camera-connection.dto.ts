@@ -1,16 +1,19 @@
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsIP, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class TestCameraConnectionDto {
   @IsString()
+  @IsIP()
   ip!: string;
 
   @IsInt()
   @Min(1)
+  @Max(65535)
   rtspPort!: number;
 
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(65535)
   onvifPort?: number;
 
   @IsOptional()

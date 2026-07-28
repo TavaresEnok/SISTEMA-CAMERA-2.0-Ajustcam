@@ -165,6 +165,32 @@ export class AccessControlService {
   }
 
   /**
+   * Em câmera privada, o papel global não eleva a concessão de conteúdo. O
+   * proprietário possui autoridade total e qualquer outro usuário fica
+   * limitado exclusivamente à permissão direta recebida.
+   */
+  private async hasPrivateContentLevel(
+    user: AuthUser,
+    cameraId: string,
+    minLevel: CameraPermissionLevel,
+  ): Promise<boolean | null> {
+    const camera = await this.prisma.camera.findUnique({
+      where: { id: cameraId },
+      select: { isPrivate: true, ownerUserId: true },
+    });
+    if (!camera?.isPrivate) return null;
+    if (camera.ownerUserId === user.id) return true;
+
+    const permissions = await this.prisma.cameraPermission.findMany({
+      where: { userId: user.id, cameraId },
+      select: { level: true },
+    });
+    return permissions.some(
+      (permission) => levelWeight[permission.level] >= levelWeight[minLevel],
+    );
+  }
+
+  /**
    * Acesso ao CONTEÚDO da câmera (ao vivo, gravação, snapshot...). É o gate único
    * por onde passam todos os endpoints de conteúdo — a privacidade é garantida
    * aqui por construção.
@@ -174,27 +200,37 @@ export class AccessControlService {
    * super-admin abrem uma câmera privada de terceiro.
    */
   async canViewCamera(user: AuthUser, cameraId: string): Promise<boolean> {
-    const camera = await this.prisma.camera.findUnique({
-      where: { id: cameraId },
-      select: { isPrivate: true, ownerUserId: true },
-    });
-    if (camera?.isPrivate) {
-      if (camera.ownerUserId && camera.ownerUserId === user.id) return true;
-      // Autorização do dono = permissão DIRETA na câmera (não por grupo/privilégio).
-      const direct = await this.prisma.cameraPermission.findFirst({
-        where: { userId: user.id, cameraId },
-        select: { id: true },
-      });
-      return Boolean(direct);
-    }
+    const privateAccess = await this.hasPrivateContentLevel(
+      user,
+      cameraId,
+      CameraPermissionLevel.VIEW,
+    );
+    if (privateAccess !== null) return privateAccess;
     return this.hasLevel(user, cameraId, CameraPermissionLevel.VIEW);
   }
 
   async canControlCamera(user: AuthUser, cameraId: string): Promise<boolean> {
+    // PTZ e relés são ações físicas sobre o ambiente observado. Administrar a
+    // configuração técnica de uma câmera privada não concede acesso implícito
+    // ao seu conteúdo nem autorização para movimentá-la.
+    const privateAccess = await this.hasPrivateContentLevel(
+      user,
+      cameraId,
+      CameraPermissionLevel.CONTROL,
+    );
+    if (privateAccess !== null) return privateAccess;
     return this.hasLevel(user, cameraId, CameraPermissionLevel.CONTROL);
   }
 
   async canRecordCamera(user: AuthUser, cameraId: string): Promise<boolean> {
+    // Iniciar/parar a coleta altera o conteúdo de evidência. A mesma fronteira
+    // de privacidade do playback/visualização precisa ser satisfeita primeiro.
+    const privateAccess = await this.hasPrivateContentLevel(
+      user,
+      cameraId,
+      CameraPermissionLevel.RECORD,
+    );
+    if (privateAccess !== null) return privateAccess;
     return this.hasLevel(user, cameraId, CameraPermissionLevel.RECORD);
   }
 
@@ -235,6 +271,35 @@ export class AccessControlService {
     if (!(await this.canPlaybackCamera(user, cameraId))) {
       throw new ForbiddenException('Acesso ao histórico indisponível para este grupo. Fale com o administrador.');
     }
+  }
+
+  /**
+   * Lista câmeras cujo histórico pode ser revelado ao usuário. Usar
+   * `getAccessibleCameraIds` em consultas de gravação é insuficiente porque
+   * RESTRICTED preserva o ao vivo, mas bloqueia inclusive os metadados do
+   * acervo. A consulta em lote evita um check/N+1 por gravação.
+   */
+  async getPlaybackCameraIds(user: AuthUser): Promise<string[]> {
+    const accessibleIds = await this.getAccessibleCameraIds(user);
+    if (!accessibleIds.length || this.isPrivileged(user)) return accessibleIds;
+
+    const cameras = await this.prisma.camera.findMany({
+      where: { id: { in: accessibleIds } },
+      select: { id: true, groupId: true },
+    });
+    const groupIds = Array.from(new Set(
+      cameras.map((camera) => camera.groupId).filter((id): id is string => Boolean(id)),
+    ));
+    if (!groupIds.length) return cameras.map((camera) => camera.id);
+
+    const restrictedGroups = await this.prisma.cameraGroup.findMany({
+      where: { id: { in: groupIds }, accessStatus: 'RESTRICTED' },
+      select: { id: true },
+    });
+    const restrictedIds = new Set(restrictedGroups.map((group) => group.id));
+    return cameras
+      .filter((camera) => !camera.groupId || !restrictedIds.has(camera.groupId))
+      .map((camera) => camera.id);
   }
 
   async assertCanControlCamera(user: AuthUser, cameraId: string): Promise<void> {

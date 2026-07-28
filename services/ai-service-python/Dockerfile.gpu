@@ -23,6 +23,9 @@ RUN mkdir -p /app/models
 
 ARG AI_SERVICE_SOURCE_REV=local
 COPY . .
+RUN groupadd --gid 1000 drac \
+ && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin drac \
+ && chown -R drac:drac /app
 
 # Acelera por GPU quando o serviço sobe com estes runtimes (controlados pelo
 # compose de GPU). Mantemos comentado aqui para a imagem não impor o modo GPU;
@@ -32,6 +35,8 @@ COPY . .
 
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+USER drac
 
 EXPOSE 8000
 CMD ["python", "main.py"]

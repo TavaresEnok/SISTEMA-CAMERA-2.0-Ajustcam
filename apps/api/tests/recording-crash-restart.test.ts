@@ -350,7 +350,11 @@ test('queda: falha do start() no reinício é registrada e não derruba o proces
 
 test('prioridade: o ffmpeg de GRAVAÇÃO continua em prioridade normal (nunca sob nice)', () => {
   const src = readFileSync('src/recordings/recording-process-manager.service.ts', 'utf8');
-  assert.match(src, /spawn\('ffmpeg', args/, 'a gravação precisa continuar sendo spawn direto do ffmpeg');
+  assert.match(
+    src,
+    /spawnWithSecretUrl\(\s*'ffmpeg',\s*args,\s*rtspUrl/,
+    'a gravação precisa iniciar o ffmpeg diretamente pelo canal privado da URL',
+  );
   assert.doesNotMatch(src, /spawn\('nice'/, 'rebaixar a prioridade da GRAVAÇÃO seria o oposto do objetivo');
   assert.doesNotMatch(src, /planLowPriorityCommand/, 'o caminho de gravação não usa o plano de prioridade baixa');
 });

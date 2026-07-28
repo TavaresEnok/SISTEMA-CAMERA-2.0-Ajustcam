@@ -319,10 +319,7 @@ function makeServiceFixture(records: FakeRec[], filesOnDisk: string[], canView =
   // Gate único de conteúdo, espelhando a inversão da câmera privada: quem não
   // pode VER leva ForbiddenException (mesmo contrato do AccessControlService).
   svc.accessControlService = {
-    // Gate de HISTÓRICO: nestes testes espelha o de view (o que importa
-    // é que o gate seja chamado antes de servir conteúdo).
-    assertCanPlaybackCamera: async (...args: any[]) => (access as any).assertCanViewCamera(...args),
-    assertCanViewCamera: async () => {
+    assertCanPlaybackCamera: async () => {
       if (!canView) throw new ForbiddenException('Sem acesso ao conteúdo desta câmera.');
     },
   };
@@ -570,7 +567,7 @@ function makeController(opts: { canView: boolean; order: string[] }) {
   return new RecordingsController({} as any, recordings as any, {} as any, {} as any, access as any, audit as any);
 }
 
-test('vod controller: aplica assertCanViewCamera ANTES de montar a playlist', async () => {
+test('vod controller: aplica assertCanPlaybackCamera ANTES de montar a playlist', async () => {
   const order: string[] = [];
   const controller: any = makeController({ canView: true, order });
   const { res, headers, sent } = makeRes();

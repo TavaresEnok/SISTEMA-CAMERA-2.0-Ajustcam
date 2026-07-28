@@ -25,13 +25,6 @@ interface LoginResponse {
   };
 }
 
-interface MeResponse {
-  id: string;
-  name: string;
-  email: string;
-  role: 'SUPER_ADMIN' | 'ADMIN' | 'OPERATOR' | 'VIEWER';
-}
-
 interface AuthState {
   user: AuthUser | null;
   accessToken: string | null;
@@ -41,7 +34,7 @@ interface AuthState {
   bootstrap: () => Promise<void>;
   revalidate: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const TOKEN_STORAGE_KEY = 'vms.auth.token';
@@ -54,7 +47,7 @@ function mapRole(role: LoginResponse['user']['role']): UiRole {
   return 'viewer'; // VIEWER → acesso restrito a Ao Vivo, PTZ e Reprodução
 }
 
-function mapUser(user: LoginResponse['user'] | MeResponse): AuthUser {
+function mapUser(user: LoginResponse['user']): AuthUser {
   return {
     id: user.id,
     name: user.name,
@@ -82,16 +75,15 @@ function getStoredUser(): AuthUser | null {
   }
 }
 
-function persistSession(accessToken: string | null, user: AuthUser | null) {
+function removeLegacyBrowserToken() {
   if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+}
 
-  if (accessToken) {
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, accessToken);
-    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-  } else {
-    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-  }
+function persistUser(user: AuthUser | null) {
+  if (typeof window === 'undefined') return;
+  removeLegacyBrowserToken();
 
   if (user) {
     window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
@@ -102,14 +94,16 @@ function persistSession(accessToken: string | null, user: AuthUser | null) {
   }
 }
 
-async function fetchMe(accessToken: string) {
-  const { data } = await axios.get<MeResponse>(`${API_URL}/auth/me`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
+async function refreshWebSession() {
+  const { data } = await axios.post<LoginResponse>(
+    `${API_URL}/auth/refresh`,
+    {},
+    {
+      withCredentials: true,
+      headers: { 'X-DRAC-Auth-Mode': 'cookie' },
     },
-  });
-
-  return mapUser(data);
+  );
+  return { accessToken: data.accessToken, user: mapUser(data.user) };
 }
 
 function isAuthenticationRejection(error: unknown) {
@@ -118,27 +112,29 @@ function isAuthenticationRejection(error: unknown) {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: getStoredUser(),
-  accessToken: typeof window === 'undefined' ? null : (window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? window.sessionStorage.getItem(TOKEN_STORAGE_KEY)),
+  // O access token vive somente na memória e expira em 15 minutos no modo web.
+  // A sessão durável é um refresh token HttpOnly, inacessível ao JavaScript.
+  accessToken: null,
   isAuthenticated: false,
   isLoading: false,
   isBootstrapped: false,
   bootstrap: async () => {
-    const accessToken = get().accessToken;
-
-    if (!accessToken) {
-      set({ user: null, isAuthenticated: false, isLoading: false, isBootstrapped: true });
-      return;
-    }
-
     set({ isLoading: true });
+    removeLegacyBrowserToken();
 
     try {
-      const user = await fetchMe(accessToken);
-      persistSession(accessToken, user);
-      set({ user, isAuthenticated: true, isLoading: false, isBootstrapped: true });
+      const session = await refreshWebSession();
+      persistUser(session.user);
+      set({
+        user: session.user,
+        accessToken: session.accessToken,
+        isAuthenticated: true,
+        isLoading: false,
+        isBootstrapped: true,
+      });
     } catch (error) {
       if (isAuthenticationRejection(error)) {
-        persistSession(null, null);
+        persistUser(null);
         set({
           user: null,
           accessToken: null,
@@ -149,13 +145,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return;
       }
 
-      // Uma indisponibilidade momentânea da API não invalida uma sessão que ainda
-      // pode ser válida. Mantemos a identidade em cache e a UI disponível; o
-      // polling operacional sinaliza que os dados estão desatualizados.
-      const cachedUser = get().user ?? getStoredUser();
+      // Sem um token em memória não é seguro considerar a UI autenticada apenas
+      // por uma identidade em cache. O cookie permanece intacto para nova tentativa.
       set({
-        user: cachedUser,
-        isAuthenticated: Boolean(cachedUser && accessToken),
+        user: get().user ?? getStoredUser(),
+        accessToken: null,
+        isAuthenticated: false,
         isLoading: false,
         isBootstrapped: true,
       });
@@ -170,21 +165,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // conexões WebRTC de todas as câmeras ao mesmo tempo a cada ciclo, fazendo a
     // imagem "piscar"/reiniciar em lote. Aqui só atualizamos o usuário em segundo
     // plano e, em caso de token expirado/inválido, encerramos a sessão.
-    const accessToken = get().accessToken;
-    if (!accessToken) {
-      if (get().isAuthenticated) {
-        set({ user: null, isAuthenticated: false, isBootstrapped: true });
-      }
-      return;
-    }
-
     try {
-      const user = await fetchMe(accessToken);
-      persistSession(accessToken, user);
-      set({ user, isAuthenticated: true, isBootstrapped: true });
+      // Rotacionar pelo cookie a cada revalidação renova a sessão ativa e entrega
+      // um access token curto antes que o anterior expire.
+      const session = await refreshWebSession();
+      persistUser(session.user);
+      set({
+        user: session.user,
+        accessToken: session.accessToken,
+        isAuthenticated: true,
+        isBootstrapped: true,
+      });
     } catch (error) {
       if (isAuthenticationRejection(error)) {
-        persistSession(null, null);
+        persistUser(null);
         set({
           user: null,
           accessToken: null,
@@ -198,10 +192,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isLoading: true });
 
     try {
-      const { data } = await axios.post<LoginResponse>(`${API_URL}/auth/login`, { email, password });
+      const { data } = await axios.post<LoginResponse>(
+        `${API_URL}/auth/login`,
+        { email, password },
+        {
+          withCredentials: true,
+          headers: { 'X-DRAC-Auth-Mode': 'cookie' },
+        },
+      );
       const user = mapUser(data.user);
 
-      persistSession(data.accessToken, user);
+      persistUser(user);
       set({
         user,
         accessToken: data.accessToken,
@@ -210,7 +211,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isBootstrapped: true,
       });
     } catch (error) {
-      persistSession(null, null);
+      persistUser(null);
       set({
         user: null,
         accessToken: null,
@@ -221,8 +222,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw error;
     }
   },
-  logout: () => {
-    persistSession(null, null);
+  logout: async () => {
+    const accessToken = get().accessToken;
+    persistUser(null);
     set({
       user: null,
       accessToken: null,
@@ -230,5 +232,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isLoading: false,
       isBootstrapped: true,
     });
+    if (accessToken) {
+      await axios.post(
+        `${API_URL}/auth/logout`,
+        {},
+        {
+          withCredentials: true,
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      ).catch(() => undefined);
+    }
   },
 }));
+
+// Migração defensiva: versões anteriores deixavam o JWT de oito horas em
+// localStorage. Ele é apagado assim que o bundle novo carrega.
+removeLegacyBrowserToken();

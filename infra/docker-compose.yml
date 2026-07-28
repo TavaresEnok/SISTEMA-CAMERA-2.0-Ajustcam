@@ -109,6 +109,66 @@ services:
       - ./backup-central-data.sh:/backup-central-data.sh:ro
     command: ["/bin/sh", "/backup-central-data.sh"]
 
+  drac-central:
+    build:
+      context: ..
+      dockerfile: apps/central/Dockerfile
+    container_name: vms-central
+    hostname: vms-central
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    ports:
+      - "127.0.0.1:9765:9765"
+    environment:
+      - NODE_ENV=production
+      - DRAC_CENTRAL_HOST=0.0.0.0
+      - DRAC_CENTRAL_PORT=9765
+      - DRAC_CENTRAL_DATA_FILE=/app/data/installations.json
+      - DRAC_CENTRAL_BACKUP_DIR=/app/data/backups
+      - DRAC_CENTRAL_DATABASE_URL=postgresql://${POSTGRES_USER:-vms}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-vms_db}
+      - DRAC_CENTRAL_STORE_MODE=${DRAC_CENTRAL_STORE_MODE:-dual}
+      - DRAC_CENTRAL_ADMIN_EMAIL=${DRAC_CENTRAL_ADMIN_EMAIL:-admin@drac.local}
+      - DRAC_CENTRAL_ADMIN_PASSWORD_HASH=${DRAC_CENTRAL_ADMIN_PASSWORD_HASH:-}
+      - DRAC_CENTRAL_ADMIN_TOKEN=${DRAC_CENTRAL_ADMIN_TOKEN:-}
+      - DRAC_CENTRAL_SESSION_HOURS=${DRAC_CENTRAL_SESSION_HOURS:-8}
+      - DRAC_CENTRAL_ALLOWED_ORIGINS=${DRAC_CENTRAL_ALLOWED_ORIGINS:-https://localhost}
+      - DRAC_CENTRAL_TRUSTED_PROXIES=${DRAC_CENTRAL_TRUSTED_PROXIES:-172.16.0.0/12}
+      - DRAC_CENTRAL_COOKIE_SECURE=${DRAC_CENTRAL_COOKIE_SECURE:-true}
+      - DRAC_CENTRAL_PUBLIC_URL=${DRAC_CENTRAL_PUBLIC_URL:-https://localhost/central}
+      - DRAC_CENTRAL_INSTALLER_COMMIT=${DRAC_CENTRAL_INSTALLER_COMMIT:-}
+      - DRAC_CENTRAL_INSTALLER_SHA256=${DRAC_CENTRAL_INSTALLER_SHA256:-}
+      - DRAC_CENTRAL_INSTALLER_URL_TEMPLATE=${DRAC_CENTRAL_INSTALLER_URL_TEMPLATE:-https://raw.githubusercontent.com/TavaresEnok/DRAC/{commit}/scripts/install-drac.sh}
+      - DRAC_CENTRAL_REPOSITORY_URL=${DRAC_CENTRAL_REPOSITORY_URL:-https://github.com/TavaresEnok/DRAC.git}
+      - DRAC_CENTRAL_INSTALLER_TOKEN_TTL_SECONDS=${DRAC_CENTRAL_INSTALLER_TOKEN_TTL_SECONDS:-900}
+      - DRAC_CENTRAL_INSTALLER_TOKEN_MAX_DOWNLOADS=${DRAC_CENTRAL_INSTALLER_TOKEN_MAX_DOWNLOADS:-3}
+      - APP_BUILDER_AGENT_URL=${APP_BUILDER_AGENT_URL:-http://host.docker.internal:8780}
+      - APP_BUILDER_AGENT_TOKEN=${APP_BUILDER_AGENT_TOKEN:-}
+      - APP_BUILDER_AGENT_TIMEOUT_MS=${APP_BUILDER_AGENT_TIMEOUT_MS:-15000}
+      - APK_SOURCE_BASE=http://web
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${CENTRAL_DATA_DIR:-../apps/central/data}:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9765/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - vms-net
+
   offsite-backup:
     image: rclone/rclone:1
     container_name: vms-offsite-backup
@@ -146,6 +206,12 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: vms-api
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     logging: *default-logging
     # Porta em LOOPBACK: o nginx (host) faz proxy de /api/ p/ 127.0.0.1:3000. Fica no
     # compose BASE (não só no dev override) — recriar sem o override dropava a porta e
@@ -157,6 +223,8 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-vms}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-vms_db}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - REDIS_CONNECT_TIMEOUT_MS=${REDIS_CONNECT_TIMEOUT_MS:-5000}
+      - REDIS_STARTUP_TIMEOUT_MS=${REDIS_STARTUP_TIMEOUT_MS:-10000}
       - API_PORT=3000
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       - PUBLIC_APP_URL=${PUBLIC_APP_URL:-}
@@ -209,6 +277,7 @@ services:
       - MEDIAMTX_RTSP_INTERNAL_URL=${MEDIAMTX_RTSP_INTERNAL_URL:-rtsp://mediamtx:8554}
       - MEDIAMTX_API_USER=${MEDIAMTX_API_USER:?MEDIAMTX_API_USER is required}
       - MEDIAMTX_API_PASS=${MEDIAMTX_API_PASS:?MEDIAMTX_API_PASS is required}
+      - MEDIAMTX_AUTH_CALLBACK_TOKEN=${MEDIAMTX_AUTH_CALLBACK_TOKEN:?MEDIAMTX_AUTH_CALLBACK_TOKEN is required}
       - MEDIAMTX_PUBLIC_HOST=${MEDIAMTX_PUBLIC_HOST:-}
       - MEDIAMTX_PUBLIC_SCHEME=${MEDIAMTX_PUBLIC_SCHEME:-}
       - MEDIAMTX_PUBLIC_WEBRTC_URL=${MEDIAMTX_PUBLIC_WEBRTC_URL:-}
@@ -228,6 +297,8 @@ services:
       - ALARM_WEBHOOK_ALLOWED_HOSTS=${ALARM_WEBHOOK_ALLOWED_HOSTS:-}
       - ALARM_WEBHOOK_SIGNING_SECRET=${ALARM_WEBHOOK_SIGNING_SECRET:-}
       - CAMERA_TEST_ALLOW_PUBLIC_IP=${CAMERA_TEST_ALLOW_PUBLIC_IP:-false}
+      - CAMERA_ALLOWED_CIDRS=${CAMERA_ALLOWED_CIDRS:-}
+      - CAMERA_DENIED_CIDRS=${CAMERA_DENIED_CIDRS:-}
       - FFMPEG_RTSP_FALLBACK_TRANSPORTS=tcp,udp
       - FFMPEG_RTSP_FALLBACK_PORTS=51488,51489,51490
       - FFMPEG_RTSP_ENABLE_PORT_FALLBACK=false
@@ -250,10 +321,15 @@ services:
     volumes:
       - ./storage:/storage
       - ./backups/postgres:/backups/postgres:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
     depends_on:
-      - postgres
-      - redis
-      - mediamtx
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -271,21 +347,31 @@ services:
         VITE_API_URL: ${VITE_API_URL:-}
     container_name: vms-web
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     logging: *default-logging
     # Porta em LOOPBACK: o nginx (host) faz proxy de / p/ 127.0.0.1:5173 (o web serve
     # na 80 interna). No compose BASE pelo mesmo motivo da api/mediamtx (não depender do
     # override — recriar sem ele derrubava o site).
     ports:
-      - "127.0.0.1:5173:80"
+      - "127.0.0.1:5173:8080"
     # APKs white-label publicados pelo build-agent ficam num diretório do HOST
     # montado aqui (somente leitura). Sobrevive a rebuilds do container — antes os
     # APKs eram copiados pra dentro do container e sumiam a cada recriação.
     volumes:
       - ./apk:/usr/share/nginx/html/apk:ro
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=64m
+      - /var/run:rw,noexec,nosuid,nodev,size=8m
     depends_on:
       - api
+      - drac-central
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -301,6 +387,12 @@ services:
     profiles:
       - legacy-worker
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     logging: *default-logging
     environment:
       - REDIS_ADDR=redis:6379
@@ -310,6 +402,8 @@ services:
       - STORAGE_ROOT=/storage
     volumes:
       - ./storage:/storage
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
     depends_on:
       - redis
       - api
@@ -331,6 +425,12 @@ services:
       dockerfile: Dockerfile
     container_name: vms-ai-service
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     logging: *default-logging
     expose:
       - "8000"
@@ -427,10 +527,12 @@ services:
       - AI_ADAPTIVE_SELECTED_RESOLUTION_SCALES=${AI_ADAPTIVE_SELECTED_RESOLUTION_SCALES:-1.0,0.92,0.84,0.76}
       - AI_ADAPTIVE_GRID_RESOLUTION_SCALES=${AI_ADAPTIVE_GRID_RESOLUTION_SCALES:-1.0,0.90,0.80}
       - AI_READINESS_MAX_FRAME_AGE_SECONDS=${AI_READINESS_MAX_FRAME_AGE_SECONDS:-20}
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
-      - ../services/ai-service-python:/app
       - ./storage:/storage
       - ./ai-models:/app/models
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
     depends_on:
       - redis
       - api
@@ -474,6 +576,8 @@ services:
     environment:
       - MEDIAMTX_API_USER=${MEDIAMTX_API_USER:?MEDIAMTX_API_USER is required}
       - MEDIAMTX_API_PASS=${MEDIAMTX_API_PASS:?MEDIAMTX_API_PASS is required}
+      - MEDIAMTX_AUTH_CALLBACK_TOKEN=${MEDIAMTX_AUTH_CALLBACK_TOKEN:?MEDIAMTX_AUTH_CALLBACK_TOKEN is required}
+      - MTX_AUTHHTTPADDRESS=http://api:3000/camera-stream/mediamtx-auth?internalToken=${MEDIAMTX_AUTH_CALLBACK_TOKEN:?MEDIAMTX_AUTH_CALLBACK_TOKEN is required}
       - MEDIAMTX_HLS_ALLOW_ORIGIN=${MEDIAMTX_HLS_ALLOW_ORIGIN:-*}
       - MEDIAMTX_WEBRTC_ALLOW_ORIGIN=${MEDIAMTX_WEBRTC_ALLOW_ORIGIN:-*}
       - MTX_HLSALLOWORIGINS=${MEDIAMTX_HLS_ALLOW_ORIGIN:-*}

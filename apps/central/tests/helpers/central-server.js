@@ -13,6 +13,8 @@ const fsp = require('node:fs/promises');
 
 const SERVER = path.resolve(__dirname, '../../src/server.js');
 const ADMIN_TOKEN = 'token-de-teste-nao-secreto';
+const TEST_INSTALLER_COMMIT = '1'.repeat(40);
+const TEST_INSTALLER_SHA256 = 'a'.repeat(64);
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -41,6 +43,14 @@ async function startCentral(extraEnv = {}) {
       // teste decide o modo.
       DRAC_CENTRAL_DATABASE_URL: '',
       DRAC_CENTRAL_STORE_MODE: '',
+      // Artefato sintético: a Central apenas gera comandos nos testes gerais e
+      // nunca acessa example.invalid. Testes do instalador sobrescrevem estes
+      // valores com um servidor HTTP local e conteúdo controlado.
+      DRAC_CENTRAL_INSTALLER_COMMIT: TEST_INSTALLER_COMMIT,
+      DRAC_CENTRAL_INSTALLER_SHA256: TEST_INSTALLER_SHA256,
+      DRAC_CENTRAL_INSTALLER_URL_TEMPLATE:
+        'https://example.invalid/drac/{commit}/scripts/install-drac.sh',
+      DRAC_CENTRAL_INSTALLER_TOKEN_TTL_SECONDS: '1800',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -76,4 +86,10 @@ async function startCentral(extraEnv = {}) {
   };
 }
 
-module.exports = { ADMIN_TOKEN, freePort, startCentral };
+module.exports = {
+  ADMIN_TOKEN,
+  TEST_INSTALLER_COMMIT,
+  TEST_INSTALLER_SHA256,
+  freePort,
+  startCentral,
+};

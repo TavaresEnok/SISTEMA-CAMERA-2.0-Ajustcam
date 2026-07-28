@@ -2,16 +2,17 @@ import { Injectable, Logger, NotFoundException, ServiceUnavailableException } fr
 import { ConfigService } from '@nestjs/config';
 import { type Camera } from '@prisma/client';
 import { type Request, type Response } from 'express';
-import { execFile, spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
+import { spawnSync, type ChildProcessByStdio } from 'child_process';
 import { type Readable } from 'stream';
-import { promisify } from 'util';
 import { CamerasService } from '../cameras/cameras.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { buildRtspUrl, resolveDeliveryRtspProfile } from '../cameras/helpers/rtsp-url.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { MediamtxProxyService } from './mediamtx-proxy.service';
-
-const execFileAsync = promisify(execFile);
+import {
+  execFileWithSecretUrl,
+  spawnWithSecretUrl,
+} from '../common/process/secret-url-process.helper';
 
 type FfmpegStreamConfig = {
   rtspTransport: string;
@@ -438,7 +439,7 @@ export class FfmpegMjpegService {
     for (const transport of transports) {
       for (const url of urls) {
         try {
-          const { stdout } = await execFileAsync('ffmpeg', this.buildPosterArgs(url, transport), {
+          const { stdout } = await execFileWithSecretUrl('ffmpeg', this.buildPosterArgs(url, transport), url, {
             encoding: 'buffer',
             maxBuffer: 4 * 1024 * 1024,
             timeout: Math.max(2500, Math.ceil(this.config.stimeoutUs / 1000) + 1000),
@@ -502,7 +503,12 @@ export class FfmpegMjpegService {
   // Deprecated overload kept internal for compatibility with existing call sites.
   private tryStartFlvProcess(rtspUrl: string, transport: RtspTransport, transcodeVideo: boolean, camera?: Camera) {
     const ffmpegArgs = this.buildFfmpegFlvArgs(rtspUrl, transport, transcodeVideo, camera);
-    return spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    return spawnWithSecretUrl(
+      'ffmpeg',
+      ffmpegArgs,
+      rtspUrl,
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    ) as ChildProcessByStdio<null, Readable, Readable>;
   }
 
   killProcessSafely(proc: ChildProcessByStdio<null, Readable, Readable> | null) {

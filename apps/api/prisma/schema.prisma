@@ -144,6 +144,7 @@ model Camera {
   site          Site?              @relation(fields: [siteId], references: [id], onDelete: SetNull)
   area          Area?              @relation(fields: [areaId], references: [id], onDelete: SetNull)
   group         CameraGroup?       @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  owner         User?              @relation("CameraOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
   recordings    Recording[]
   exportedClips ExportedClip[]
   events        CameraEvent[]
@@ -310,6 +311,7 @@ model User {
   liveLayouts       LiveLayout[]
   authSessions      AuthSession[]
   eventReviews      UserEventReview[]
+  ownedCameras      Camera[]        @relation("CameraOwner")
 }
 
 model AuthSession {

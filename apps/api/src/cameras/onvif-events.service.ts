@@ -8,6 +8,7 @@ import { AiManagerService } from '../ai/ai-manager.service';
 import { AiService } from '../ai/ai.service';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { envNumber } from '../common/config/env-number.helper';
+import { assertCameraTargetAllowed } from '../common/network/safe-url.helper';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const onvif = require('onvif');
 
@@ -131,6 +132,11 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
   private probeMotionSupport(camera: any): Promise<boolean | null> {
     return new Promise((resolve) => {
       if (!camera.onvifPort) return resolve(null); // sem porta ONVIF → não dá pra sondar
+      try {
+        assertCameraTargetAllowed(camera.ip, camera.onvifPort);
+      } catch {
+        return resolve(null);
+      }
       let settled = false;
       const finish = (v: boolean | null) => { if (!settled) { settled = true; resolve(v); } };
       const timer = setTimeout(() => finish(null), 6000);
@@ -295,6 +301,12 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private connectCamera(camera: any) {
+    try {
+      assertCameraTargetAllowed(camera.ip, camera.onvifPort || 80);
+    } catch {
+      this.activeCams.delete(camera.id);
+      return;
+    }
     this.logger.log(`Conectando ONVIF na câmera ${camera.name} (${camera.ip})`);
     this.activeCams.set(camera.id, { cam: null, connectedAt: null }); // marca p/ não reconectar em loop
 

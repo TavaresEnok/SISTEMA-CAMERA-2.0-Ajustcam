@@ -8,6 +8,22 @@ const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require(
 const { normalizeAiPolicy, validateAiPolicy, applyAiPolicyToRestrictions, describeAiPolicy } = require('./ai-policy');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
+const {
+  clientIpFromRequest,
+  compileTrustedProxies,
+} = require('./proxy-trust');
+const {
+  InstallerConfigurationError,
+  buildInstallerExecutionCommand,
+  configuredInstallerArtifact,
+  consumeInstallerDownload,
+  installerTokenDigest,
+  installerTokenMaxDownloads,
+  installerTokenTtlMs,
+  isInstallerTokenActive,
+  issueInstallerGrant,
+  sha256Text,
+} = require('./installer-security');
 
 function loadEnvFile() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -36,8 +52,6 @@ const DATA_FILE = path.resolve(process.cwd(), process.env.DRAC_CENTRAL_DATA_FILE
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 
 const LICENSE_ACTIVE = 'ACTIVE';
-const DEFAULT_INSTALLER_URL =
-  process.env.DRAC_CENTRAL_INSTALLER_URL || 'https://raw.githubusercontent.com/TavaresEnok/DRAC/main/scripts/install-drac.sh';
 const ONLINE_THRESHOLD_SECONDS = Number(process.env.DRAC_CENTRAL_ONLINE_THRESHOLD_SECONDS || 180);
 const HEARTBEAT_HISTORY_LIMIT = Number(process.env.DRAC_CENTRAL_HISTORY_LIMIT || 100);
 const AUDIT_HISTORY_LIMIT = Number(process.env.DRAC_CENTRAL_AUDIT_HISTORY_LIMIT || 500);
@@ -48,6 +62,9 @@ const ALLOWED_ORIGINS = String(process.env.DRAC_CENTRAL_ALLOWED_ORIGINS || '*')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const TRUSTED_PROXIES = compileTrustedProxies(
+  process.env.DRAC_CENTRAL_TRUSTED_PROXIES || '127.0.0.1/32,::1/128',
+);
 const loginAttempts = new Map();
 const MAX_REQUEST_BODY_BYTES = Math.max(16 * 1024, Number(process.env.DRAC_CENTRAL_MAX_BODY_BYTES || 1024 * 1024));
 
@@ -60,6 +77,14 @@ const SCHEDULER = scheduler.schedulerConfigFromEnv(process.env);
 // pela gateway da bridge Docker. Token compartilhado (nunca exposto ao browser).
 const APP_BUILDER_AGENT_URL = String(process.env.APP_BUILDER_AGENT_URL || '').replace(/\/+$/, '');
 const APP_BUILDER_AGENT_TOKEN = String(process.env.APP_BUILDER_AGENT_TOKEN || '');
+const APP_BUILDER_AGENT_TIMEOUT_MS = Math.min(
+  120_000,
+  Math.max(1_000, Number(process.env.APP_BUILDER_AGENT_TIMEOUT_MS || 15_000)),
+);
+const APP_BUILDER_AGENT_MAX_RESPONSE_BYTES = Math.min(
+  10 * 1024 * 1024,
+  Math.max(64 * 1024, Number(process.env.APP_BUILDER_AGENT_MAX_RESPONSE_BYTES || 1024 * 1024)),
+);
 // De onde a Central busca o APK publicado p/ reentregar com nome amigável.
 // Mesma gateway usada p/ o agente; o web publica os APKs em /apk no :5173.
 const APK_SOURCE_BASE = String(process.env.APK_SOURCE_BASE || 'http://172.17.0.1:5173').replace(/\/+$/, '');
@@ -140,6 +165,9 @@ function normalizeDb(parsed) {
   if (!parsed.installations || typeof parsed.installations !== 'object') parsed.installations = {};
   if (!parsed.sessions || typeof parsed.sessions !== 'object') parsed.sessions = {};
   if (!parsed.users || typeof parsed.users !== 'object') parsed.users = {};
+  for (const item of Object.values(parsed.installations)) {
+    if (item && typeof item === 'object') delete item.installerToken;
+  }
   return parsed;
 }
 
@@ -183,13 +211,19 @@ async function legacySaveDb(db) {
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
   try {
     const current = await fs.readFile(DATA_FILE, 'utf8');
-    if (parseDbText(current)) await fs.writeFile(`${DATA_FILE}.bak`, current);
+    const parsedCurrent = parseDbText(current);
+    if (parsedCurrent) {
+      const sanitizedCurrent = JSON.stringify(normalizeDb(parsedCurrent), null, 2);
+      await fs.writeFile(`${DATA_FILE}.bak`, sanitizedCurrent, { mode: 0o600 });
+      await fs.chmod(`${DATA_FILE}.bak`, 0o600);
+    }
   } catch { /* sem arquivo atual ainda, ou ilegível: ignora o backup */ }
   // Nome único também protege contra duas instâncias acidentalmente apontando
   // para o mesmo volume (ou uma rota não serializada no futuro).
   const tmp = `${DATA_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
-    await fs.writeFile(tmp, JSON.stringify(db, null, 2));
+    await fs.writeFile(tmp, JSON.stringify(normalizeDb(db), null, 2), { mode: 0o600 });
+    await fs.chmod(tmp, 0o600);
     await fs.rename(tmp, DATA_FILE);
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
@@ -215,7 +249,7 @@ function getDatastore() {
 }
 
 async function loadDb() {
-  return getDatastore().load();
+  return normalizeDb(await getDatastore().load());
 }
 
 async function saveDb(db) {
@@ -294,11 +328,21 @@ function isStrongPassword(password) {
 // Autentica contra o admin do .env OU um usuário cadastrado (db.users).
 function authenticate(db, email, password) {
   if (ADMIN_PASSWORD_HASH && email === ADMIN_EMAIL && verifyPassword(password, ADMIN_PASSWORD_HASH)) {
-    return { email: ADMIN_EMAIL, name: 'Administrador', builtin: true };
+    return {
+      email: ADMIN_EMAIL,
+      name: 'Administrador',
+      builtin: true,
+      authVersion: crypto.createHash('sha256').update(ADMIN_PASSWORD_HASH).digest('hex'),
+    };
   }
   const u = db.users && db.users[email];
   if (u && verifyPassword(password, u.passwordHash)) {
-    return { email, name: u.name || email, builtin: false };
+    return {
+      email,
+      name: u.name || email,
+      builtin: false,
+      authVersion: Number.isInteger(u.authVersion) ? u.authVersion : 1,
+    };
   }
   return null;
 }
@@ -322,18 +366,17 @@ function sessionHash(token) {
 }
 
 function sessionCookie(token, maxAgeSeconds) {
-  const secure = String(process.env.DRAC_CENTRAL_COOKIE_SECURE || 'false').toLowerCase() === 'true' ? '; Secure' : '';
+  const secure = String(process.env.DRAC_CENTRAL_COOKIE_SECURE || 'true').toLowerCase() !== 'false' ? '; Secure' : '';
   return `drac_central_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
 function clearSessionCookie() {
-  return 'drac_central_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0';
+  const secure = String(process.env.DRAC_CENTRAL_COOKIE_SECURE || 'true').toLowerCase() !== 'false' ? '; Secure' : '';
+  return `drac_central_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`;
 }
 
 function clientIp(req) {
-  return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
-    .split(',')[0]
-    .trim();
+  return clientIpFromRequest(req, TRUSTED_PROXIES);
 }
 
 function loginAttemptKey(req, email) {
@@ -385,10 +428,6 @@ function slugify(value) {
   return normalized || `cliente-${crypto.randomBytes(4).toString('hex')}`;
 }
 
-function shellQuote(value) {
-  return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
-}
-
 function publicBaseUrl(req) {
   const configured = String(process.env.DRAC_CENTRAL_PUBLIC_URL || '').trim();
   if (configured) return configured.replace(/\/+$/, '');
@@ -398,35 +437,42 @@ function publicBaseUrl(req) {
   return `${proto}://${host}${prefix && prefix.startsWith('/') ? prefix : ''}`;
 }
 
-function buildInstallCommand({ customerName, installationId, licenseKey, serverAddress, centralUrl }) {
-  return buildLegacyInstallCommand({ customerName, installationId, licenseKey, serverAddress, centralUrl });
+function installerConfigurationResponse(req, res) {
+  return json(req, res, 503, {
+    error: 'installer_artifact_not_configured',
+    message:
+      'O instalador exige URL pública HTTPS, commit imutável e SHA-256 válido.',
+  });
 }
 
-function buildLegacyInstallCommand({ customerName, installationId, licenseKey, serverAddress, centralUrl }) {
-  return [
-    `curl -fsSL ${shellQuote(DEFAULT_INSTALLER_URL)} | \\`,
-    `DRAC_CUSTOMER_NAME=${shellQuote(customerName)} \\`,
-    `DRAC_INSTALLATION_ID=${shellQuote(installationId)} \\`,
-    `DRAC_LICENSE_KEY=${shellQuote(licenseKey)} \\`,
-    `DRAC_SERVER_IP=${shellQuote(serverAddress)} \\`,
-    `DRAC_CENTRAL_URL=${shellQuote(centralUrl)} \\`,
-    'DRAC_AUTO_YES=true \\',
-    'bash',
-  ].join('\n');
+function installerEnvironment(item, centralUrl) {
+  return {
+    DRAC_CUSTOMER_NAME: item.customerName || item.id,
+    DRAC_INSTALLATION_ID: item.id,
+    DRAC_LICENSE_KEY: item.licenseKey,
+    DRAC_SERVER_IP: item.provisionedServerAddress || '',
+    DRAC_CENTRAL_URL: centralUrl,
+    DRAC_INSTALLER_COMMIT: item.installerArtifact.commit || item.installerArtifact.id,
+    DRAC_REPO_URL: item.installerArtifact.repositoryUrl,
+    // A política de egress das câmeras depende da topologia local e não pode
+    // ser inventada pela Central. O instalador perguntará apenas esse dado que
+    // não estiver previamente definido.
+    DRAC_AUTO_YES: 'false',
+  };
 }
 
-function buildQuickInstallCommand({ centralUrl, installationId, installerToken }) {
-  return `curl -fsSL ${shellQuote(`${centralUrl}/install/${encodeURIComponent(installationId)}/${encodeURIComponent(installerToken)}`)} | bash`;
+function buildApprovedInstallerCommand(item, centralUrl) {
+  return buildInstallerExecutionCommand({
+    artifact: item.installerArtifact,
+    environment: installerEnvironment(item, centralUrl),
+    allowInsecureLoopback:
+      String(process.env.DRAC_CENTRAL_ALLOW_INSECURE_INSTALLER_URL || '') ===
+      'true',
+  });
 }
 
 function buildInstallerScript(item, centralUrl) {
-  const command = buildLegacyInstallCommand({
-    customerName: item.customerName || item.id,
-    installationId: item.id,
-    licenseKey: item.licenseKey,
-    serverAddress: item.provisionedServerAddress || '',
-    centralUrl,
-  });
+  const command = buildApprovedInstallerCommand(item, centralUrl);
   return `#!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -434,25 +480,89 @@ ${command}
 `;
 }
 
-function buildInstallerResponse(item, centralUrl) {
-  const installerToken = item.installerToken || crypto.randomBytes(24).toString('base64url');
-  item.installerToken = installerToken;
-  const installCommand = buildQuickInstallCommand({ centralUrl, installationId: item.id, installerToken });
-  const fallbackInstallCommand = buildLegacyInstallCommand({
-    customerName: item.customerName || item.id,
-    installationId: item.id,
-    licenseKey: item.licenseKey,
-    serverAddress: item.provisionedServerAddress || '',
+function buildQuickInstallCommand({
+  centralUrl,
+  installationId,
+  installerScriptSha256,
+}) {
+  const quickInstallUrl = `${centralUrl}/install/${encodeURIComponent(installationId)}`;
+  return buildInstallerExecutionCommand({
+    artifact: {
+      id: installerScriptSha256,
+      url: quickInstallUrl,
+      sha256: installerScriptSha256,
+    },
+    bearerInput: 'prompt',
+    // A Central deve ser HTTPS. HTTP só é aceito em loopback para testes locais.
+    allowInsecureLoopback: true,
+  });
+}
+
+function buildInstallerResponse(item, centralUrl, installerToken) {
+  if (
+    !isInstallerTokenActive(item) ||
+    !installerToken ||
+    !timingSafeTextEquals(
+      item.installerTokenHash,
+      installerTokenDigest(installerToken),
+    )
+  ) {
+    throw new InstallerConfigurationError(
+      'O token do instalador está ausente ou expirado.',
+    );
+  }
+  const installerScript = buildInstallerScript(item, centralUrl);
+  const installerScriptSha256 = sha256Text(installerScript);
+  const installCommand = buildQuickInstallCommand({
     centralUrl,
+    installationId: item.id,
+    installerScriptSha256,
   });
   return {
     licenseKey: item.licenseKey,
     centralUrl,
     serverAddress: item.provisionedServerAddress || null,
     installCommand,
-    fallbackInstallCommand,
-    quickInstallUrl: `${centralUrl}/install/${encodeURIComponent(item.id)}/${encodeURIComponent(installerToken)}`,
+    installerToken,
+    quickInstallUrl: `${centralUrl}/install/${encodeURIComponent(item.id)}`,
+    installerArtifact: {
+      id: item.installerArtifact.id,
+      url: item.installerArtifact.url,
+      repositoryUrl: item.installerArtifact.repositoryUrl,
+      sha256: item.installerArtifact.sha256,
+      compatibility: item.installerArtifact.compatibility,
+      boundAt: item.installerArtifact.boundAt,
+    },
+    installerTokenExpiresAt: item.installerTokenExpiresAt,
+    installerTokenRemainingDownloads: item.installerTokenRemainingDownloads,
   };
+}
+
+function refreshInstallerGrant(
+  item,
+  {
+    forceArtifact = false,
+    forceToken = false,
+    issueToken = true,
+    now = new Date(),
+  } = {},
+) {
+  const bindConfiguredArtifact = forceArtifact || !item.installerArtifact;
+  const artifact = bindConfiguredArtifact
+    ? configuredInstallerArtifact(process.env, now)
+    : item.installerArtifact;
+  const result = issueInstallerGrant(item, {
+    artifact,
+    now,
+    ttlMs: installerTokenTtlMs(process.env),
+    maxDownloads: installerTokenMaxDownloads(process.env),
+    rotateArtifact: bindConfiguredArtifact,
+    createToken: issueToken,
+    rotateToken:
+      issueToken &&
+      (forceToken || bindConfiguredArtifact || !isInstallerTokenActive(item, now)),
+  });
+  return result.installerToken;
 }
 
 function cleanExpiredSessions(db) {
@@ -462,6 +572,17 @@ function cleanExpiredSessions(db) {
       delete db.sessions[key];
     }
   }
+}
+
+function revokeUserSessions(db, email) {
+  let revoked = 0;
+  for (const [key, session] of Object.entries(db.sessions || {})) {
+    if (session?.email === email) {
+      delete db.sessions[key];
+      revoked += 1;
+    }
+  }
+  return revoked;
 }
 
 function getAuthenticatedUser(req, db) {
@@ -480,6 +601,29 @@ function getAuthenticatedUser(req, db) {
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     delete db.sessions[key];
     return null;
+  }
+  if (session.accountKind === 'builtin') {
+    const currentVersion = crypto
+      .createHash('sha256')
+      .update(ADMIN_PASSWORD_HASH)
+      .digest('hex');
+    if (
+      session.email !== ADMIN_EMAIL ||
+      !ADMIN_PASSWORD_HASH ||
+      !timingSafeTextEquals(session.authVersion || '', currentVersion)
+    ) {
+      delete db.sessions[key];
+      return null;
+    }
+  } else {
+    const account = db.users?.[session.email];
+    const currentVersion = Number.isInteger(account?.authVersion)
+      ? account.authVersion
+      : 1;
+    if (!account || session.authVersion !== currentVersion) {
+      delete db.sessions[key];
+      return null;
+    }
   }
   session.lastSeenAt = new Date().toISOString();
   return { email: session.email, method: 'session' };
@@ -511,6 +655,8 @@ async function handleLogin(req, res) {
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
   db.sessions[sessionHash(token)] = {
     email: account.email,
+    accountKind: account.builtin ? 'builtin' : 'user',
+    authVersion: account.authVersion,
     createdAt: now.toISOString(),
     lastSeenAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
@@ -1104,7 +1250,6 @@ async function handleProvision(req, res, db, actor) {
     name: installationId,
     customerName,
     licenseKey,
-    installerToken: existing?.installerToken || crypto.randomBytes(24).toString('base64url'),
     licenseStatus: existing?.licenseStatus || LICENSE_ACTIVE,
     licenseMessage: existing?.licenseMessage || null,
     createdAt: existing?.createdAt || now,
@@ -1119,14 +1264,32 @@ async function handleProvision(req, res, db, actor) {
     heartbeatHistory: Array.isArray(existing?.heartbeatHistory) ? existing.heartbeatHistory : [],
     licenseHistory: Array.isArray(existing?.licenseHistory) ? existing.licenseHistory : [],
   };
-  const installer = buildInstallerResponse(item, centralUrl);
-  item.lastInstallerCommandHash = crypto.createHash('sha256').update(installer.fallbackInstallCommand).digest('hex');
+  let installer;
+  try {
+    // Reprovisionar é uma nova aprovação: captura o artefato configurado agora,
+    // persiste o vínculo commit+URL+hash e invalida qualquer comando anterior.
+    const installerToken = refreshInstallerGrant(item, {
+      forceArtifact: true,
+      forceToken: true,
+    });
+    installer = buildInstallerResponse(item, centralUrl, installerToken);
+  } catch (error) {
+    if (error instanceof InstallerConfigurationError) {
+      return installerConfigurationResponse(req, res);
+    }
+    throw error;
+  }
+  item.lastInstallerCommandHash = crypto.createHash('sha256').update(installer.installCommand).digest('hex');
   db.installations[installationId] = item;
   addAuditEvent(db, req, {
     type: existing ? 'installation.provision_regenerated' : 'installation.provision_created',
     actor: actor.email,
     result: 'accepted',
     installationId,
+    installerArtifactId: item.installerArtifact.id,
+    installerSha256: item.installerArtifact.sha256,
+    installerTokenExpiresAt: item.installerTokenExpiresAt,
+    installerTokenRemainingDownloads: item.installerTokenRemainingDownloads,
   });
   await saveDb(db);
 
@@ -1140,13 +1303,29 @@ async function handleGetInstallerCommand(req, res, db, actor, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
   const centralUrl = publicBaseUrl(req);
-  const installer = buildInstallerResponse(item, centralUrl);
+  let installer;
+  try {
+    // Comandos novos para registros legados recebem o artefato aprovado atual.
+    // Registros já vinculados preservam o mesmo artefato. Cada nova consulta
+    // administrativa rotaciona o token, invalidando o comando anterior.
+    const installerToken = refreshInstallerGrant(item, { forceToken: true });
+    installer = buildInstallerResponse(item, centralUrl, installerToken);
+  } catch (error) {
+    if (error instanceof InstallerConfigurationError) {
+      return installerConfigurationResponse(req, res);
+    }
+    throw error;
+  }
   item.updatedAt = new Date().toISOString();
   addAuditEvent(db, req, {
     type: 'installation.installer_command_viewed',
     actor: actor.email,
     result: 'accepted',
     installationId,
+    installerArtifactId: item.installerArtifact.id,
+    installerSha256: item.installerArtifact.sha256,
+    installerTokenExpiresAt: item.installerTokenExpiresAt,
+    installerTokenRemainingDownloads: item.installerTokenRemainingDownloads,
   });
   await saveDb(db);
   return json(req, res, 200, {
@@ -1155,18 +1334,51 @@ async function handleGetInstallerCommand(req, res, db, actor, installationId) {
   });
 }
 
-async function handleQuickInstaller(req, res, installationId, installerToken) {
+async function handleQuickInstaller(req, res, installationId) {
   const db = await loadDb();
   const item = db.installations[installationId];
-  if (!item || !item.installerToken || !timingSafeTextEquals(item.installerToken, installerToken)) {
+  const authorization = String(req.headers.authorization || '');
+  const installerToken =
+    authorization.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1] || '';
+  const tokenAccepted =
+    item &&
+    isInstallerTokenActive(item) &&
+    timingSafeTextEquals(
+      item.installerTokenHash,
+      installerTokenDigest(installerToken),
+    );
+  if (!tokenAccepted) {
     addAuditEvent(db, req, { type: 'installation.installer_denied', actor: installationId, result: 'denied', installationId });
     await saveDb(db);
     return text(req, res, 404, 'Instalador nao encontrado.\n');
   }
   const centralUrl = publicBaseUrl(req);
-  addAuditEvent(db, req, { type: 'installation.installer_downloaded', actor: installationId, result: 'accepted', installationId });
+  let installerScript;
+  try {
+    installerScript = buildInstallerScript(item, centralUrl);
+    consumeInstallerDownload(item);
+  } catch (error) {
+    addAuditEvent(db, req, {
+      type: 'installation.installer_denied',
+      actor: installationId,
+      result: 'denied',
+      installationId,
+    });
+    await saveDb(db);
+    return text(req, res, 404, 'Instalador nao encontrado.\n');
+  }
+  addAuditEvent(db, req, {
+    type: 'installation.installer_downloaded',
+    actor: installationId,
+    result: 'accepted',
+    installationId,
+    installerArtifactId: item.installerArtifact.id,
+    installerSha256: item.installerArtifact.sha256,
+    installerTokenExpiresAt: item.installerTokenExpiresAt,
+    installerTokenRemainingDownloads: item.installerTokenRemainingDownloads,
+  });
   await saveDb(db);
-  return text(req, res, 200, buildInstallerScript(item, centralUrl), 'text/x-shellscript; charset=utf-8');
+  return text(req, res, 200, installerScript, 'text/x-shellscript; charset=utf-8');
 }
 
 async function serveStatic(req, res) {
@@ -1190,15 +1402,53 @@ async function agentFetch(pathname, init = {}) {
     err.statusCode = 503;
     throw err;
   }
-  const res = await fetch(`${APP_BUILDER_AGENT_URL}${pathname}`, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      'x-build-token': APP_BUILDER_AGENT_TOKEN,
-      ...(init.headers || {}),
-    },
-  });
-  const raw = await res.text();
+  let res;
+  try {
+    const timeoutSignal = AbortSignal.timeout(APP_BUILDER_AGENT_TIMEOUT_MS);
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, timeoutSignal])
+      : timeoutSignal;
+    res = await fetch(`${APP_BUILDER_AGENT_URL}${pathname}`, {
+      ...init,
+      signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-build-token': APP_BUILDER_AGENT_TOKEN,
+        ...(init.headers || {}),
+      },
+    });
+  } catch (error) {
+    const wrapped = new Error(
+      error?.name === 'TimeoutError'
+        ? 'Build-agent excedeu o tempo máximo de resposta.'
+        : 'Build-agent indisponível.',
+    );
+    wrapped.statusCode = error?.name === 'TimeoutError' ? 504 : 502;
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  const declaredLength = Number(res.headers.get('content-length') || 0);
+  if (declaredLength > APP_BUILDER_AGENT_MAX_RESPONSE_BYTES) {
+    await res.body?.cancel().catch(() => undefined);
+    const error = new Error('Resposta do build-agent excede o limite permitido.');
+    error.statusCode = 502;
+    throw error;
+  }
+  const chunks = [];
+  let total = 0;
+  if (res.body) {
+    for await (const chunk of res.body) {
+      total += chunk.byteLength;
+      if (total > APP_BUILDER_AGENT_MAX_RESPONSE_BYTES) {
+        await res.body.cancel().catch(() => undefined);
+        const error = new Error('Resposta do build-agent excede o limite permitido.');
+        error.statusCode = 502;
+        throw error;
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+  }
+  const raw = Buffer.concat(chunks).toString('utf8');
   let data;
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
   return { status: res.status, data };
@@ -1216,17 +1466,6 @@ async function artifactFetch(pathname) {
 }
 
 // ── Geração automática de app por cliente ────────────────────────────────────
-function clientIp(req) {
-  // X-Real-IP é setado pelo nginx com $remote_addr e SOBRESCRITO a cada request — o
-  // cliente não consegue forjá-lo. Já o X-Forwarded-For é `$proxy_add_x_forwarded_for`
-  // (o nginx ANEXA o IP real ao FINAL), então o primeiro elemento é o que o atacante
-  // mandou: usá-lo permitia zerar o bucket do rate limit de login a cada tentativa
-  // (a chave é `${clientIp}:${email}`) e envenenar o IP da trilha de auditoria.
-  const realIp = String(req?.headers?.['x-real-ip'] || '').trim();
-  const ip = realIp || req?.socket?.remoteAddress || '';
-  return ip.replace(/^::ffff:/, '');
-}
-
 // Converte um endereço (host, host:porta ou URL) na URL da API do DRAC. Layout
 // padrão: web/API atrás do nginx em :5173 com a API em /api.
 function addrToApiUrl(addr) {
@@ -1595,17 +1834,8 @@ async function handleInstallationApp(req, res, db, installationId) {
 // Monta o comando de instalação numa única linha (para `conn.exec`). Em Debian/
 // Ubuntu instala o curl se faltar; outras distros precisam de curl pré-instalado.
 function buildRemoteInstallCommand(item, centralUrl) {
-  const q = (v) => `'${String(v ?? '').replace(/'/g, `'\\''`)}'`;
-  const envs = [
-    `DRAC_CUSTOMER_NAME=${q(item.customerName || item.id)}`,
-    `DRAC_INSTALLATION_ID=${q(item.id)}`,
-    `DRAC_LICENSE_KEY=${q(item.licenseKey)}`,
-    `DRAC_CENTRAL_URL=${q(centralUrl)}`,
-    `DRAC_SERVER_IP=${q(item.provisionedServerAddress || '')}`,
-    'DRAC_AUTO_YES=true',
-  ].join(' ');
   const ensureCurl = '(command -v curl >/dev/null 2>&1 || (apt-get update -y && apt-get install -y curl))';
-  return `${ensureCurl} && curl -fsSL ${q(DEFAULT_INSTALLER_URL)} | ${envs} bash`;
+  return `${ensureCurl} && ${buildApprovedInstallerCommand(item, centralUrl)}`;
 }
 
 function appendInstallLog(job, chunk, secrets = []) {
@@ -1703,7 +1933,18 @@ async function handleRemoteInstall(req, res, db, actor, installationId) {
   if (!password) return json(req, res, 400, { error: 'missing_password', message: 'Informe a senha de acesso (root).' });
 
   const centralUrl = publicBaseUrl(req);
-  const command = buildRemoteInstallCommand(item, centralUrl);
+  let command;
+  try {
+    // Instalações antigas só podem entrar no caminho SSH depois de receber o
+    // mesmo vínculo imutável usado pelos comandos manuais.
+    refreshInstallerGrant(item, { issueToken: false });
+    command = buildRemoteInstallCommand(item, centralUrl);
+  } catch (error) {
+    if (error instanceof InstallerConfigurationError) {
+      return installerConfigurationResponse(req, res);
+    }
+    throw error;
+  }
   const jobId = `${Date.now()}-${installationId}`;
   const job = {
     id: jobId,
@@ -1722,7 +1963,14 @@ async function handleRemoteInstall(req, res, db, actor, installationId) {
   // Marca tentativa + auditoria (sem credenciais).
   item.remoteInstall = { jobId, host, username, startedAt: job.startedAt, startedBy: actor.email };
   item.updatedAt = new Date().toISOString();
-  addAuditEvent(db, req, { type: 'installation.remote_install_started', actor: actor.email, result: 'accepted', installationId });
+  addAuditEvent(db, req, {
+    type: 'installation.remote_install_started',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    installerArtifactId: item.installerArtifact.id,
+    installerSha256: item.installerArtifact.sha256,
+  });
   await saveDb(db);
 
   // TOFU da host key SSH: guardada por host:porta (um mesmo cliente pode trocar de
@@ -1792,8 +2040,20 @@ async function handleUpsertUser(req, res, db, actor) {
     passwordHash: password ? hashPassword(password) : existing.passwordHash,
     createdAt: (existing && existing.createdAt) || new Date().toISOString(),
     createdBy: (existing && existing.createdBy) || actor.email,
+    authVersion: password
+      ? (existing
+        ? (Number.isInteger(existing.authVersion) ? existing.authVersion : 1) + 1
+        : 1)
+      : (Number.isInteger(existing?.authVersion) ? existing.authVersion : 1),
   };
-  addAuditEvent(db, req, { type: existing ? 'user.updated' : 'user.created', actor: actor.email, result: 'accepted', installationId: email });
+  const revokedSessions = password ? revokeUserSessions(db, email) : 0;
+  addAuditEvent(db, req, {
+    type: existing ? 'user.updated' : 'user.created',
+    actor: actor.email,
+    result: 'accepted',
+    installationId: email,
+    revokedSessions,
+  });
   await saveDb(db);
   return json(req, res, 200, { ok: true });
 }
@@ -1803,7 +2063,14 @@ async function handleDeleteUser(req, res, db, actor, emailRaw) {
   if (email === actor.email) return json(req, res, 400, { error: 'self_delete', message: 'Você não pode remover a própria conta logada.' });
   if (!db.users || !db.users[email]) return json(req, res, 404, { error: 'user_not_found' });
   delete db.users[email];
-  addAuditEvent(db, req, { type: 'user.deleted', actor: actor.email, result: 'accepted', installationId: email });
+  const revokedSessions = revokeUserSessions(db, email);
+  addAuditEvent(db, req, {
+    type: 'user.deleted',
+    actor: actor.email,
+    result: 'accepted',
+    installationId: email,
+    revokedSessions,
+  });
   await saveDb(db);
   return json(req, res, 200, { ok: true });
 }
@@ -1834,9 +2101,9 @@ async function route(req, res) {
     if (req.method === 'GET' && url.pathname === '/api/agent/status') {
       return handleAgentStatus(req, res);
     }
-    const installerMatch = url.pathname.match(/^\/install\/([^/]+)\/([^/]+)$/);
+    const installerMatch = url.pathname.match(/^\/install\/([^/]+)$/);
     if (req.method === 'GET' && installerMatch) {
-      return handleQuickInstaller(req, res, decodeURIComponent(installerMatch[1]), decodeURIComponent(installerMatch[2]));
+      return handleQuickInstaller(req, res, decodeURIComponent(installerMatch[1]));
     }
     if (url.pathname.startsWith('/api/admin/')) {
       const db = await loadDb();
@@ -2211,12 +2478,13 @@ function startTimeseriesMaintenance() {
 }
 
 function startServer() {
-  startTimeseriesMaintenance();
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
   // route() é async; sem este .catch, uma rejeição (ex.: loadDb) escapava como
   // unhandledRejection. Aqui garantimos uma resposta 500 e seguimos vivos.
   const url = req.url || '';
-  const touchesDb = url.startsWith('/api/') || url.startsWith('/install/');
+  const touchesDb =
+    (url.startsWith('/api/') && url !== '/api/health') ||
+    url.startsWith('/install/');
   const run = () => Promise.resolve(route(req, res));
   const started = touchesDb ? runSerialized(run) : run();
   started.catch((error) => {
@@ -2226,9 +2494,45 @@ function startServer() {
       else res.end();
     } catch { /* resposta já encerrada */ }
   });
-  }).listen(PORT, HOST, () => {
-    console.log(`DRAC Central ouvindo em http://${HOST}:${PORT}`);
   });
+  const datastore = getDatastore();
+  Promise.resolve(datastore.acquireInstanceLock())
+    .then(() => {
+      startTimeseriesMaintenance();
+      server.listen(PORT, HOST, () => {
+        console.log(`DRAC Central ouvindo em http://${HOST}:${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error('[central] startup recusado:', error.message);
+      server.emit('error', error);
+    });
+
+  let closing = false;
+  let datastoreClosePromise = null;
+  const closeDatastore = () => {
+    if (!datastoreClosePromise) {
+      datastoreClosePromise = datastore.close().catch((error) => {
+        console.error('[central] falha ao liberar datastore:', error.message);
+      });
+    }
+    return datastoreClosePromise;
+  };
+  server.on('close', () => { void closeDatastore(); });
+  const shutdown = (signal) => {
+    if (closing) return;
+    closing = true;
+    console.log(`[central] ${signal}: encerrando com segurança.`);
+    server.close(() => {
+      closeDatastore().finally(() => process.exit(0));
+    });
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  server.once('listening', () => {
+    process.once('SIGTERM', () => shutdown('SIGTERM'));
+    process.once('SIGINT', () => shutdown('SIGINT'));
+  });
+  return server;
 }
 
 if (require.main === module) startServer();

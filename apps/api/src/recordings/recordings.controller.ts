@@ -218,10 +218,7 @@ export class RecordingsController {
   @RequirePermission('playback')
   @Get('recordings')
   async listRecordings(@CurrentUser() user: AuthUser, @Query() query: ListRecordingsQueryDto) {
-    if (user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN) {
-      return this.recordingsService.list(query);
-    }
-    const ids = await this.accessControlService.getAccessibleCameraIds(user);
+    const ids = await this.accessControlService.getPlaybackCameraIds(user);
     return this.recordingsService.list(query, ids);
   }
 
@@ -296,12 +293,9 @@ export class RecordingsController {
     @Query('brokenAlertThreshold') brokenAlertThreshold?: string,
   ) {
     if (cameraId) {
-      await this.accessControlService.assertCanViewCamera(user, cameraId);
+      await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
     }
-    const accessibleCameraIds =
-      user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN
-        ? undefined
-        : await this.accessControlService.getAccessibleCameraIds(user);
+    const accessibleCameraIds = await this.accessControlService.getPlaybackCameraIds(user);
     const threshold = brokenAlertThreshold ? Number(brokenAlertThreshold) : undefined;
     return this.recordingsService.getRecordingHealthSummary({
       date,
@@ -322,11 +316,8 @@ export class RecordingsController {
     if (!cameraId) {
       throw new BadRequestException('cameraId é obrigatório.');
     }
-    await this.accessControlService.assertCanViewCamera(user, cameraId);
-    const accessibleCameraIds =
-      user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN
-        ? undefined
-        : await this.accessControlService.getAccessibleCameraIds(user);
+    await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
+    const accessibleCameraIds = await this.accessControlService.getPlaybackCameraIds(user);
     return this.recordingsService.getRecordingGapsReport({
       cameraId,
       date,
@@ -345,11 +336,8 @@ export class RecordingsController {
     if (!cameraId) {
       throw new BadRequestException('cameraId é obrigatório.');
     }
-    await this.accessControlService.assertCanViewCamera(user, cameraId);
-    const accessibleCameraIds =
-      user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN
-        ? undefined
-        : await this.accessControlService.getAccessibleCameraIds(user);
+    await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
+    const accessibleCameraIds = await this.accessControlService.getPlaybackCameraIds(user);
     return this.recordingsService.getPlaybackReadinessReport({
       cameraId,
       date,
@@ -367,12 +355,9 @@ export class RecordingsController {
     @Query('cameraId') cameraId?: string,
   ) {
     if (cameraId) {
-      await this.accessControlService.assertCanViewCamera(user, cameraId);
+      await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
     }
-    const accessibleCameraIds =
-      user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN
-        ? undefined
-        : await this.accessControlService.getAccessibleCameraIds(user);
+    const accessibleCameraIds = await this.accessControlService.getPlaybackCameraIds(user);
     return this.recordingsService.getStorageUsageAnalytics({
       from,
       to,
@@ -404,7 +389,7 @@ export class RecordingsController {
     if (!cameraId) {
       throw new BadRequestException('cameraId é obrigatório.');
     }
-    await this.accessControlService.assertCanViewCamera(user, cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
     const result = await this.recordingsService.buildVodPlaylist(user, { cameraId, from, to });
     await this.auditService.log(user.id, 'playback.vod.playlist', 'Camera', cameraId, {
       from: result.from,
@@ -437,7 +422,7 @@ export class RecordingsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const recording = await this.recordingsService.ensureRecordingExists(recordingId);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     const token = await this.authService.createPlaybackToken(user.id, recordingId);
     const expiresAtMs = token.expiresAt ? new Date(token.expiresAt).getTime() : Date.now() + 5 * 60 * 1000;
     const maxAgeMs = Math.max(60_000, expiresAtMs - Date.now());
@@ -463,7 +448,7 @@ export class RecordingsController {
   @Get('recordings/:id/diagnostics')
   async getDiagnostics(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     return this.recordingsService.getRecordingDiagnostics(id);
   }
 
@@ -472,7 +457,7 @@ export class RecordingsController {
   @Get('recordings/:id/integrity')
   async getIntegrity(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     return this.recordingsService.getRecordingIntegrity(id);
   }
 
@@ -481,7 +466,7 @@ export class RecordingsController {
   @Post('recordings/:id/compatible/prepare')
   async prepareCompatiblePlayback(@CurrentUser() user: AuthUser, @Param('id') id: string, @Req() req: Request) {
     const recording = await this.recordingsService.ensureRecordingExists(id);
-    await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     const result = await this.recordingsService.prepareCompatiblePlayback(id);
     await this.auditService.log(user.id, 'playback.compatible.prepare', 'Recording', id, {
       sizeBytes: result.sizeBytes,
@@ -521,7 +506,7 @@ export class RecordingsController {
     const ids = [...new Set(dto.recordingIds)].slice(0, 120);
     for (const id of ids) {
       const recording = await this.recordingsService.ensureRecordingExists(id);
-      await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+      await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     }
     return this.recordingsService.getRecordingDiagnosticsBulk(ids, Boolean(dto.includeIntegrity));
   }
@@ -614,7 +599,7 @@ export class RecordingsController {
     const ids = [...new Set(dto.recordingIds)].slice(0, 50);
     for (const id of ids) {
       const recording = await this.recordingsService.ensureRecordingExists(id);
-      await this.accessControlService.assertCanViewCamera(user, recording.cameraId);
+      await this.accessControlService.assertCanPlaybackCamera(user, recording.cameraId);
     }
     const token = await this.authService.createDownloadZipToken(user.id, ids);
     await this.auditService.log(user.id, 'recording.download.batch_token', 'Recording', null, { count: ids.length }, req);
@@ -640,7 +625,9 @@ export class RecordingsController {
     const tokenUser = await this.authService.me(payload.sub);
     for (const id of payload.recordingIds) {
       const recording = await this.recordingsService.ensureRecordingExists(id);
-      await this.accessControlService.assertCanViewCamera(tokenUser, recording.cameraId);
+      // Revalida no consumo: uma mudança para RESTRICTED depois da emissão do
+      // token também bloqueia a extração do histórico.
+      await this.accessControlService.assertCanPlaybackCamera(tokenUser, recording.cameraId);
     }
     await this.auditService.log(tokenUser.id, 'recording.download.zip', 'Recording', null, { count: payload.recordingIds.length }, req);
     return this.recordingsService.downloadRecordingsZip(payload.recordingIds, res);
@@ -754,7 +741,7 @@ export class RecordingsController {
     const cleanReason = reason?.trim() ?? '';
     if (!cleanReason) throw new BadRequestException('Motivo é obrigatório para download de clip.');
     const clip = await this.recordingsService.ensureExportedClipExists(clipId);
-    await this.accessControlService.assertCanViewCamera(user, clip.cameraId);
+    await this.accessControlService.assertCanPlaybackCamera(user, clip.cameraId);
     await this.auditService.log(
       user.id,
       'clip.download',
@@ -810,7 +797,7 @@ export class RecordingsController {
   }
 
   // 2.9 — Sprite (mosaico low-res) para varrer a timeline. Mesmo gate do
-  // thumbnail: token de playback da própria gravação + assertCanViewCamera, de
+  // thumbnail: token de playback da própria gravação + assertCanPlaybackCamera, de
   // modo que derivados de câmera privada NUNCA vazam (invariante LGPD 1.2.i).
   @Public()
   @Get('recordings/:id/preview-sprite')

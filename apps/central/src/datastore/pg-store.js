@@ -35,6 +35,7 @@ class PgStore {
     this._pool = options.pool || null;
     this._Pool = options.PoolClass || null;
     this._ready = null;
+    this._instanceLockClient = null;
   }
 
   _pg() {
@@ -61,7 +62,42 @@ class PgStore {
   }
 
   async close() {
+    await this.releaseInstanceLock();
     if (this._pool && !this.options.pool) await this._pool.end();
+  }
+
+  // O servidor trabalha com snapshots completos (load → mutate → writeAll).
+  // Enquanto esse modelo existir, HA ativo/ativo perderia updates mesmo com a
+  // transação de writeAll. Um advisory lock de SESSÃO torna o contrato
+  // singleton explícito e fail-fast; a conexão libera o lock automaticamente
+  // em crash. Evoluir para operações incrementais/CAS permitirá remover isto.
+  async acquireInstanceLock() {
+    if (this._instanceLockClient) return;
+    const client = await this._pg().connect();
+    try {
+      const result = await client.query(
+        'SELECT pg_try_advisory_lock($1, $2) AS acquired',
+        [1146241347, 1162756948], // "DRAC" / "CENT" como inteiros estáveis.
+      );
+      if (result.rows[0]?.acquired !== true) {
+        throw new Error('Outra instância da DRAC Central já possui o lock exclusivo do datastore.');
+      }
+      this._instanceLockClient = client;
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+  }
+
+  async releaseInstanceLock() {
+    const client = this._instanceLockClient;
+    if (!client) return;
+    this._instanceLockClient = null;
+    try {
+      await client.query('SELECT pg_advisory_unlock($1, $2)', [1146241347, 1162756948]);
+    } finally {
+      client.release();
+    }
   }
 
   // ── Leitura ─────────────────────────────────────────────────────────────

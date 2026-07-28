@@ -46,6 +46,8 @@ export function readEnvConfig(
     databaseUrl: source.DATABASE_URL ?? '',
     redisHost: source.REDIS_HOST ?? 'localhost',
     redisPort: num('REDIS_PORT', 6379, { min: 1, max: 65535, integer: true }),
+    redisConnectTimeoutMs: num('REDIS_CONNECT_TIMEOUT_MS', 5_000, { min: 500, max: 60_000, integer: true }),
+    redisStartupTimeoutMs: num('REDIS_STARTUP_TIMEOUT_MS', 10_000, { min: 1_000, max: 120_000, integer: true }),
     cameraSecretKey: source.CAMERA_SECRET_KEY ?? '',
     ffmpegRtspTransport: source.FFMPEG_RTSP_TRANSPORT ?? 'tcp',
     ffmpegRtspFallbackTransports: source.FFMPEG_RTSP_FALLBACK_TRANSPORTS ?? 'tcp,udp',
@@ -116,6 +118,7 @@ export function readEnvConfig(
     mediaMtxRtspInternalUrl: source.MEDIAMTX_RTSP_INTERNAL_URL ?? 'rtsp://mediamtx:8554',
     mediaMtxApiUser: source.MEDIAMTX_API_USER ?? '',
     mediaMtxApiPass: source.MEDIAMTX_API_PASS ?? '',
+    mediaMtxAuthCallbackToken: source.MEDIAMTX_AUTH_CALLBACK_TOKEN ?? '',
     mediaMtxPublicHost: source.MEDIAMTX_PUBLIC_HOST ?? '',
     mediaMtxPublicScheme: source.MEDIAMTX_PUBLIC_SCHEME ?? '',
     mediaMtxPublicWebrtcUrl: source.MEDIAMTX_PUBLIC_WEBRTC_URL ?? '',
@@ -138,6 +141,8 @@ export function readEnvConfig(
     adminPassword: source.ADMIN_PASSWORD ?? '',
     adminName: source.ADMIN_NAME ?? 'Administrador',
     internalServiceToken: source.INTERNAL_SERVICE_TOKEN ?? '',
+    cameraAllowedCidrs: source.CAMERA_ALLOWED_CIDRS ?? '',
+    cameraDeniedCidrs: source.CAMERA_DENIED_CIDRS ?? '',
     cameraTestAllowPublicIp: flag('CAMERA_TEST_ALLOW_PUBLIC_IP', false),
     // Dias de retenção: 0 ou NaN apagaria o acervo INTEIRO na varredura seguinte.
     // Piso de 1 dia é inegociável.

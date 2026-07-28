@@ -1,3 +1,5 @@
+import { assertCameraTargetAllowed } from '../../common/network/safe-url.helper';
+
 export type CameraRtspUrlInput = {
   username: string;
   password: string;
@@ -130,6 +132,7 @@ export function resolveDeliveryRtspProfile(camera: CameraRtspProfileInput) {
 }
 
 export function buildRtspUrl(camera: CameraRtspUrlInput): string {
+  const targetIp = assertCameraTargetAllowed(camera.ip, camera.rtspPort);
   const channel = normalizeChannel(camera.channel, 1);
   const subtype = normalizeSubtype(camera.subtype, 0);
 
@@ -146,5 +149,10 @@ export function buildRtspUrl(camera: CameraRtspUrlInput): string {
 
   const username = encodeURIComponent(camera.username);
   const password = encodeURIComponent(camera.password);
-  return `rtsp://${username}:${password}@${camera.ip}:${camera.rtspPort}${rtspPath}`;
+  const authorityHost = isIpv6Literal(targetIp) ? `[${targetIp}]` : targetIp;
+  return `rtsp://${username}:${password}@${authorityHost}:${camera.rtspPort}${rtspPath}`;
+}
+
+function isIpv6Literal(ip: string): boolean {
+  return ip.includes(':');
 }

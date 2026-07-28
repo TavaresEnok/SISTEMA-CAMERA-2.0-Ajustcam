@@ -279,14 +279,11 @@ test('auditoria da confirmação visual NÃO grava a senha nem a imagem', async 
   );
 });
 
-// ── 5. Alvo da captura: SSRF sem quebrar a câmera WAN que já existe ────────
+// ── 5. Alvo da captura: egress explícito, inclusive para legado ────────────
 //
-// A guarda de IP público existe porque o cadastro aceita um alvo DIGITADO pelo
-// usuário — sem ela, o campo "IP da câmera" vira um scanner da rede interna do
-// servidor (SSRF). Mas a mesma guarda aplicada cegamente na câmera JÁ CADASTRADA
-// mataria a conferência de imagem de toda instalação com câmera em IP público
-// (WAN), que é caso real nesta base. O alvo guardado NÃO é entrada do usuário: a
-// gravação e a live já falam com ele o tempo todo.
+// O destino persistido também precisa ser revalidado: uma policy pode ser
+// endurecida depois do cadastro e registros antigos não são raiz de confiança.
+// Câmera WAN legítima continua possível, mas somente por CIDR explícito.
 
 const WAN_CAMERA = {
   id: 'cam-wan',
@@ -304,10 +301,10 @@ const WAN_CAMERA = {
   preferredRtspTransport: 'tcp',
 };
 
-function serviceForWanCamera() {
+function serviceForWanCamera(allowedCidrs = '') {
   const service = new CamerasService(
     { camera: { findUnique: async () => ({ ...WAN_CAMERA }) } } as any,
-    { get: () => undefined } as any,
+    { get: (key: string) => key === 'cameraAllowedCidrs' ? allowedCidrs : undefined } as any,
     { decrypt: () => SECRET } as any,
     { check: async () => true } as any,
     {} as any,
@@ -323,7 +320,7 @@ function serviceForWanCamera() {
   return service;
 }
 
-test('cadastro: IP público DIGITADO continua bloqueado (o campo não é um scanner de rede)', async () => {
+test('cadastro: IP fora da allowlist continua bloqueado (o campo não é um scanner de rede)', async () => {
   await assert.rejects(
     () =>
       serviceForWanCamera().capturePreviewFrame({
@@ -332,20 +329,20 @@ test('cadastro: IP público DIGITADO continua bloqueado (o campo não é um scan
         username: 'admin',
         password: SECRET,
       }),
-    /IP público/,
+    /fora das redes de câmera autorizadas/,
   );
 });
 
-test('câmera JÁ CADASTRADA em IP público segue conferível (falha graciosa, não 400)', async () => {
-  const result = await serviceForWanCamera().capturePreviewFrameForCamera('cam-wan');
+test('câmera WAN já cadastrada só é conferível quando sua rede foi autorizada', async () => {
+  const result = await serviceForWanCamera('203.0.113.0/24').capturePreviewFrameForCamera('cam-wan');
   assert.equal(result.ok, false);
   assert.ok(result.reason.length > 0, 'a tela precisa do motivo, não de uma exceção');
 });
 
-test('override apontando para OUTRO IP público volta a passar pela guarda', async () => {
+test('override para outro CIDR não herda a autorização do endereço persistido', async () => {
   await assert.rejects(
-    () => serviceForWanCamera().capturePreviewFrameForCamera('cam-wan', { ip: '198.51.100.7' }),
-    /IP público/,
+    () => serviceForWanCamera('203.0.113.0/24').capturePreviewFrameForCamera('cam-wan', { ip: '198.51.100.7' }),
+    /fora das redes de câmera autorizadas/,
     'trocar o alvo é entrada do usuário outra vez — a guarda de SSRF tem que valer',
   );
 });

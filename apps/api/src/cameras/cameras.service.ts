@@ -4,14 +4,14 @@ import { CameraStatus, CameraPermissionLevel } from '@prisma/client';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
-import { execFile, spawn } from 'child_process';
-import { promisify } from 'node:util';
-import { isIP } from 'node:net';
 import { statfs } from 'node:fs/promises';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
-import { isPrivateOrReservedIp } from '../common/network/safe-url.helper';
+import {
+  assertCameraTargetAllowed,
+  CameraNetworkPolicyError,
+} from '../common/network/safe-url.helper';
 import { AlarmsService } from '../alarms/alarms.service';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { TestCameraConnectionDto } from './dto/test-camera-connection.dto';
@@ -27,6 +27,10 @@ import {
 } from './helpers/rtsp-url.helper';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { envNumber } from '../common/config/env-number.helper';
+import {
+  execFileWithSecretUrl,
+  spawnWithSecretUrl,
+} from '../common/process/secret-url-process.helper';
 import { assessCameraCompatibility } from './helpers/camera-compatibility.helper';
 import {
   SNAPSHOT_MAX_BYTES,
@@ -101,8 +105,6 @@ type CameraProfilePayload = {
   recordingBitrateKbps?: number | null;
 };
 
-const execFileAsync = promisify(execFile);
-
 @Injectable()
 export class CamerasService {
   private readonly logger = new Logger(CamerasService.name);
@@ -141,20 +143,24 @@ export class CamerasService {
     private readonly alarmsService: AlarmsService,
   ) {}
 
-  private assertTestTargetAllowed(ip: string) {
-    const normalizedIp = ip.trim();
-    if (!normalizedIp || isIP(normalizedIp) === 0) {
-      throw new BadRequestException('IP inválido para teste de conexão.');
-    }
-    const allowPublic = this.configService.get<boolean>('cameraTestAllowPublicIp') === true;
-    if (!allowPublic && !isPrivateOrReservedIp(normalizedIp)) {
-      throw new BadRequestException(
-        'Teste de conexão para IP público está bloqueado. Configure CAMERA_TEST_ALLOW_PUBLIC_IP=true se for necessário.',
-      );
+  private assertTestTargetAllowed(ip: string, port?: number | null): string {
+    try {
+      return assertCameraTargetAllowed(ip, port, {
+        NODE_ENV: process.env.NODE_ENV,
+        CAMERA_ALLOWED_CIDRS: this.configService.get<string>('cameraAllowedCidrs'),
+        CAMERA_DENIED_CIDRS: this.configService.get<string>('cameraDeniedCidrs'),
+      });
+    } catch (error) {
+      if (error instanceof CameraNetworkPolicyError) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
     }
   }
 
   async create(dto: CreateCameraDto, privacy?: { isPrivate: boolean; ownerUserId: string | null }) {
+    const normalizedIp = this.assertTestTargetAllowed(dto.ip, dto.rtspPort);
+    if (dto.onvifPort != null) this.assertTestTargetAllowed(normalizedIp, dto.onvifPort);
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
     const normalizedProfile = this.normalizeProfileToDetected(dto, null);
     const defaultChannel = dto.channel ?? 1;
@@ -165,7 +171,7 @@ export class CamerasService {
     const camera = await this.prisma.camera.create({
       data: {
         name: dto.name,
-        ip: dto.ip,
+        ip: normalizedIp,
         rtspPort: dto.rtspPort,
         onvifPort: dto.onvifPort,
         username: dto.username,
@@ -309,13 +315,19 @@ export class CamerasService {
 
   async update(id: string, dto: UpdateCameraDto) {
     const existing = await this.getCameraOrThrow(id);
+    const normalizedIp = this.assertTestTargetAllowed(
+      dto.ip ?? existing.ip,
+      dto.rtspPort ?? existing.rtspPort,
+    );
+    const targetOnvifPort = dto.onvifPort ?? existing.onvifPort;
+    if (targetOnvifPort != null) this.assertTestTargetAllowed(normalizedIp, targetOnvifPort);
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
     const normalizedProfile = this.normalizeProfileToDetected(dto, existing);
     const camera = await this.prisma.camera.update({
       where: { id },
       data: {
         name: dto.name,
-        ip: dto.ip,
+        ip: dto.ip === undefined ? undefined : normalizedIp,
         rtspPort: dto.rtspPort,
         onvifPort: dto.onvifPort,
         username: dto.username,
@@ -370,6 +382,51 @@ export class CamerasService {
     // ciclo real de módulos Cameras→Ai→Cameras e o Nest não instancia
     // (MediamtxProxyService fica sem CamerasService). Incidente 2026-07-21.
     return sanitizeCamera(camera);
+  }
+
+  async transferPrivateCameraOwner(id: string, ownerUserId: string) {
+    const camera = await this.getCameraOrThrow(id);
+    if (!camera.isPrivate) {
+      throw new BadRequestException('Somente câmera privada possui proprietário transferível.');
+    }
+    const nextOwner = await this.prisma.user.findUnique({
+      where: { id: ownerUserId },
+      select: { id: true, isActive: true },
+    });
+    if (!nextOwner?.isActive) {
+      throw new BadRequestException('O novo proprietário deve ser um usuário ativo.');
+    }
+    if (camera.ownerUserId === nextOwner.id) return sanitizeCamera(camera);
+
+    return this.prisma.$transaction(async (tx) => {
+      if (camera.ownerUserId) {
+        // Transferência revoga o acesso direto do antigo dono. Compartilhamentos
+        // de terceiros permanecem, pois são concessões independentes.
+        await tx.cameraPermission.deleteMany({
+          where: { userId: camera.ownerUserId, cameraId: id },
+        });
+      }
+      const existingGrant = await tx.cameraPermission.findFirst({
+        where: { userId: nextOwner.id, cameraId: id, groupId: null },
+        select: { id: true },
+      });
+      if (existingGrant) {
+        await tx.cameraPermission.update({
+          where: { id: existingGrant.id },
+          data: { level: CameraPermissionLevel.ADMIN },
+        });
+      } else {
+        await tx.cameraPermission.create({
+          data: { userId: nextOwner.id, cameraId: id, level: CameraPermissionLevel.ADMIN },
+        });
+      }
+      const updated = await tx.camera.update({
+        where: { id },
+        data: { ownerUserId: nextOwner.id },
+        include: { site: true, area: true, group: true },
+      });
+      return sanitizeCamera(updated);
+    });
   }
 
   async remove(id: string) {
@@ -565,7 +622,8 @@ export class CamerasService {
   }
 
   async testConnectionDraft(input: TestCameraConnectionDto) {
-    this.assertTestTargetAllowed(input.ip);
+    this.assertTestTargetAllowed(input.ip, input.rtspPort);
+    if (input.onvifPort != null) this.assertTestTargetAllowed(input.ip, input.onvifPort);
     const steps: CameraProbeStep[] = [];
     const runStep = async <T>(key: string, label: string, action: () => Promise<T>, detail?: (value: T) => string | null | undefined): Promise<T> => {
       const startedAt = Date.now();
@@ -905,14 +963,9 @@ export class CamerasService {
     },
     options?: { targetAlreadyProvisioned?: boolean },
   ): Promise<SnapshotResult> {
-    // A guarda de IP público existe porque o alvo vem DIGITADO pelo usuário: sem
-    // ela o campo "IP da câmera" vira um scanner da rede interna do servidor
-    // (SSRF). Ela NÃO se aplica ao endereço já gravado de uma câmera existente —
-    // a live e a gravação falam com ele o tempo todo, e aplicá-la ali mataria a
-    // conferência de imagem de toda instalação com câmera em WAN.
-    if (!options?.targetAlreadyProvisioned) {
-      this.assertTestTargetAllowed(input.ip);
-    }
+    // Revalida também câmeras persistidas: regras de rede podem ser endurecidas
+    // depois do cadastro, e registros legados não podem contornar a política.
+    this.assertTestTargetAllowed(input.ip, input.rtspPort);
     const transport = normalizeSnapshotTransport(input.preferredRtspTransport);
     const capturedAt = new Date().toISOString();
     const requestedSource: SnapshotSource = {
@@ -972,17 +1025,18 @@ export class CamerasService {
     });
 
     try {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execFileWithSecretUrl(
         'ffmpeg',
         buildSnapshotFfmpegArgs({
           rtspUrl: url,
           transport,
           timeoutUs: this.rtspProbeTimeoutMs * 1000,
         }),
+        url,
         { encoding: 'buffer', maxBuffer: SNAPSHOT_MAX_BYTES, timeout: this.snapshotTimeoutMs },
       );
       return buildSnapshotSuccess({
-        buffer: stdout,
+        buffer: stdout as Buffer,
         source,
         stream: {
           codec: probe.metadata?.codec ?? null,
@@ -1516,7 +1570,7 @@ export class CamerasService {
     const probePath = async (port: number, path: string) => {
       const url = `rtsp://${encodeURIComponent(input.username)}:${encodeURIComponent(input.password)}@${input.ip}:${port}${path}`;
       const result = await new Promise<{ ok: boolean; error: string | null; metadata: ProbedStreamMetadata | null }>((resolve) => {
-        const proc = spawn(
+        const proc = spawnWithSecretUrl(
           'ffprobe',
           [
             '-v',
@@ -1533,6 +1587,7 @@ export class CamerasService {
             'json',
             url,
           ],
+          url,
           { stdio: ['ignore', 'pipe', 'pipe'] },
         );
         let settled = false;
@@ -1548,10 +1603,10 @@ export class CamerasService {
         }, this.rtspProbeKillTimeoutMs);
         let stdout = '';
         let stderr = '';
-        proc.stdout.on('data', (chunk) => {
+        proc.stdout!.on('data', (chunk) => {
           stdout += chunk.toString();
         });
-        proc.stderr.on('data', (chunk) => {
+        proc.stderr!.on('data', (chunk) => {
           stderr += chunk.toString();
         });
         proc.on('error', (error) => finish({ ok: false, error: sanitizeSensitiveText(error), metadata: null }));
@@ -1795,7 +1850,7 @@ export class CamerasService {
   private async estimateBitrateWithFfmpeg(url: string): Promise<number | null> {
     return await new Promise<number | null>((resolve) => {
       const startedAt = Date.now();
-      const proc = spawn(
+      const proc = spawnWithSecretUrl(
         'ffmpeg',
         [
           '-hide_banner',
@@ -1816,6 +1871,7 @@ export class CamerasService {
           'matroska',
           'pipe:1',
         ],
+        url,
         { stdio: ['ignore', 'pipe', 'pipe'] },
       );
 
@@ -1834,11 +1890,11 @@ export class CamerasService {
         finish(this.calculateBitrateFromBytes(bytes, startedAt) ?? this.extractBitrateFromFfmpegLog(stderr));
       }, 9000);
 
-      proc.stdout.on('data', (chunk: Buffer) => {
+      proc.stdout!.on('data', (chunk: Buffer) => {
         bytes += chunk.length;
       });
 
-      proc.stderr.on('data', (chunk) => {
+      proc.stderr!.on('data', (chunk) => {
         stderr += chunk.toString();
       });
 

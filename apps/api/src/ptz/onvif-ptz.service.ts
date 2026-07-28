@@ -5,6 +5,7 @@ import * as http from 'http';
 import { type PtzCommandDto } from './dto/ptz-command.dto';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
+import { assertCameraTargetAllowed } from '../common/network/safe-url.helper';
 import { PtzStateStore } from './ptz-state.store';
 
 type DigestSoapRequestInput = {
@@ -246,6 +247,12 @@ export class OnvifPtzService {
 
   digestSoapRequest(input: DigestSoapRequestInput): Promise<DigestSoapResult> {
     const { host, port, path, username, password, timeout } = input;
+    let allowedHost: string;
+    try {
+      allowedHost = assertCameraTargetAllowed(host, port);
+    } catch {
+      return Promise.resolve({ ok: false, message: 'Destino ONVIF bloqueado pela política de rede.' });
+    }
     const method = input.method ?? 'POST';
     const body = input.body ?? '';
     const contentType = input.contentType ?? 'application/soap+xml; charset=utf-8';
@@ -268,7 +275,7 @@ export class OnvifPtzService {
       };
 
       const requestOptions: http.RequestOptions = {
-        host,
+        host: allowedHost,
         port,
         path,
         method,

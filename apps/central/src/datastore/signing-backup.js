@@ -8,7 +8,7 @@ const crypto = require('node:crypto');
 //
 // Na Central, a "identidade de assinatura" de cada instalação é o material secreto
 // que a autentica/identifica: a `licenseKey` (assina/autoriza os heartbeats), o
-// `installerToken` (autoriza o download do instalador) e as `sshHostKeys` (TOFU).
+// `installerTokenHash` (valida o download do instalador) e as `sshHostKeys` (TOFU).
 // São irreproduzíveis: se a migração corromper o datastore, sem esse backup os
 // clientes perderiam a licença e precisariam reinstalar. Também guardamos o
 // `passwordHash` dos usuários admin (identidade de login), sem senha em claro.
@@ -20,7 +20,9 @@ function collectSigningIdentities(db) {
   for (const [id, item] of Object.entries(source.installations || {})) {
     const entry = {};
     if (item && item.licenseKey) entry.licenseKey = item.licenseKey;
-    if (item && item.installerToken) entry.installerToken = item.installerToken;
+    if (item && item.installerTokenHash) {
+      entry.installerTokenHash = item.installerTokenHash;
+    }
     if (item && item.sshHostKeys && typeof item.sshHostKeys === 'object') {
       entry.sshHostKeys = { ...item.sshHostKeys };
     }
@@ -49,7 +51,7 @@ async function writeSigningBackup(db, dir, now = new Date()) {
   const payload = collectSigningIdentities(db);
   payload.createdAt = now.toISOString();
   await fs.mkdir(dir, { recursive: true });
-  // O conteúdo é SEGREDO (licenseKey, installerToken, chaves SSH, hash de senha):
+  // O conteúdo é SEGREDO (licenseKey, digest de token, chaves SSH, hash de senha):
   // nasce 0600 e o diretório 0700. O `mode` do open só vale na CRIAÇÃO e é filtrado
   // pelo umask, então o chmod explícito depois garante o modo em qualquer umask.
   await fs.chmod(dir, 0o700).catch(() => {});

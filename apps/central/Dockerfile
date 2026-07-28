@@ -12,5 +12,8 @@ COPY apps/central/src ./src
 COPY apps/central/public ./public
 COPY apps/central/scripts ./scripts
 
+RUN mkdir -p /app/data && chown -R node:node /app
+USER node
+
 EXPOSE 9765
 CMD ["node", "src/server.js"]

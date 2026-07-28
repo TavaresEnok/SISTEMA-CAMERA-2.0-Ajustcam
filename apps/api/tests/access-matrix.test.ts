@@ -88,6 +88,9 @@ function makeService() {
       findMany: async (args: any) => {
         const where = args?.where ?? {};
         let rows = PERMISSIONS.filter((p) => p.userId === where.userId);
+        if (typeof where.cameraId === 'string') {
+          rows = rows.filter((p) => p.cameraId === where.cameraId);
+        }
         if (where.cameraId?.not === null) rows = rows.filter((p) => p.cameraId !== null);
         if (where.groupId?.not === null) rows = rows.filter((p) => p.groupId !== null);
         if (where.level) rows = rows.filter((p) => p.level === where.level);
@@ -181,10 +184,37 @@ test('matriz: delegado com permissão DIRETA vê a privada (o dono pode comparti
   const svc = makeService();
   // a inversão NÃO é um bloqueio cego: a autorização DIRETA do dono abre a privada
   assert.equal(await svc.canViewCamera(delegate, 'cam-private'), true);
+  assert.equal(await svc.canControlCamera(delegate, 'cam-private'), false);
+  assert.equal(await svc.canRecordCamera(delegate, 'cam-private'), false);
   await assert.doesNotReject(() => svc.assertCanViewCamera(delegate, 'cam-private'));
   // mas continua sem acesso à comum (não tem permissão nela)
   assert.equal(await svc.canViewCamera(delegate, 'cam-common'), false);
   assert.deepEqual(await accessibleSet(svc, delegate), new Set(['cam-private']));
+});
+
+test('matriz: papel global não eleva VIEW direto em câmera privada para CONTROL/RECORD', async () => {
+  const originalPermissions = [...PERMISSIONS];
+  PERMISSIONS.push({
+    userId: admin.id,
+    cameraId: 'cam-private',
+    groupId: null,
+    level: V,
+  });
+  try {
+    const svc = makeService();
+    assert.equal(await svc.canViewCamera(admin, 'cam-private'), true);
+    assert.equal(await svc.canControlCamera(admin, 'cam-private'), false);
+    assert.equal(await svc.canRecordCamera(admin, 'cam-private'), false);
+    assert.equal(await svc.canAdminCamera(admin, 'cam-private'), true);
+  } finally {
+    PERMISSIONS.splice(0, PERMISSIONS.length, ...originalPermissions);
+  }
+});
+
+test('matriz: proprietário conserva controle e gravação mesmo sem grant redundante', async () => {
+  const svc = makeService();
+  assert.equal(await svc.canControlCamera(owner, 'cam-private'), true);
+  assert.equal(await svc.canRecordCamera(owner, 'cam-private'), true);
 });
 
 // ── PERSONA: OUTRO usuário não relacionado (outro tenant) ────────────────────
@@ -221,6 +251,14 @@ for (const privileged of [
     assert.equal(
       await svc.canViewCamera(privileged.u, 'cam-private'), false,
       `${privileged.label} NÃO pode ver o conteúdo da câmera privada alheia`,
+    );
+    assert.equal(
+      await svc.canControlCamera(privileged.u, 'cam-private'), false,
+      `${privileged.label} NÃO pode acionar PTZ/relé da câmera privada alheia`,
+    );
+    assert.equal(
+      await svc.canRecordCamera(privileged.u, 'cam-private'), false,
+      `${privileged.label} NÃO pode alterar a gravação da câmera privada alheia`,
     );
     await assert.rejects(
       () => svc.assertCanViewCamera(privileged.u, 'cam-private'),
@@ -267,13 +305,11 @@ test('anti-regressão: todo derivado de câmera passa pelo gate de acesso', () =
     ['camera-stream poster', cameraStream, "@Get(':cameraId/poster')"],
     ['camera-stream flv', cameraStream, "@Get(':cameraId/flv')"],
     ['camera-stream clip/start', cameraStream, "@Post(':cameraId/clip/start')"],
-    ['recordings clips/:clipId/download (evidência)', recordings, "@Get('recordings/clips/:clipId/download')"],
     ['ai detections/latest', ai, "@Get('detections/latest/:cameraId')"],
     // Produtores de conteúdo/token que também devem ser vigiados (estavam corretos
     // mas fora do scan — só uma regressão futura neles passaria despercebida).
     ['camera-stream urls', cameraStream, "@Get(':cameraId/urls')"],
     ['camera-stream token', cameraStream, "@Post(':cameraId/token')"],
-    ['recordings play-token', recordings, "@Post('recordings/:id/play-token')"],
   ];
   for (const [label, source, route] of contentDerivatives) {
     assert.match(
@@ -292,8 +328,12 @@ test('anti-regressão: todo derivado de câmera passa pelo gate de acesso', () =
     ['recordings preview-meta', "@Get('recordings/:id/preview-meta')"],
     ['recordings snapshot', "@Get('recordings/:id/snapshot')"],
     ['recordings play', "@Get('recordings/:id/play')"],
+    ['recordings play-token', "@Post('recordings/:id/play-token')"],
     ['recordings download', "@Get('recordings/:id/download')"],
+    ['recordings download-batch-token', "@Post('recordings/download-batch-token')"],
+    ['recordings download-zip', "@Get('recordings/download-zip')"],
     ['recordings clips/export (evidência)', "@Post('recordings/:id/clips/export')"],
+    ['recordings clips/:clipId/download (evidência)', "@Get('recordings/clips/:clipId/download')"],
   ];
   for (const [label, route] of playbackRoutes) {
     assert.match(

@@ -36,6 +36,8 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
 
+USER node
+
 EXPOSE 3000
 
 CMD ["node", "apps/api/dist/main.js"]

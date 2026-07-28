@@ -43,7 +43,26 @@ type MediaMtxAuthRequest = {
   action?: string;
   path?: string;
   protocol?: string;
+  ip?: string;
 };
+
+export function isLoopbackMediaWorkerAuthorized(body: MediaMtxAuthRequest) {
+  const action = String(body?.action ?? '');
+  const path = String(body?.path ?? '');
+  const sourcePath = /^cam_[0-9a-f]{32}(?:_grid|_orig)?_source$/i.test(path);
+  const outputPath = /^cam_[0-9a-f]{32}(?:_grid|_orig)?$/i.test(path);
+  const loopback =
+    body?.ip === '127.0.0.1'
+    || body?.ip === '::1'
+    || body?.ip === '::ffff:127.0.0.1';
+  return (
+    loopback
+    && (
+      (sourcePath && (action === 'read' || action === 'playback'))
+      || (outputPath && action === 'publish')
+    )
+  );
+}
 
 @Controller('camera-stream')
 export class CameraStreamController {
@@ -100,12 +119,36 @@ export class CameraStreamController {
   @Public()
   @SkipThrottle()
   @Post('mediamtx-auth')
-  async authorizeMediaMtx(@Body() body: MediaMtxAuthRequest, @Res() res: Response) {
+  async authorizeMediaMtx(
+    @Body() body: MediaMtxAuthRequest,
+    @Query('internalToken') internalToken: string | undefined,
+    @Res() res: Response,
+  ) {
     const deny = (message: string) => res.status(401).json({ message });
+    const expectedCallbackToken = (
+      this.configService.get<string>('mediaMtxAuthCallbackToken') ?? ''
+    ).trim();
+    if (
+      expectedCallbackToken.length < 32
+      || !internalToken
+      || !timingSafeTextEquals(internalToken, expectedCallbackToken)
+    ) {
+      return deny('Callback de mídia não autenticado.');
+    }
+
     const expectedUser = (this.configService.get<string>('mediaMtxApiUser') ?? '').trim();
     const expectedPass = (this.configService.get<string>('mediaMtxApiPass') ?? '').trim();
     const suppliedUser = String(body?.user ?? '');
     const suppliedPass = String(body?.password ?? '');
+    const action = String(body?.action ?? '');
+
+    // O runOnDemand nasce dentro do próprio container MediaMTX. Ele lê apenas o
+    // path oculto `_source` e publica apenas no path público correspondente.
+    // Assim os URLs usados no argv não carregam nem a senha da câmera nem a
+    // credencial administrativa do MediaMTX.
+    if (isLoopbackMediaWorkerAuthorized(body)) {
+      return res.status(200).json({ authorized: true });
+    }
 
     // Processos internos (API, métricas e publishers FFmpeg) continuam usando a
     // credencial administrativa já existente. O endpoint só é chamado pela rede
@@ -121,7 +164,6 @@ export class CameraStreamController {
       return res.status(200).json({ authorized: true });
     }
 
-    const action = String(body?.action ?? '');
     if (action !== 'read' && action !== 'playback') {
       return deny('Ação de mídia não autorizada.');
     }

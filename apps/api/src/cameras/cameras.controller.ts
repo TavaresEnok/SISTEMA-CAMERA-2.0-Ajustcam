@@ -14,6 +14,7 @@ import { CameraPreviewFrameDto } from './dto/camera-preview-frame.dto';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { TestCameraConnectionDto } from './dto/test-camera-connection.dto';
 import { UpdateCameraDto } from './dto/update-camera.dto';
+import { TransferCameraOwnerDto } from './dto/transfer-camera-owner.dto';
 import { Public } from '../auth/decorators/public.decorator';
 import { ServiceTokenGuard } from '../auth/guards/service-token.guard';
 import { RequirePermission } from '../role-permissions/require-permission.decorator';
@@ -669,6 +670,28 @@ export class CamerasController {
     await this.accessControlService.assertCanViewCamera(user, id);
     const camera = await this.camerasService.findOne(id);
     return this.withCapabilities(user, camera);
+  }
+
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Patch(':id/owner')
+  async transferOwner(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: TransferCameraOwnerDto,
+    @Req() req: Request,
+  ) {
+    await this.accessControlService.assertCanAdminCamera(user, id);
+    const camera = await this.camerasService.transferPrivateCameraOwner(id, dto.ownerUserId);
+    await this.auditService.log(
+      user.id,
+      'camera.owner.transfer',
+      'Camera',
+      id,
+      { ownerUserId: dto.ownerUserId },
+      req,
+    );
+    return camera;
   }
 
   @Roles(UserRole.ADMIN)

@@ -56,7 +56,7 @@ export class AuthService {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  private async signAccessToken(user: User) {
+  private async signAccessToken(user: User, expiresInOverride?: string) {
     const payload: JwtAuthPayload = {
       sub: user.id,
       email: user.email,
@@ -65,7 +65,8 @@ export class AuthService {
       type: 'access',
     };
     const sessionMinutes = await this.settingsService.getSessionTimeoutMinutes().catch(() => 0);
-    const expiresIn = sessionMinutes > 0 ? `${sessionMinutes}m` : (this.configService.get<string>('jwtExpiresIn') ?? '8h');
+    const expiresIn = expiresInOverride
+      ?? (sessionMinutes > 0 ? `${sessionMinutes}m` : (this.configService.get<string>('jwtExpiresIn') ?? '8h'));
     return this.jwtService.signAsync(payload, { expiresIn });
   }
 
@@ -91,7 +92,7 @@ export class AuthService {
     }
   }
 
-  async login(email: string, password: string) {
+  async login(email: string, password: string, accessExpiresIn?: string) {
     const normalizedEmail = email.trim().toLowerCase();
 
     const lock = this.loginAttempts.get(normalizedEmail);
@@ -116,7 +117,7 @@ export class AuthService {
 
     this.loginAttempts.delete(normalizedEmail);
 
-    const accessToken = await this.signAccessToken(user);
+    const accessToken = await this.signAccessToken(user, accessExpiresIn);
     const refresh = await this.createRefreshSession(user);
 
     // Limpa apenas sessões antigas deste usuário; dispositivos válidos seguem conectados.
@@ -134,7 +135,7 @@ export class AuthService {
     };
   }
 
-  async refreshSession(refreshToken: string) {
+  async refreshSession(refreshToken: string, accessExpiresIn?: string) {
     const tokenHash = this.refreshTokenHash(refreshToken);
     const now = new Date();
     const session = await this.prisma.authSession.findUnique({
@@ -170,7 +171,7 @@ export class AuthService {
     }
 
     return {
-      accessToken: await this.signAccessToken(session.user),
+      accessToken: await this.signAccessToken(session.user, accessExpiresIn),
       refreshToken: nextRefreshToken,
       refreshExpiresAt: nextRefreshExpiresAt.toISOString(),
       user: this.sanitizeUser(session.user),

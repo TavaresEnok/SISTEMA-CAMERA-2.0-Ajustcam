@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 const RECORDING_MODES = ['continuous', 'motion', 'schedule', 'manual'] as const;
 const VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
@@ -11,15 +11,18 @@ export class CreateCameraDto {
   name!: string;
 
   @IsString()
+  @IsIP()
   ip!: string;
 
   @IsInt()
   @Min(1)
+  @Max(65535)
   rtspPort!: number;
 
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(65535)
   onvifPort?: number;
 
   @IsString()

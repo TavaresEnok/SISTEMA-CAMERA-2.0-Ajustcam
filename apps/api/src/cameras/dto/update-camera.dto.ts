@@ -1,4 +1,4 @@
-import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { DetectionZoneDto } from './detection-zone.dto';
 
@@ -15,16 +15,19 @@ export class UpdateCameraDto {
 
   @IsOptional()
   @IsString()
+  @IsIP()
   ip?: string;
 
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(65535)
   rtspPort?: number;
 
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(65535)
   onvifPort?: number;
 
   @IsOptional()

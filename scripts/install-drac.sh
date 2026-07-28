@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 DRAC_REPO_URL="${DRAC_REPO_URL:-https://github.com/TavaresEnok/DRAC.git}"
-DRAC_BRANCH="${DRAC_BRANCH:-main}"
+DRAC_INSTALLER_COMMIT="${DRAC_INSTALLER_COMMIT:-}"
 DRAC_INSTALL_DIR="${DRAC_INSTALL_DIR:-/home/flashnet/Drac}"
 DRAC_OPERATING_USER="${DRAC_OPERATING_USER:-flashnet}"
 DRAC_CENTRAL_URL="${DRAC_CENTRAL_URL:-https://ajustcam.ajustconsulting.com.br/central}"
@@ -10,6 +10,7 @@ DRAC_ENVIRONMENT="${DRAC_ENVIRONMENT:-prod}"
 DRAC_AUTO_YES="${DRAC_AUTO_YES:-false}"
 DRAC_WATCHDOG_ENABLED="${DRAC_WATCHDOG_ENABLED:-true}"
 DRAC_WATCHDOG_INTERVAL_MINUTES="${DRAC_WATCHDOG_INTERVAL_MINUTES:-5}"
+DRAC_CAMERA_ALLOWED_CIDRS="${DRAC_CAMERA_ALLOWED_CIDRS:-}"
 
 log() {
   printf '\033[1;36m[DRAC]\033[0m %s\n' "$*"
@@ -42,6 +43,23 @@ run_as_user() {
   else
     sudo -u "$user" "$@"
   fi
+}
+
+run_git_as_user() {
+  local user="$1"
+  shift
+  run_as_user "$user" env \
+    -u BASH_ENV \
+    -u ENV \
+    -u GIT_CONFIG_COUNT \
+    -u GIT_CONFIG_KEY_0 \
+    -u GIT_CONFIG_VALUE_0 \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    git \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false \
+    "$@"
 }
 
 prompt() {
@@ -160,6 +178,14 @@ wait_for_http() {
 preflight() {
   log "Executando pre-checagens"
 
+  if [[ ! "$DRAC_INSTALLER_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    fail "DRAC_INSTALLER_COMMIT deve ser um commit Git completo e imutavel de 40 caracteres hexadecimais."
+  fi
+  DRAC_INSTALLER_COMMIT="$(printf '%s' "$DRAC_INSTALLER_COMMIT" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "$DRAC_REPO_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~/-]+$ ]]; then
+    fail "DRAC_REPO_URL deve ser uma URL HTTPS sem credenciais, query ou fragmento."
+  fi
+
   if [ "$DRAC_OPERATING_USER" = "root" ]; then
     fail "DRAC_OPERATING_USER nao pode ser root. Use um usuario operacional, por exemplo flashnet."
   fi
@@ -201,7 +227,7 @@ preflight() {
 
   check_dns_host "GitHub" "github.com"
   check_dns_host "Central" "$(host_from_url "$DRAC_CENTRAL_URL")"
-  check_http_url "GitHub raw" "https://raw.githubusercontent.com/TavaresEnok/DRAC/main/README.md"
+  check_http_url "GitHub raw" "https://raw.githubusercontent.com/TavaresEnok/DRAC/${DRAC_INSTALLER_COMMIT}/README.md"
   check_http_url "DRAC Central" "${DRAC_CENTRAL_URL%/}/api/health"
 
   for port in 3000 5173 8554 8888 8889; do
@@ -253,19 +279,54 @@ install_host_dependencies() {
 }
 
 sync_repository() {
-  local parent_dir
+  local parent_dir fetched_commit current_origin untracked
   parent_dir="$(dirname "$DRAC_INSTALL_DIR")"
   run_sudo mkdir -p "$parent_dir"
   run_sudo chown -R "$DRAC_OPERATING_USER:$DRAC_OPERATING_USER" "$parent_dir"
 
   if [ -d "$DRAC_INSTALL_DIR/.git" ]; then
-    log "Atualizando repositorio em $DRAC_INSTALL_DIR"
-    run_as_user "$DRAC_OPERATING_USER" git -C "$DRAC_INSTALL_DIR" fetch origin "$DRAC_BRANCH"
-    run_as_user "$DRAC_OPERATING_USER" git -C "$DRAC_INSTALL_DIR" checkout "$DRAC_BRANCH"
-    run_as_user "$DRAC_OPERATING_USER" git -C "$DRAC_INSTALL_DIR" pull --ff-only origin "$DRAC_BRANCH"
+    if ! run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" diff --quiet --ignore-submodules --; then
+      fail "O repositorio existente possui alteracoes rastreadas. A instalacao foi recusada para preservar a integridade do commit aprovado."
+    fi
+    if ! run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" diff --cached --quiet --ignore-submodules --; then
+      fail "O repositorio existente possui alteracoes staged. A instalacao foi recusada."
+    fi
+    untracked="$(run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" ls-files --others --exclude-standard)"
+    if [ -n "$untracked" ]; then
+      fail "O repositorio existente possui arquivos nao rastreados. Mova-os para fora do checkout antes de instalar."
+    fi
+    current_origin="$(run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" remote get-url origin)"
+    if [ "$current_origin" != "$DRAC_REPO_URL" ]; then
+      fail "A origem Git existente diverge da origem aprovada; ajuste-a por procedimento administrativo antes de instalar."
+    fi
+    log "Atualizando repositorio para o commit aprovado em $DRAC_INSTALL_DIR"
+    run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" fetch --depth 1 origin "$DRAC_INSTALLER_COMMIT"
   else
-    log "Clonando DRAC em $DRAC_INSTALL_DIR"
-    run_as_user "$DRAC_OPERATING_USER" git clone --branch "$DRAC_BRANCH" "$DRAC_REPO_URL" "$DRAC_INSTALL_DIR"
+    if [ -e "$DRAC_INSTALL_DIR" ] && [ -n "$(find "$DRAC_INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      fail "DRAC_INSTALL_DIR existe, nao e repositorio Git e nao esta vazio."
+    fi
+    log "Inicializando repositorio DRAC em $DRAC_INSTALL_DIR"
+    run_as_user "$DRAC_OPERATING_USER" mkdir -p "$DRAC_INSTALL_DIR"
+    run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" init
+    run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" remote add origin "$DRAC_REPO_URL"
+    run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" fetch --depth 1 origin "$DRAC_INSTALLER_COMMIT"
+  fi
+
+  fetched_commit="$(run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" rev-parse --verify 'FETCH_HEAD^{commit}')"
+  if [ "$fetched_commit" != "$DRAC_INSTALLER_COMMIT" ]; then
+    fail "O repositorio remoto nao entregou o commit imutavel aprovado."
+  fi
+  run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" checkout --detach "$DRAC_INSTALLER_COMMIT"
+  if [ "$(run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" rev-parse HEAD)" != "$DRAC_INSTALLER_COMMIT" ]; then
+    fail "O checkout final nao corresponde ao commit aprovado."
+  fi
+  if ! run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" diff --quiet --ignore-submodules -- ||
+    ! run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" diff --cached --quiet --ignore-submodules --; then
+    fail "O checkout final divergiu do commit aprovado."
+  fi
+  untracked="$(run_git_as_user "$DRAC_OPERATING_USER" -C "$DRAC_INSTALL_DIR" ls-files --others --exclude-standard)"
+  if [ -n "$untracked" ]; then
+    fail "O checkout final contem arquivos nao rastreados e nao sera executado."
   fi
 }
 
@@ -295,6 +356,8 @@ prepare_env() {
   prompt DRAC_LICENSE_KEY "Chave/licenca do cliente" "drac-$(random_hex 16)"
   prompt DRAC_SERVER_IP "IP ou dominio deste servidor" "${server_ip:-127.0.0.1}"
   prompt DRAC_CENTRAL_URL "URL da DRAC Central" "$DRAC_CENTRAL_URL"
+  prompt DRAC_CAMERA_ALLOWED_CIDRS \
+    "CIDRs exclusivos das redes de cameras (separados por virgula; ex.: 192.168.10.0/24)"
 
   if [ ! -f "$env_file" ]; then
     log "Criando infra/.env"
@@ -308,10 +371,12 @@ prepare_env() {
   env_set "$env_file" POSTGRES_PASSWORD "$(random_hex 24)"
   env_set "$env_file" JWT_SECRET "$(random_hex 32)"
   env_set "$env_file" CAMERA_SECRET_KEY "$(random_hex 32)"
+  env_set "$env_file" CAMERA_ALLOWED_CIDRS "$DRAC_CAMERA_ALLOWED_CIDRS"
   env_set "$env_file" INTERNAL_SERVICE_TOKEN "$(random_hex 24)"
   env_set "$env_file" EVIDENCE_HMAC_SECRET "$(random_hex 32)"
   env_set "$env_file" MEDIAMTX_API_USER "drac_media"
   env_set "$env_file" MEDIAMTX_API_PASS "$(random_hex 18)"
+  env_set "$env_file" MEDIAMTX_AUTH_CALLBACK_TOKEN "$(random_hex 24)"
   env_set "$env_file" CORS_ALLOWED_ORIGINS "http://${DRAC_SERVER_IP}:5173,http://${DRAC_SERVER_IP}:3002"
   env_set "$env_file" PUBLIC_APP_URL "http://${DRAC_SERVER_IP}:5173"
   env_set "$env_file" API_PUBLIC_URL "http://${DRAC_SERVER_IP}:3000"
@@ -323,7 +388,7 @@ prepare_env() {
   env_set "$env_file" CLOUD_CUSTOMER_NAME "$DRAC_CUSTOMER_NAME"
   env_set "$env_file" CLOUD_HEARTBEAT_INTERVAL_SECONDS "60"
   env_set "$env_file" CLOUD_CONNECTOR_TIMEOUT_MS "8000"
-  env_set "$env_file" DRAC_VERSION "$DRAC_BRANCH"
+  env_set "$env_file" DRAC_VERSION "$DRAC_INSTALLER_COMMIT"
   env_set "$env_file" DRAC_LAUNCH_PROFILE "standard"
   env_set "$env_file" DRAC_API_BIND "0.0.0.0"
   env_set "$env_file" DRAC_WEB_BIND "0.0.0.0"
@@ -491,7 +556,7 @@ register_central_now() {
     "$(json_escape "$DRAC_INSTALLATION_ID")" \
     "$(json_escape "$DRAC_INSTALLATION_ID")" \
     "$(json_escape "$DRAC_CUSTOMER_NAME")" \
-    "$(json_escape "$DRAC_BRANCH")")"
+    "$(json_escape "$DRAC_INSTALLER_COMMIT")")"
 
   log "Registrando instalacao imediatamente na DRAC Central"
   if curl -fsS --max-time 12 \
@@ -557,6 +622,9 @@ Central configurada:
 
 Instalacao enviada para a central:
   ${DRAC_INSTALLATION_ID} - ${DRAC_CUSTOMER_NAME}
+
+Versao imutavel instalada:
+  ${DRAC_INSTALLER_COMMIT}
 
 Auto-cura / monitoramento (watchdog de infra):
   journalctl -t drac-watchdog             (eventos e auto-curas)

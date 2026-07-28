@@ -1,9 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Socket } from 'net';
+import { assertCameraTargetAllowed } from './safe-url.helper';
 
 @Injectable()
 export class PortCheckerService {
   check(host: string, port: number, timeoutMs = 2000): Promise<boolean> {
+    try {
+      host = assertCameraTargetAllowed(host, port);
+    } catch {
+      return Promise.resolve(false);
+    }
     return new Promise((resolve) => {
       const socket = new Socket();
       let settled = false;

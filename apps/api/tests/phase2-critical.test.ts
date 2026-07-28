@@ -848,7 +848,7 @@ test('recordings controller: listagem de operador usa cameras acessiveis', async
       return { items: [], total: 0 };
     },
   };
-  const access = { getAccessibleCameraIds: async () => ['cam-1'] };
+  const access = { getPlaybackCameraIds: async () => ['cam-1'] };
   const controller = new RecordingsController({} as any, recordings as any, {} as any, {} as any, access as any, {} as any);
 
   await controller.listRecordings(user, { limit: 20 } as any);

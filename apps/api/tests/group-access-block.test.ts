@@ -38,6 +38,7 @@ function makeService(accessStatus: 'ACTIVE' | 'RESTRICTED' | 'SUSPENDED', isActi
         let rows = CAMERAS;
         if (w.isPrivate === true && 'ownerUserId' in w) rows = [];
         else if (w.id?.in && w.isPrivate === true) rows = [];
+        else if (w.id?.in) rows = rows.filter((c) => w.id.in.includes(c.id));
         else if (w.isPrivate === false) rows = rows.filter((c) => !c.isPrivate);
         else if (w.groupId?.in) rows = rows.filter((c) => w.groupId.in.includes(c.groupId));
         return rows.map((c) => ({ ...c }));
@@ -48,6 +49,7 @@ function makeService(accessStatus: 'ACTIVE' | 'RESTRICTED' | 'SUSPENDED', isActi
         const w = a?.where ?? {};
         const ok = (!w.id?.in || w.id.in.includes(group.id))
           && (w.isActive === undefined || group.isActive === w.isActive)
+          && (typeof w.accessStatus !== 'string' || group.accessStatus === w.accessStatus)
           && (!w.accessStatus?.not || group.accessStatus !== w.accessStatus.not);
         return ok ? [{ ...group }] : [];
       },
@@ -105,6 +107,7 @@ test('RESTRICTED: mantém o AO VIVO, corta o HISTÓRICO (a meia-cobrança)', asy
   assert.ok((await svc.getAccessibleCameraIds(cliente)).includes('cam-a'), 'segue na lista');
   assert.equal(await svc.canPlaybackCamera(cliente, 'cam-a'), false, 'playback/gravações cortados');
   await assert.rejects(() => svc.assertCanPlaybackCamera(cliente, 'cam-a'), ForbiddenException);
+  assert.deepEqual(await svc.getPlaybackCameraIds(cliente), [], 'metadados do acervo também ficam ocultos');
 });
 
 test('ADMIN da instalação nunca é barrado — precisa administrar quem bloqueou', async () => {

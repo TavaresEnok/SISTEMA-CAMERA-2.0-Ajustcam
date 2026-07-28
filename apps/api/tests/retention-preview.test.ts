@@ -21,6 +21,14 @@ function makeService(root: string, recordings: Array<{ id: string; cameraId: str
       findMany: async () => recordings.map((r) => ({ ...r })),
       delete: async () => ({}),
     },
+    $transaction: async (callback: (tx: any) => unknown) => callback({
+      $queryRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
+      exportedClip: {
+        delete: async () => ({}),
+        deleteMany: async () => ({ count: 0 }),
+      },
+      recording: { delete: async () => ({}) },
+    }),
   };
   return svc;
 }

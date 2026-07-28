@@ -9,6 +9,7 @@ import { CamerasService } from '../cameras/cameras.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { buildRtspUrl, resolveRecordingRtspProfile } from '../cameras/helpers/rtsp-url.helper';
+import { spawnWithSecretUrl } from '../common/process/secret-url-process.helper';
 
 type ClipState = {
   clipId: string;
@@ -105,7 +106,12 @@ export class ClipCaptureService {
       '-c:a', 'aac', // PCM/G.711 não entra em MP4/TS; AAC é barato e universal
       '-f', 'mpegts', '-y', recordPath,
     ];
-    const proc = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    const proc = spawnWithSecretUrl(
+      'ffmpeg',
+      args,
+      rtsp,
+      { stdio: ['pipe', 'ignore', 'pipe'] },
+    );
     const state: ClipState = {
       clipId, cameraId, userId, filePath, recordPath, proc,
       startedAt: Date.now(), stderrTail: '', exited: false, exitCode: null,

@@ -31,6 +31,10 @@ RUN mkdir -p /app/models
 
 ARG AI_SERVICE_SOURCE_REV=local
 COPY . .
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin drac \
+    && chown -R drac:drac /app
+
+USER drac
 
 EXPOSE 8000
 

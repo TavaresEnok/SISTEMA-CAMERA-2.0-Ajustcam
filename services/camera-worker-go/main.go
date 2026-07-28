@@ -13,34 +13,41 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 )
 
 var (
-	activeRecordings = make(map[string]bool)
+	activeRecordings  = make(map[string]bool)
 	recordingSegments = make(map[string]int)
-	mu               sync.Mutex
+	recordingCancels  = make(map[string]context.CancelFunc)
+	mu                sync.Mutex
+)
+
+const (
+	apiRequestTimeout = 10 * time.Second
+	healthAddress     = ":8000"
 )
 
 type Camera struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	IP                string `json:"ip"`
-	RtspPort          int    `json:"rtspPort"`
-	Username          string `json:"username"`
-	PasswordEncrypted string `json:"passwordEncrypted"`
-	RtspPath          string `json:"rtspPath"`
-	Channel           int    `json:"channel"`
-	Subtype           int    `json:"subtype"`
-	RecordingChannel  *int   `json:"recordingChannel"`
-	RecordingSubtype  *int   `json:"recordingSubtype"`
-	Status            string `json:"status"`
-	RecordingEnabled  bool   `json:"recordingEnabled"`
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	IP                     string `json:"ip"`
+	RtspPort               int    `json:"rtspPort"`
+	Username               string `json:"username"`
+	PasswordEncrypted      string `json:"passwordEncrypted"`
+	RtspPath               string `json:"rtspPath"`
+	Channel                int    `json:"channel"`
+	Subtype                int    `json:"subtype"`
+	RecordingChannel       *int   `json:"recordingChannel"`
+	RecordingSubtype       *int   `json:"recordingSubtype"`
+	Status                 string `json:"status"`
+	RecordingEnabled       bool   `json:"recordingEnabled"`
 	PreferredRtspTransport string `json:"preferredRtspTransport"`
 	RecordingVideoCodec    string `json:"recordingVideoCodec"`
 	RecordingWidth         int    `json:"recordingWidth"`
@@ -100,13 +107,16 @@ func main() {
 		Addr: redisAddr,
 	})
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	serviceToken := requireStrongEnv("INTERNAL_SERVICE_TOKEN", 24, map[string]bool{
 		"change_me_service_token": true,
 	})
 
 	// Teste de conexão com Redis
-	_, err := rdb.Ping(ctx).Result()
+	pingCtx, cancelPing := context.WithTimeout(ctx, apiRequestTimeout)
+	_, err := rdb.Ping(pingCtx).Result()
+	cancelPing()
 	if err != nil {
 		log.Printf("Aviso: Falha ao conectar no Redis: %v", err)
 	} else {
@@ -119,10 +129,23 @@ func main() {
 	}
 	go subscribeCommands(ctx, rdb, apiURL, serviceToken, commandChannel)
 
-	// Loop principal (Phase 5 - Health Check)
+	healthServer := startHealthServer()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Falha ao encerrar health server: %v", err)
+		}
+		if err := rdb.Close(); err != nil {
+			log.Printf("Falha ao encerrar Redis: %v", err)
+		}
+	}()
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
 	for {
 		fmt.Println("Verificando câmeras...")
-			cameras, err := fetchCameras(apiURL, serviceToken)
+		cameras, err := fetchCameras(ctx, apiURL, serviceToken)
 		if err != nil {
 			log.Printf("Erro ao buscar câmeras: %v", err)
 		} else {
@@ -135,9 +158,7 @@ func main() {
 			for id := range activeRecordings {
 				if !currentCamIds[id] {
 					fmt.Printf("[Worker] Câmera %s removida da lista. Parando gravações...\n", id)
-					delete(activeRecordings, id)
-					delete(recordingSegments, id)
-					// O loop go startRecording vai notar a mudança ou simplesmente falhar no próximo ciclo
+					stopRecordingLocked(id)
 				}
 			}
 			mu.Unlock()
@@ -146,35 +167,82 @@ func main() {
 				mu.Lock()
 				if cam.RecordingEnabled {
 					if !activeRecordings[cam.ID] {
-						activeRecordings[cam.ID] = true
 						fmt.Printf("[%s] Iniciando loop de gravação...\n", cam.Name)
-						go startRecording(cam, apiURL, serviceToken)
+						startRecordingLocked(ctx, cam, apiURL, serviceToken)
 					}
 				} else {
 					if activeRecordings[cam.ID] {
 						fmt.Printf("[%s] Gravação desativada. Parando loop...\n", cam.Name)
-						delete(activeRecordings, cam.ID)
-						delete(recordingSegments, cam.ID)
+						stopRecordingLocked(cam.ID)
 					}
 				}
 				mu.Unlock()
-				
-				go processCamera(cam, secretKey, apiURL, serviceToken)
+
+				go processCamera(ctx, cam, secretKey, apiURL, serviceToken)
 			}
 		}
 
-		time.Sleep(60 * time.Second)
+		select {
+		case <-ctx.Done():
+			mu.Lock()
+			for id := range activeRecordings {
+				stopRecordingLocked(id)
+			}
+			mu.Unlock()
+			log.Println("Worker encerrado por sinal.")
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
-func fetchCameras(apiURL, serviceToken string) ([]Camera, error) {
-	req, err := http.NewRequest("GET", apiURL+"/cameras/internal/list", nil)
+func startHealthServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	server := &http.Server{
+		Addr:              healthAddress,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Health server falhou: %v", err)
+		}
+	}()
+	return server
+}
+
+func startRecordingLocked(parent context.Context, cam Camera, apiURL, serviceToken string) {
+	recordingCtx, cancel := context.WithCancel(parent)
+	activeRecordings[cam.ID] = true
+	recordingCancels[cam.ID] = cancel
+	go startRecording(recordingCtx, cam, apiURL, serviceToken)
+}
+
+func stopRecordingLocked(cameraID string) {
+	if cancel := recordingCancels[cameraID]; cancel != nil {
+		cancel()
+	}
+	delete(recordingCancels, cameraID)
+	delete(activeRecordings, cameraID)
+	delete(recordingSegments, cameraID)
+}
+
+func fetchCameras(ctx context.Context, apiURL, serviceToken string) ([]Camera, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, apiRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, "GET", apiURL+"/cameras/internal/list", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Service-Token", serviceToken)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: apiRequestTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -193,11 +261,8 @@ func fetchCameras(apiURL, serviceToken string) ([]Camera, error) {
 	return cameras, nil
 }
 
-func fetchCameraByID(apiURL, id string) (*Camera, error) {
-	serviceToken := requireStrongEnv("INTERNAL_SERVICE_TOKEN", 24, map[string]bool{
-		"change_me_service_token": true,
-	})
-	cameras, err := fetchCameras(apiURL, serviceToken)
+func fetchCameraByID(ctx context.Context, apiURL, serviceToken, id string) (*Camera, error) {
+	cameras, err := fetchCameras(ctx, apiURL, serviceToken)
 	if err != nil {
 		return nil, err
 	}
@@ -227,17 +292,17 @@ func subscribeCommands(ctx context.Context, rdb *redis.Client, apiURL, serviceTo
 			log.Printf("Comando inválido recebido: %v", err)
 			continue
 		}
-		handleRecordingCommand(cmd, apiURL, serviceToken)
+		handleRecordingCommand(ctx, cmd, apiURL, serviceToken)
 	}
 }
 
-func handleRecordingCommand(cmd RecordingCommand, apiURL, serviceToken string) {
+func handleRecordingCommand(ctx context.Context, cmd RecordingCommand, apiURL, serviceToken string) {
 	if cmd.CameraID == "" {
 		return
 	}
 	switch strings.ToLower(cmd.Action) {
 	case "start":
-		cam, err := fetchCameraByID(apiURL, cmd.CameraID)
+		cam, err := fetchCameraByID(ctx, apiURL, serviceToken, cmd.CameraID)
 		if err != nil {
 			log.Printf("START: não foi possível carregar câmera %s: %v", cmd.CameraID, err)
 			return
@@ -247,16 +312,14 @@ func handleRecordingCommand(cmd RecordingCommand, apiURL, serviceToken string) {
 			recordingSegments[cam.ID] = cmd.SegmentSeconds
 		}
 		if !activeRecordings[cam.ID] {
-			activeRecordings[cam.ID] = true
 			log.Printf("[%s] START recebido via comando Redis", cam.Name)
-			go startRecording(*cam, apiURL, serviceToken)
+			startRecordingLocked(ctx, *cam, apiURL, serviceToken)
 		}
 		mu.Unlock()
 	case "stop":
 		mu.Lock()
 		if activeRecordings[cmd.CameraID] {
-			delete(activeRecordings, cmd.CameraID)
-			delete(recordingSegments, cmd.CameraID)
+			stopRecordingLocked(cmd.CameraID)
 			log.Printf("[%s] STOP recebido via comando Redis", cmd.CameraID)
 		}
 		mu.Unlock()
@@ -265,7 +328,7 @@ func handleRecordingCommand(cmd RecordingCommand, apiURL, serviceToken string) {
 	}
 }
 
-func processCamera(cam Camera, secretKey, apiURL, serviceToken string) {
+func processCamera(ctx context.Context, cam Camera, secretKey, apiURL, serviceToken string) {
 	password, err := decrypt(cam.PasswordEncrypted, secretKey)
 	if err != nil {
 		log.Printf("[%s] Erro ao descriptografar: %v", cam.Name, err)
@@ -273,7 +336,7 @@ func processCamera(cam Camera, secretKey, apiURL, serviceToken string) {
 	}
 
 	rtspURL := buildRtspURL(cam, password)
-	if checkCameraRTSP(rtspURL) {
+	if checkCameraRTSP(ctx, rtspURL) {
 		fmt.Printf("[%s] ONLINE\n", cam.Name)
 		reportStatus(apiURL, serviceToken, cam.ID, "ONLINE")
 	} else {
@@ -314,7 +377,7 @@ func decrypt(payload, secret string) (string, error) {
 
 func _decryptWithKey(payload, secret string) (string, error) {
 	key := sha256.Sum256([]byte(secret))
-	
+
 	data, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return "", err
@@ -370,22 +433,30 @@ func buildRtspURL(cam Camera, password string) string {
 	return fmt.Sprintf("rtsp://%s:%s@%s:%d%s", cam.Username, password, cam.IP, cam.RtspPort, path)
 }
 
-func checkCameraRTSP(rtspURL string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func checkCameraRTSP(parent context.Context, rtspURL string) bool {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-rtsp_transport", "tcp",
-		"-i", rtspURL,
-		"-frames:v", "1",
-		"-f", "null",
-		"-",
+	cmd, cleanup, err := secretURLCommand(
+		ctx,
+		"ffmpeg",
+		[]string{
+			"-rtsp_transport", "tcp",
+			"-i", rtspURL,
+			"-frames:v", "1",
+			"-f", "null",
+			"-",
+		},
+		rtspURL,
 	)
+	if err != nil {
+		return false
+	}
+	defer cleanup()
 
 	// Capturar saída para debug se necessário
 	var stderr io.Writer
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
-	return err == nil
+	return cmd.Run() == nil
 }

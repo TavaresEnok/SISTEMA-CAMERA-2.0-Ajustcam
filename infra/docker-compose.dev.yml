@@ -20,3 +20,9 @@ services:
   adminer:
     ports:
       - "127.0.0.1:8090:8080"
+
+  # Hot reload/local source is a development concern. The production Compose
+  # executes exactly the source copied into the immutable image.
+  ai-service:
+    volumes:
+      - ../services/ai-service-python:/app

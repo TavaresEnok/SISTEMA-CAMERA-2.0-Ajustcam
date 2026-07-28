@@ -261,6 +261,15 @@ export class UsersService {
       throw new ForbiddenException('Sem permissão para excluir este usuário.');
     }
 
+    const ownedPrivateCameras = await this.prisma.camera.count({
+      where: { isPrivate: true, ownerUserId: id },
+    });
+    if (ownedPrivateCameras > 0) {
+      throw new BadRequestException(
+        `Transfira a propriedade das ${ownedPrivateCameras} câmera(s) privada(s) antes de excluir este usuário.`,
+      );
+    }
+
     await this.prisma.user.delete({ where: { id } });
     return { id, deleted: true };
   }

@@ -2,6 +2,7 @@
 // telas rodarem seus StyleSheet.create (que acontecem no import delas).
 import './src/theme/applyFonts';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as ScreenCapture from 'expo-screen-capture';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
@@ -165,6 +166,20 @@ function AppInner() {
 
   const operationalMessages = buildOperationalMessages(cameras, lastSyncError);
   const statusBarStyle = isLightColor(theme.bg) ? 'dark' : 'light';
+
+  // Todo conteúdo após o login pode incluir vídeo, miniaturas, eventos ou dados
+  // de uma instalação. O app já oferece snapshot/download auditáveis; captura
+  // arbitrária da tela não é necessária e contornaria esses controles.
+  useEffect(() => {
+    const key = 'drac-authenticated-content';
+    if (session) {
+      void ScreenCapture.preventScreenCaptureAsync(key).catch(() => undefined);
+      void ScreenCapture.enableAppSwitcherProtectionAsync(1).catch(() => undefined);
+    } else {
+      void ScreenCapture.allowScreenCaptureAsync(key).catch(() => undefined);
+      void ScreenCapture.disableAppSwitcherProtectionAsync().catch(() => undefined);
+    }
+  }, [session?.user.id]);
 
   // Busca a marca (logo/nome/cores) do servidor e aplica no tema. Silencioso:
   // se falhar (offline, sem branding configurado), mantém o tema padrão.
