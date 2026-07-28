@@ -87,3 +87,66 @@ test('wiring: onModuleInit agenda o watchdog de degradados no intervalo resolvid
     'o watchdog precisa ser agendado exatamente uma vez, no intervalo resolvido',
   );
 });
+
+// ── O COOLDOWN QUE SUSTENTA O TICK DE 30s ────────────────────────────────────
+//
+// O comentário no topo deste arquivo justifica baixar o tick para 30s assim:
+// "tick mais rápido NÃO vira tempestade de restart porque cada recuperação
+// continua travada pelo cooldown POR CÂMERA (piso de 2 min)".
+//
+// Só que o cooldown era lido cru:
+//     Math.max(2 * 60_000, Number(process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS ?? 10 * 60_000))
+//
+// Com lixo no env, Number(...) = NaN e Math.max(120000, NaN) = NaN. O uso é
+// `if (Date.now() - lastAt < cooldownMs) continue;` — e QUALQUER comparação com
+// NaN é false, então o `continue` nunca acontece: o cooldown SOME.
+//
+// Ou seja, um typo em AI_DEGRADED_RECOVERY_COOLDOWN_MS transformava exatamente
+// a garantia acima na sua negação — reinício de análise a cada 30s numa câmera
+// que já está degradada, com re-resolução de fonte e mexida em path do MediaMTX
+// a cada volta. É a mesma família de defeito que já desarmou a guarda de disco.
+
+import {
+  AI_DEGRADED_RECOVERY_COOLDOWN_MIN_MS,
+  resolveDegradedRecoveryCooldownMs,
+} from '../src/ai/ai-manager.service';
+
+function cooldownDoWatchdog(bruto: string | undefined) {
+  const anterior = process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS;
+  if (bruto === undefined) delete process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS;
+  else process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS = bruto;
+  try {
+    return resolveDegradedRecoveryCooldownMs();
+  } finally {
+    if (anterior === undefined) delete process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS;
+    else process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS = anterior;
+  }
+}
+
+test('cooldown: env com LIXO nunca vira NaN (era isso que apagava o cooldown)', () => {
+  for (const lixo of ['abc', '', '   ', 'dez minutos', '10m', '5min', 'null', '92%']) {
+    const valor = cooldownDoWatchdog(lixo);
+    assert.ok(Number.isFinite(valor), `"${lixo}" produziu valor não-finito: ${valor}`);
+    assert.ok(valor >= AI_DEGRADED_RECOVERY_COOLDOWN_MIN_MS, `"${lixo}" ficou abaixo do piso de 2 min: ${valor}`);
+  }
+});
+
+test('cooldown: o piso de 2 min é REAL — é ele que impede a tempestade a 30s de tick', () => {
+  assert.equal(cooldownDoWatchdog('1000'), 2 * 60_000, 'valor menor que o piso tem de ser elevado');
+  assert.equal(cooldownDoWatchdog('0'), 2 * 60_000);
+  assert.equal(cooldownDoWatchdog('-5000'), 2 * 60_000);
+});
+
+test('cooldown: valor válido é respeitado, e a ausência cai no padrão de 10 min', () => {
+  assert.equal(cooldownDoWatchdog('600000'), 600_000);
+  assert.equal(cooldownDoWatchdog(undefined), 10 * 60_000);
+});
+
+test('cooldown: a comparação de fato PULA a recuperação dentro da janela', () => {
+  // O uso real é `if (Date.now() - lastAt < cooldownMs) continue;`. Com NaN esta
+  // asserção era false e a recuperação rodava a cada tick.
+  const cooldownMs = cooldownDoWatchdog('lixo');
+  const agora = 1_000_000;
+  const ultimaRecuperacao = agora - 30_000; // um tick atrás
+  assert.equal(agora - ultimaRecuperacao < cooldownMs, true, 'dentro da janela, a recuperação TEM de ser pulada');
+});

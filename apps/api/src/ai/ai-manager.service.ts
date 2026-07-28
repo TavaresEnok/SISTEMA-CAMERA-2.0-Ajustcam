@@ -122,6 +122,22 @@ export function resolveDegradedWatchdogIntervalMs(raw?: string | null): number {
   return Math.max(AI_DEGRADED_WATCHDOG_MIN_INTERVAL_MS, wanted);
 }
 
+// Cooldown POR CÂMERA da recuperação — é ELE que sustenta a justificativa acima
+// para o tick de 30s. Estava lido cru:
+//     Math.max(2 * 60_000, Number(process.env.X ?? 10 * 60_000))
+// Com lixo no env isso vira NaN, e o uso é `if (agora - ultima < cooldown) continue`
+// — comparação com NaN é sempre false, então o `continue` nunca acontece e o
+// cooldown SOME. Um typo transformava a garantia "não vira tempestade de restart"
+// na sua negação: reinício de análise a cada tick numa câmera já degradada.
+export const AI_DEGRADED_RECOVERY_COOLDOWN_DEFAULT_MS = 10 * 60_000;
+export const AI_DEGRADED_RECOVERY_COOLDOWN_MIN_MS = 2 * 60_000;
+
+export function resolveDegradedRecoveryCooldownMs(): number {
+  return envNumber('AI_DEGRADED_RECOVERY_COOLDOWN_MS', AI_DEGRADED_RECOVERY_COOLDOWN_DEFAULT_MS, {
+    min: AI_DEGRADED_RECOVERY_COOLDOWN_MIN_MS,
+  });
+}
+
 function parseCsvEnv(raw: string | undefined): string[] {
   return String(raw ?? '')
     .split(',')
@@ -203,7 +219,7 @@ export class AiManagerService implements OnModuleInit {
 
       if (!degraded.length) return;
 
-      const cooldownMs = Math.max(2 * 60_000, Number(process.env.AI_DEGRADED_RECOVERY_COOLDOWN_MS ?? 10 * 60_000));
+      const cooldownMs = resolveDegradedRecoveryCooldownMs();
       for (const cameraId of degraded) {
         const strikes = (this.degradedStrikes.get(cameraId) ?? 0) + 1;
         this.degradedStrikes.set(cameraId, strikes);
