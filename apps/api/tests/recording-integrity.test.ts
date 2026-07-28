@@ -42,10 +42,24 @@ test('D2 disk-guard: percentual livre abaixo do mínimo BLOQUEIA o início', asy
 
 function armedManager(usage: { totalBytes: number; freeBytes: number; freePercent: number; usedPercent: number }) {
   const mgr = makeManager();
-  mgr.active.set('cam-1', {});
-  mgr.active.set('cam-2', {});
+  // Estado FIEL de uma gravação ativa: a suspensão por disco derruba o processo
+  // pelo caminho real (stopProcessAndWait + finalizeRecordingState) em vez de
+  // chamar `stop()`, que gravaria `recordingEnabled: false` — o estado DESEJADO
+  // pelo cliente — e faria a câmera nunca mais voltar sozinha.
+  // As ASSERÇÕES dos testes abaixo são as mesmas de antes; mudou só por onde a
+  // parada é observada, porque mudou por onde ela acontece.
+  for (const id of ['cam-1', 'cam-2']) {
+    const watcher = setInterval(() => {}, 1e9);
+    watcher.unref?.();
+    mgr.active.set(id, { stopRequested: false, watcher, process: { exitCode: null } });
+  }
   mgr.getStorageUsage = async () => usage;
   const stopped: string[] = [];
+  mgr.stopProcessAndWait = async () => undefined;
+  mgr.finalizeRecordingState = (cameraId: string) => { stopped.push(cameraId); mgr.active.delete(cameraId); };
+  mgr.camerasService = { registerEvent: async () => undefined };
+  // Se alguém reintroduzir o `stop()` aqui, o teste de estado desejado em
+  // recording-status.test.ts pega — e este continua verde, então não basta.
   mgr.stop = async (id: string) => { stopped.push(id); };
   return { mgr, stopped };
 }

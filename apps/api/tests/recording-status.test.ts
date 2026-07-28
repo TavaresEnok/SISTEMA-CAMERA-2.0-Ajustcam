@@ -194,3 +194,148 @@ test('segment_time: valores LEGÍTIMOS passam intactos (a correção não pode m
     assert.equal(segmentTimeDe(argsDoFfmpeg(bom)), bom, `valor válido ${bom} foi alterado`);
   }
 });
+
+// ── GUARDA DE DISCO: SUSPENDER ≠ DESARMAR ───────────────────────────────────
+//
+// `enforceDiskGuard` reagia a disco cheio chamando `stop(cameraId)`. Mas `stop()`
+// grava `recordingEnabled: false` — que neste projeto é o estado DESEJADO pelo
+// cliente, não o estado de runtime. Consequência em cadeia:
+//
+//   · o health-check varre `where: { recordingEnabled: true }` → não vê mais a câmera;
+//   · `restartRecordingAfterCrash` exige `recordingEnabled === true` → não religa;
+//   · `startEnabledContinuousRecordings` só roda no boot e por padrão está OFF.
+//
+// Ou seja: um pico de disco às 03h derruba as 24 câmeras; às 04h a retenção
+// libera espaço; e NENHUMA volta a gravar até alguém reabilitar na tela, uma a
+// uma. E sem `registerEvent` nenhum — a linha do tempo da câmera não mostra
+// nada, o watchdog de infra não alerta, existe só um logger.error no stdout.
+//
+// A guarda tem de suspender o RUNTIME e deixar o desejado intacto.
+
+function diskGuardManager(opts: { cameras: string[] }) {
+  const eventos: Array<{ tipo: string; cameraId: string }> = [];
+  const desiredWrites: Array<{ cameraId: string; recordingEnabled: unknown }> = [];
+  const mgr: any = Object.create(RecordingProcessManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.controlMode = 'local';
+  mgr.minFreeBytes = 2 * 1024 ** 3;
+  mgr.minFreePercent = 5;
+  mgr.active = new Map(opts.cameras.map((id) => [id, { stopRequested: false, watcher: setInterval(() => {}, 1e9), process: { exitCode: null } }]));
+  for (const [, s] of mgr.active) (s.watcher as NodeJS.Timeout).unref?.();
+  mgr.getStorageUsage = async () => ({ freeBytes: 1024 ** 3, freePercent: 1, usedPercent: 99 });
+  mgr.stopProcessAndWait = async () => undefined;
+  // Fake FIEL: na produção é `finalizeRecordingState` que remove do mapa
+  // `active` (recording-process-manager.service.ts:1582). Um fake que não
+  // removesse deixaria a asserção "o processo parou" sem sentido.
+  mgr.finalizeRecordingState = (cameraId: string) => { mgr.active.delete(cameraId); };
+  mgr.cancelPendingRestart = () => undefined;
+  mgr.camerasService = {
+    getCameraOrThrow: async (id: string) => ({ id }),
+    registerEvent: async (cameraId: string, tipo: string) => { eventos.push({ tipo, cameraId }); },
+  };
+  mgr.prisma = {
+    camera: {
+      update: async ({ where, data }: any) => {
+        desiredWrites.push({ cameraId: where.id, recordingEnabled: data.recordingEnabled });
+        return {};
+      },
+    },
+  };
+  mgr.resolveRecordingModeUpdate = async () => ({});
+  return { mgr, eventos, desiredWrites };
+}
+
+test('guarda de disco: suspende a gravação SEM desarmar o desejado do cliente', async () => {
+  const { mgr, desiredWrites } = diskGuardManager({ cameras: ['cam-1', 'cam-2'] });
+
+  await mgr.enforceDiskGuard();
+
+  const desarmadas = desiredWrites.filter((w) => w.recordingEnabled === false);
+  assert.deepEqual(
+    desarmadas, [],
+    'gravar `recordingEnabled: false` some com a câmera do health-check: ela nunca mais volta sozinha',
+  );
+  assert.equal(mgr.active.size, 0, 'o PROCESSO precisa parar — é disso que o disco cheio depende');
+});
+
+test('guarda de disco: a parada é VISÍVEL — um evento por câmera, não só um log', async () => {
+  const { mgr, eventos } = diskGuardManager({ cameras: ['cam-1', 'cam-2'] });
+
+  await mgr.enforceDiskGuard();
+
+  const porDisco = eventos.filter((e) => /DISK|DISCO/i.test(e.tipo));
+  assert.equal(porDisco.length, 2, 'sem evento, a parada é invisível na linha do tempo e para o watchdog de infra');
+  assert.deepEqual(porDisco.map((e) => e.cameraId).sort(), ['cam-1', 'cam-2']);
+});
+
+test('guarda de disco: disco saudável não para nada nem emite evento', async () => {
+  const { mgr, eventos, desiredWrites } = diskGuardManager({ cameras: ['cam-1'] });
+  mgr.getStorageUsage = async () => ({ freeBytes: 50 * 1024 ** 3, freePercent: 60, usedPercent: 40 });
+
+  await mgr.enforceDiskGuard();
+
+  assert.equal(mgr.active.size, 1, 'a guarda não pode agir com disco folgado');
+  assert.deepEqual(eventos, []);
+  assert.deepEqual(desiredWrites, []);
+});
+
+// ── ROTINA DE FUNDO NÃO PODE DERRUBAR A API ─────────────────────────────────
+//
+// `recoverOrphanedSegments` e `startEnabledContinuousRecordings` são disparadas
+// com `void this.X()` dentro de setInterval/setTimeout e NÃO tinham try/catch de
+// topo. As queries Prisma, os statSync e a recursão readdirSync estavam
+// descobertos. Sem `process.on('unhandledRejection')` em lugar nenhum e com
+// Node 22 (default `--unhandled-rejections=throw`), qualquer rejeição MATA o
+// processo. O irmão `enforceDiskGuard` tem o try/catch — a proteção era a
+// intenção, faltou aplicá-la aqui.
+//
+// Por que isso é grave e não "o container reinicia": a política é
+// `unless-stopped`, então a API volta — mas RECORDING_AUTO_START_ENABLED é
+// `false` por padrão (o log de produção diz "Auto-start de gravacao continua
+// desativado"). Um Postgres reiniciando no instante errado derruba a API e a
+// gravação CONTÍNUA não volta sozinha. Um blip de banco vira acervo perdido.
+
+test('rotina de fundo: falha do Prisma na recuperação de órfãos NÃO rejeita', async () => {
+  const mgr: any = Object.create(RecordingProcessManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.recordingsRoot = '/tmp/inexistente-de-proposito';
+  mgr.recordingFormat = 'mp4';
+  mgr.active = new Map();
+  mgr.segmentRemuxFailures = new Map();
+  mgr.checkFfmpegAvailable = () => true;
+  mgr.prisma = {
+    camera: { findMany: async () => { throw new Error('Connection terminated unexpectedly'); } },
+    recording: { findMany: async () => [] },
+  };
+
+  await assert.doesNotReject(
+    () => mgr.recoverOrphanedSegments(),
+    'sob `void` numa rejeição isto seria unhandled rejection — e a API inteira morre',
+  );
+});
+
+test('rotina de fundo: falha do Prisma no auto-start de contínuas NÃO rejeita', async () => {
+  const mgr: any = Object.create(RecordingProcessManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.prisma = { camera: { findMany: async () => { throw new Error('too many connections'); } } };
+  mgr.start = async () => ({ status: 'recording_started' });
+
+  await assert.doesNotReject(() => mgr.startEnabledContinuousRecordings());
+});
+
+test('rotina de fundo: erro de I/O no meio da varredura NÃO rejeita', async () => {
+  const mgr: any = Object.create(RecordingProcessManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.recordingsRoot = '/tmp';
+  mgr.recordingFormat = 'mp4';
+  mgr.active = new Map();
+  mgr.segmentRemuxFailures = new Map();
+  mgr.checkFfmpegAvailable = () => true;
+  mgr.prisma = {
+    // Câmera cuja pasta não existe/sem permissão: o walk explode lá dentro.
+    camera: { findMany: async () => [{ id: '../../etc' }] },
+    recording: { findMany: async () => [] },
+  };
+
+  await assert.doesNotReject(() => mgr.recoverOrphanedSegments());
+});

@@ -281,6 +281,17 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   private async startEnabledContinuousRecordings() {
+    // Mesma rede do irmão acima: roda sob `void` num setTimeout de boot, e uma
+    // rejeição aqui mataria a API justamente enquanto ela tenta religar as
+    // gravações — o pior momento possível.
+    try {
+      await this.startEnabledContinuousRecordingsInner();
+    } catch (error) {
+      this.logger.warn(`Falha ao religar gravações contínuas no boot: ${sanitizeSensitiveText(error)}`);
+    }
+  }
+
+  private async startEnabledContinuousRecordingsInner() {
     const cameras = await this.prisma.camera.findMany({
       where: {
         enabled: true,
@@ -352,13 +363,60 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       );
 
       for (const cameraId of activeCameraIds) {
-        await this.stop(cameraId).catch((error) => {
+        await this.suspendRecordingForDiskGuard(cameraId, usedPercent, freeBytes).catch((error) => {
           this.logger.warn(`Falha ao parar gravacao por guarda de disco camera=${cameraId}: ${(error as Error).message}`);
         });
       }
     } catch (error) {
       this.logger.warn(`Falha ao executar guarda de disco de gravacao: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Suspensão por disco cheio: derruba o PROCESSO e deixa o DESEJADO intacto.
+   *
+   * Antes isto era `this.stop(cameraId)` — e `stop()` grava
+   * `recordingEnabled: false`, que neste projeto é o estado DESEJADO pelo
+   * cliente, não o de runtime. O efeito em cadeia era uma parada DEFINITIVA:
+   *
+   *   · o health-check varre `where: { recordingEnabled: true }` → a câmera
+   *     desaparece da varredura e nunca é reavaliada;
+   *   · `restartRecordingAfterCrash` exige `recordingEnabled === true` → não religa
+   *     (e nem houve queda: foi parada PEDIDA, com `stopRequested`);
+   *   · `startEnabledContinuousRecordings` só roda no boot, e só com
+   *     RECORDING_AUTO_START_ENABLED=true, que é `false` por padrão.
+   *
+   * Resultado medido no raciocínio da revisão: um pico de disco às 03h derruba
+   * as 24 câmeras; às 04h a retenção libera espaço; e NENHUMA volta a gravar até
+   * alguém reabilitar câmera por câmera na tela. Numa instalação de
+   * videomonitoramento isso é a noite inteira sem imagem.
+   *
+   * Também emite evento POR CÂMERA. Antes existia só um `logger.error` no
+   * stdout do container: a parada não aparecia na linha do tempo da câmera e o
+   * watchdog de infra (que alerta o dono) não tinha o que ver.
+   */
+  private async suspendRecordingForDiskGuard(cameraId: string, usedPercent: number, freeBytes: number) {
+    const state = this.active.get(cameraId);
+    if (!state) return;
+
+    // Marca ANTES do kill: o handler de 'close' chama finalize primeiro, e sem
+    // isto uma suspensão pedida viraria "queda" na métrica — e dispararia o
+    // reinício automático contra o disco cheio que acabamos de detectar.
+    state.stopRequested = true;
+    clearInterval(state.watcher);
+    await this.stopProcessAndWait(state);
+    await this.finalizeRecordingState(cameraId, state, state.process.exitCode);
+
+    await this.camerasService
+      .registerEvent(
+        cameraId,
+        'RECORDING_SUSPENDED_DISK_GUARD',
+        'ERROR',
+        `Gravação suspensa pela guarda de disco (usado=${usedPercent.toFixed(2)}%, livre=${Math.round(freeBytes / (1024 * 1024))}MB). `
+        + 'A câmera segue ARMADA e volta a gravar assim que houver espaço.',
+        { usedPercent, freeBytes, reason: 'disk_guard' },
+      )
+      .catch(() => undefined);
   }
 
   private async assertStorageWritable() {
@@ -1362,6 +1420,21 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   private async recoverOrphanedSegments() {
+    // try/catch de TOPO, como o irmão `enforceDiskGuard`. Esta rotina roda sob
+    // `void this.recoverOrphanedSegments()` num setInterval: sem isto, uma
+    // rejeição do Prisma (banco reiniciando, "too many connections") ou um
+    // readdirSync/statSync que explode viram UNHANDLED REJECTION — e em Node 22
+    // o default é derrubar o processo. A API morrendo não é só indisponibilidade:
+    // RECORDING_AUTO_START_ENABLED é `false` por padrão, então a gravação
+    // CONTÍNUA não volta sozinha depois do restart do container.
+    try {
+      await this.recoverOrphanedSegmentsInner();
+    } catch (error) {
+      this.logger.warn(`Falha na recuperação de segmentos órfãos: ${sanitizeSensitiveText(error)}`);
+    }
+  }
+
+  private async recoverOrphanedSegmentsInner() {
     if (!this.checkFfmpegAvailable()) return;
     const graceSeconds = envNumber('RECORDING_ORPHAN_RECOVERY_GRACE_SECONDS', 300, { min: 60 });
     // RECORDING_ORPHAN_INVALID_DELETE_SECONDS foi APOSENTADO junto com o `unlink`

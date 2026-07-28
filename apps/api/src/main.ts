@@ -13,6 +13,36 @@ BigInt.prototype.toJSON = function () {
   return this.toString();
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REDE DE SEGURANÇA PARA ROTINA DE FUNDO.
+//
+// Várias rotinas periódicas são disparadas com `void this.X()` dentro de
+// setInterval/setTimeout (guarda de disco, retenção, recuperação de órfãos,
+// varredura de integridade, heartbeat da Central). Sob esse padrão, uma promessa
+// rejeitada não tem quem a capture: em Node ≥15 o default é
+// `--unhandled-rejections=throw`, e o processo MORRE.
+//
+// Num VMS isso não é "só" indisponibilidade. A API caindo mata todo ffmpeg de
+// gravação; o container volta (restart: unless-stopped), mas
+// RECORDING_AUTO_START_ENABLED é `false` por padrão — a gravação CONTÍNUA NÃO
+// volta sozinha. Um Postgres reiniciando no instante errado viraria acervo
+// perdido, em silêncio.
+//
+// A escolha aqui é deliberada: seguir vivo e reclamar ALTO. É o oposto de
+// engolir o erro — ele vai para o log como ERROR, com stack, e o processo
+// continua gravando. Rotinas individuais devem ter o seu próprio try/catch
+// (esta é a última linha de defesa, não a primeira).
+//
+// `uncaughtException` NÃO é tratado de propósito: ali o estado do processo é
+// realmente indefinido, e insistir seria pior do que deixar o container
+// reiniciar limpo.
+// ─────────────────────────────────────────────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  // eslint-disable-next-line no-console
+  console.error(`[unhandledRejection] rotina de fundo falhou sem catch — a API SEGUE viva: ${detail}`);
+});
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const trustProxyHops = envNumber('TRUST_PROXY_HOPS', 0);
