@@ -56,7 +56,7 @@ export class CamerasController {
     try {
       const camera = await this.camerasService.getCameraOrThrow(cameraId);
       if (camera.recordingEnabled && camera.recordingMode === 'continuous') {
-        const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
+        const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 5, max: 3600, integer: true });
         await this.recordingManager.start(cameraId, defaultSegment).catch(() => undefined);
       }
     } catch {

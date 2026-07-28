@@ -115,6 +115,36 @@ type WorkerRecordingCommand = {
   requestedAt: string;
 };
 
+// Limites CANÔNICOS do segmento — os mesmos declarados em env.config.ts
+// (RECORDING_SEGMENT_SECONDS: min 5, max 3600, inteiro).
+export const SEGMENT_SECONDS_MIN = 5;
+export const SEGMENT_SECONDS_MAX = 3600;
+export const SEGMENT_SECONDS_FALLBACK = 300;
+
+/**
+ * Normaliza o segmento ANTES de virar argumento do ffmpeg.
+ *
+ * `-segment_time` recebia `String(segmentSeconds)` cru, vindo do CHAMADOR — e os
+ * chamadores liam RECORDING_SEGMENT_SECONDS com pisos inconsistentes: env.config
+ * exige 5..3600, o manager exigia 1, e o health-check, o recordings.controller e
+ * o cameras.controller não exigiam NADA. Cinco caminhos entregavam o valor cru.
+ *
+ * `-segment_time 0` faz o ffmpeg rotacionar a cada pacote: milhares de arquivos
+ * por segundo, disco cheio, gravação destruída. Negativo mata o processo em laço
+ * de reinício. E o pior chamador é o health-check, que REINICIA a câmera — o
+ * caminho de auto-cura viraria o de destruição.
+ *
+ * A guarda mora aqui, no estreitamento, e não em cada chamador: assim qualquer
+ * chamador futuro nasce protegido sem precisar lembrar da regra.
+ */
+export function normalizeSegmentSeconds(requested: unknown): number {
+  const numeric = Math.trunc(Number(requested));
+  if (!Number.isFinite(numeric)) return SEGMENT_SECONDS_FALLBACK;
+  if (numeric < SEGMENT_SECONDS_MIN) return SEGMENT_SECONDS_MIN;
+  if (numeric > SEGMENT_SECONDS_MAX) return SEGMENT_SECONDS_MAX;
+  return numeric;
+}
+
 @Injectable()
 export class RecordingProcessManagerService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(RecordingProcessManagerService.name);
@@ -266,7 +296,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       return;
     }
 
-    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
+    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: SEGMENT_SECONDS_MIN, max: SEGMENT_SECONDS_MAX, integer: true });
     this.logger.log(`Auto-start de gravacao continua para ${cameras.length} camera(s).`);
     for (const camera of cameras) {
       try {
@@ -956,8 +986,10 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       // Cada segmento fechado vira MP4 via remux sem re-encode (remuxTsSegment).
       '-segment_format',
       'mpegts',
+      // Normalizado no estreitamento: nenhum chamador consegue entregar 0,
+      // negativo ou absurdo ao ffmpeg. Ver normalizeSegmentSeconds.
       '-segment_time',
-      String(segmentSeconds),
+      String(normalizeSegmentSeconds(segmentSeconds)),
       '-reset_timestamps',
       '1',
       '-strftime',
@@ -1369,7 +1401,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     let recovered = 0;
     let quarantined = 0;
-    const defaultSegmentSeconds = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 1 });
+    const defaultSegmentSeconds = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: SEGMENT_SECONDS_MIN, max: SEGMENT_SECONDS_MAX, integer: true });
 
     // ── (D) UMA ÚNICA POLÍTICA PARA A MESMA FALHA ────────────────────────────
     // Antes, "não consegui recuperar este segmento" tinha DUAS respostas neste
@@ -1687,7 +1719,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
       const seconds = Number.isFinite(segmentSeconds) && segmentSeconds > 0
         ? segmentSeconds
-        : envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 1 });
+        : envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: SEGMENT_SECONDS_MIN, max: SEGMENT_SECONDS_MAX, integer: true });
       await this.start(cameraId, seconds);
       this.logger.log(`Gravação camera=${cameraId} REINICIADA após queda (tentativa ${attempt}/${maxAttempts}).`);
     } catch (error) {

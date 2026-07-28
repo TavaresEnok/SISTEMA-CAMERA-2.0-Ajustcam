@@ -244,7 +244,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
               { autoReconnectCooldownSeconds, staleThresholdSeconds, detectedBy, writeStalled, writeProgress },
             );
             try {
-              const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
+              const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 5, max: 3600, integer: true });
               await this.recordingManager.stop(camera.id);
               await this.recordingManager.start(camera.id, defaultSegment);
               await this.camerasService.registerEvent(
@@ -592,7 +592,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
                     },
                   );
                   try {
-                    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
+                    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 5, max: 3600, integer: true });
                     await this.recordingManager.stop(camera.id);
                     await this.recordingManager.start(camera.id, defaultSegment);
                     await this.camerasService.registerEvent(

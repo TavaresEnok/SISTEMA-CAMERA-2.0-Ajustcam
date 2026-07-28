@@ -130,3 +130,67 @@ test('movimento: modo WORKER sem gravação recente sobe normalmente', async () 
 
   assert.ok(events.includes('rec_start'));
 });
+
+// ── -segment_time NÃO PODE RECEBER LIXO DO CHAMADOR ─────────────────────────
+//
+// `buildArgs` monta o comando do ffmpeg e escreve `String(segmentSeconds)`
+// direto em `-segment_time`. O valor vem do CHAMADOR, e os chamadores leem
+// RECORDING_SEGMENT_SECONDS com pisos INCONSISTENTES:
+//
+//   env.config.ts .................. { min: 5, max: 3600, integer: true }
+//   recording-process-manager ...... { min: 1 }
+//   camera-health-check (2 pontos) . SEM PISO
+//   recordings.controller (2) ...... SEM PISO
+//   cameras.controller (1) ......... SEM PISO
+//
+// Ou seja, RECORDING_SEGMENT_SECONDS=0 chega cru ao ffmpeg vindo de 5 lugares —
+// inclusive do health-check, que REINICIA a câmera. `-segment_time 0` faz o
+// ffmpeg rotacionar a cada pacote: milhares de arquivos por segundo, disco
+// cheio e gravação destruída. Negativo mata o processo em laço de reinício.
+//
+// A correção certa é no ESTREITAMENTO, não em cada chamador: quem transforma o
+// número em argumento do ffmpeg é que precisa recusar valor destrutivo. Assim
+// qualquer chamador futuro nasce protegido.
+
+function argsDoFfmpeg(segmentSeconds: number) {
+  const mgr: any = Object.create(RecordingProcessManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.recordingFormat = 'ts';
+  mgr.configService = { get: () => undefined };
+  const camera: any = { id: 'cam-1', name: 'Portaria' };
+  return mgr.buildArgs(camera, 'rtsp://x/y', '/rec/%Y.ts', segmentSeconds, 'h264');
+}
+
+function segmentTimeDe(args: string[]) {
+  const i = args.indexOf('-segment_time');
+  return i >= 0 ? Number(args[i + 1]) : null;
+}
+
+test('segment_time: ZERO nunca chega ao ffmpeg (rotação por pacote destrói a gravação)', () => {
+  const valor = segmentTimeDe(argsDoFfmpeg(0));
+  assert.ok(valor !== null, 'o argumento tem de existir');
+  assert.ok(valor >= 5, `-segment_time ${valor} rotacionaria sem parar`);
+});
+
+test('segment_time: NEGATIVO nunca chega ao ffmpeg (processo morre em laço)', () => {
+  for (const ruim of [-1, -300]) {
+    const valor = segmentTimeDe(argsDoFfmpeg(ruim));
+    assert.ok(valor !== null && valor >= 5, `-segment_time ${valor} para entrada ${ruim}`);
+  }
+});
+
+test('segment_time: fracionário é normalizado para inteiro', () => {
+  const valor = segmentTimeDe(argsDoFfmpeg(300.7));
+  assert.ok(Number.isInteger(valor), `-segment_time ${valor} não é inteiro`);
+});
+
+test('segment_time: valor ABSURDO é limitado (segmento de 1 dia trava o VOD e a retenção)', () => {
+  const valor = segmentTimeDe(argsDoFfmpeg(86_400));
+  assert.ok(valor <= 3600, `-segment_time ${valor} passa do teto canônico de env.config.ts`);
+});
+
+test('segment_time: valores LEGÍTIMOS passam intactos (a correção não pode mexer na produção)', () => {
+  for (const bom of [5, 60, 120, 300, 600, 3600]) {
+    assert.equal(segmentTimeDe(argsDoFfmpeg(bom)), bom, `valor válido ${bom} foi alterado`);
+  }
+});
