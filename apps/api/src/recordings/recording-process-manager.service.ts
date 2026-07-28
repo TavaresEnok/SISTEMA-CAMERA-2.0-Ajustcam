@@ -183,7 +183,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     // disparar, os segmentos anteriores viram gravação, para a pessoa não
     // "nascer" já dentro do quadro. É opt-in porque troca o perfil de recursos
     // (RTSP sempre aberto) por esse ganho probatório.
-    this.preEventSeconds = Math.max(0, Math.min(30, Number(process.env.MOTION_PRE_EVENT_SECONDS ?? 0)));
+    this.preEventSeconds = envNumber('MOTION_PRE_EVENT_SECONDS', 0, { min: 0, max: 30 });
   }
 
   onModuleInit() {
@@ -225,8 +225,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
 
     if (this.controlMode === 'local' && String(process.env.RECORDING_ORPHAN_RECOVERY_ENABLED ?? 'true') !== 'false') {
-      const recoveryDelayMs = Math.max(5_000, Number(process.env.RECORDING_ORPHAN_RECOVERY_DELAY_MS ?? 30_000));
-      const recoveryIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.RECORDING_ORPHAN_RECOVERY_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
+      const recoveryDelayMs = envNumber('RECORDING_ORPHAN_RECOVERY_DELAY_MS', 30_000, { min: 5_000 });
+      const recoveryIntervalMs = envNumber('RECORDING_ORPHAN_RECOVERY_INTERVAL_MS', 6 * 60 * 60 * 1000, {
+        min: 60 * 60 * 1000,
+        onInvalid: (m) => this.logger.warn(m),
+      });
       this.orphanRecoveryTimer = setTimeout(() => {
         this.orphanRecoveryTimer = null;
         void this.recoverOrphanedSegments();
@@ -242,7 +245,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       return;
     }
 
-    const delayMs = Math.max(0, Number(process.env.RECORDING_AUTO_START_DELAY_MS ?? 10000));
+    const delayMs = envNumber('RECORDING_AUTO_START_DELAY_MS', 10000, { min: 0 });
     const timer = setTimeout(() => void this.startEnabledContinuousRecordings(), delayMs);
     if (typeof timer.unref === 'function') timer.unref();
   }
@@ -263,7 +266,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       return;
     }
 
-    const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
     this.logger.log(`Auto-start de gravacao continua para ${cameras.length} camera(s).`);
     for (const camera of cameras) {
       try {
@@ -349,7 +352,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   // fórmulas divergentes acusariam defeitos diferentes na mesma câmera.
   // Comportamento e chamadas existentes: inalterados.
   getRecordingStaleThresholdSeconds(segmentSeconds?: number | null) {
-    const configuredThreshold = Number(process.env.RECORDING_STALE_THRESHOLD_SECONDS ?? 180);
+    const configuredThreshold = envNumber('RECORDING_STALE_THRESHOLD_SECONDS', 180);
     const defaultSegmentSeconds = Number(this.configService.get<number>('recordingSegmentSeconds') ?? 300);
     const effectiveSegmentSeconds = Number(segmentSeconds && segmentSeconds > 0 ? segmentSeconds : defaultSegmentSeconds);
     const graceSeconds = Math.max(60, Math.round(effectiveSegmentSeconds * 0.25));
@@ -372,7 +375,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
    * filesystem, contenção de disco e granularidade de mtime.
    */
   private getWriteStallSeconds() {
-    const configured = Number(process.env.RECORDING_WRITE_STALL_SECONDS ?? 45);
+    const configured = envNumber('RECORDING_WRITE_STALL_SECONDS', 45);
     return Number.isFinite(configured) ? Math.max(20, configured) : 45;
   }
 
@@ -385,7 +388,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
    * travamento.
    */
   private getWriteStallGraceSeconds(stallThresholdSeconds: number) {
-    const configured = Number(process.env.RECORDING_WRITE_STALL_GRACE_SECONDS ?? 90);
+    const configured = envNumber('RECORDING_WRITE_STALL_GRACE_SECONDS', 90);
     const base = Number.isFinite(configured) ? configured : 90;
     return Math.max(30, stallThresholdSeconds, base);
   }
@@ -503,12 +506,12 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   private getMotionPostRollSeconds() {
-    const configured = Number(process.env.MOTION_RECORDING_POST_ROLL_SECONDS ?? 60);
+    const configured = envNumber('MOTION_RECORDING_POST_ROLL_SECONDS', 60);
     return Number.isFinite(configured) && configured > 0 ? configured : 60;
   }
 
   private getMotionSegmentSeconds() {
-    const configured = Number(process.env.MOTION_RECORDING_SEGMENT_SECONDS ?? 60);
+    const configured = envNumber('MOTION_RECORDING_SEGMENT_SECONDS', 60);
     return Number.isFinite(configured) && configured > 0 ? configured : 60;
   }
 
@@ -964,7 +967,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         'json',
         filePath,
       ], {
-        timeout: Math.max(5_000, Number(process.env.RECORDING_METADATA_PROBE_TIMEOUT_MS ?? 15_000)),
+        timeout: envNumber('RECORDING_METADATA_PROBE_TIMEOUT_MS', 15_000, { min: 5_000 }),
         maxBuffer: 1024 * 1024,
       });
       const parsed = JSON.parse(stdout || '{}') as {
@@ -1007,7 +1010,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
    * indevidamente por um teto fixo).
    */
   private getMaxSegmentDurationSeconds(segmentSeconds?: number | null) {
-    const configured = Number(process.env.RECORDING_MAX_SEGMENT_DURATION_SECONDS ?? 600);
+    const configured = envNumber('RECORDING_MAX_SEGMENT_DURATION_SECONDS', 600);
     const base = Number.isFinite(configured) && configured > 0 ? configured : 600;
     return Math.max(base, this.getExpectedSegmentSeconds(segmentSeconds) * 2);
   }
@@ -1237,7 +1240,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   // continua no disco, com o motivo registrado ao lado.
 
   private getSegmentRemuxMaxAttempts(): number {
-    const configured = Number(process.env.RECORDING_SEGMENT_REMUX_MAX_ATTEMPTS ?? 3);
+    const configured = envNumber('RECORDING_SEGMENT_REMUX_MAX_ATTEMPTS', 3);
     return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 3;
   }
 
@@ -1296,9 +1299,9 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   private async recoverOrphanedSegments() {
     if (!this.checkFfmpegAvailable()) return;
-    const graceSeconds = Math.max(60, Number(process.env.RECORDING_ORPHAN_RECOVERY_GRACE_SECONDS ?? 300));
-    const invalidDeleteSeconds = Math.max(graceSeconds, Number(process.env.RECORDING_ORPHAN_INVALID_DELETE_SECONDS ?? 3600));
-    const limit = Math.max(1, Math.min(10_000, Number(process.env.RECORDING_ORPHAN_RECOVERY_LIMIT ?? 2_000)));
+    const graceSeconds = envNumber('RECORDING_ORPHAN_RECOVERY_GRACE_SECONDS', 300, { min: 60 });
+    const invalidDeleteSeconds = Math.max(graceSeconds, envNumber('RECORDING_ORPHAN_INVALID_DELETE_SECONDS', 3600));
+    const limit = envNumber('RECORDING_ORPHAN_RECOVERY_LIMIT', 2_000, { min: 1, max: 10_000 });
     const cameras = await this.prisma.camera.findMany({ select: { id: true } });
     const registeredPaths = new Set((await this.prisma.recording.findMany({ select: { filePath: true } })).map((row) => row.filePath));
     const candidates: Array<{ cameraId: string; filePath: string; ageSeconds: number; kind: 'mp4' | 'ts' }> = [];
@@ -1332,7 +1335,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     let recovered = 0;
     let invalidDeleted = 0;
-    const defaultSegmentSeconds = Math.max(1, Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300));
+    const defaultSegmentSeconds = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 1 });
     for (const candidate of candidates) {
       if (this.active.has(candidate.cameraId)) continue;
 
@@ -1510,9 +1513,11 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     return Date.now();
   }
 
+  // Delega ao helper único do projeto: uma porta de entrada só para leitura de
+  // configuração numérica, para o comportamento (piso, aviso, NUNCA-NaN) não
+  // divergir entre implementações.
   private readEnvNumber(nome: string, padrao: number, minimo: number): number {
-    const bruto = Number(process.env[nome] ?? padrao);
-    return Number.isFinite(bruto) && bruto >= minimo ? Math.floor(bruto) : padrao;
+    return envNumber(nome, padrao, { min: minimo, integer: true, onInvalid: (m) => this.logger.warn(m) });
   }
 
   private getRestartMaxAttempts(): number {
@@ -1648,7 +1653,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
       const seconds = Number.isFinite(segmentSeconds) && segmentSeconds > 0
         ? segmentSeconds
-        : Math.max(1, Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300));
+        : envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 1 });
       await this.start(cameraId, seconds);
       this.logger.log(`Gravação camera=${cameraId} REINICIADA após queda (tentativa ${attempt}/${maxAttempts}).`);
     } catch (error) {
@@ -1783,7 +1788,12 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     // anormalmente. Em produção o nível DEBUG abaixo fica desligado — sem o ring
     // não sobra nada para responder "por que a câmera parou de gravar às 3h?".
     const stderrRing = createStderrRing(
-      Number(process.env.RECORDING_STDERR_RING_LINES ?? DEFAULT_STDERR_RING_LINES),
+      envNumber('RECORDING_STDERR_RING_LINES', DEFAULT_STDERR_RING_LINES, {
+        min: 1,
+        max: 2_000,
+        integer: true,
+        onInvalid: (m) => this.logger.warn(m),
+      }),
     );
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString();

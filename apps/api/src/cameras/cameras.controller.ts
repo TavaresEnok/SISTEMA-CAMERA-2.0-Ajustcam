@@ -22,6 +22,7 @@ import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { AiManagerService } from '../ai/ai-manager.service';
 import { AiService } from '../ai/ai.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
+import { envNumber } from '../common/config/env-number.helper';
 
 @Controller('cameras')
 export class CamerasController {
@@ -55,7 +56,7 @@ export class CamerasController {
     try {
       const camera = await this.camerasService.getCameraOrThrow(cameraId);
       if (camera.recordingEnabled && camera.recordingMode === 'continuous') {
-        const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+        const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
         await this.recordingManager.start(cameraId, defaultSegment).catch(() => undefined);
       }
     } catch {

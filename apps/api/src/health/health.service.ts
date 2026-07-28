@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { CameraStatus } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { envNumber } from '../common/config/env-number.helper';
 
 @Injectable()
 export class HealthService {
@@ -30,7 +31,7 @@ export class HealthService {
   }
 
   async getReadiness() {
-    const timeoutMs = Math.max(500, Number(process.env.HEALTH_READINESS_TIMEOUT_MS ?? 3_000));
+    const timeoutMs = envNumber('HEALTH_READINESS_TIMEOUT_MS', 3_000, { min: 500 });
     const checks: Record<string, { ok: boolean; detail?: string; optional?: boolean }> = {};
 
     try {

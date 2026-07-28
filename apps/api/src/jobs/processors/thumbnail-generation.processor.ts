@@ -11,6 +11,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { THUMBNAIL_GENERATION_QUEUE } from '../queues/thumbnail-generation.queue';
 import { ensureFileUnderRoot } from '../../recordings/helpers/safe-file.helper';
 import { sanitizeSensitiveText } from '../../common/security/sensitive-text.helper';
+import { envNumber } from '../../common/config/env-number.helper';
 
 const execFileAsync = promisify(execFile);
 
@@ -63,7 +64,7 @@ export class ThumbnailGenerationProcessor extends WorkerHost {
 
     const thumbSecondConfig = this.configService.get<number>('recordingThumbnailSecond') ?? 2;
     const seekSeconds = Math.max(0, Math.min(thumbSecondConfig, Math.max(0, (recording.durationSeconds ?? 10) - 0.25)));
-    const timeoutMs = Math.max(5_000, Number(process.env.RECORDING_THUMBNAIL_TIMEOUT_MS ?? 20_000));
+    const timeoutMs = envNumber('RECORDING_THUMBNAIL_TIMEOUT_MS', 20_000, { min: 5_000 });
     const temporaryPath = `${outputPath}.${process.pid}.${String(job.id ?? Date.now())}.tmp.jpg`;
 
     let lastError: unknown = null;

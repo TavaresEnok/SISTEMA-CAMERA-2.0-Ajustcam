@@ -2686,8 +2686,8 @@ export class CamerasService {
         return a.score - b.score;
       });
 
-    const storageWarningPercent = Number(process.env.ALERT_STORAGE_WARNING_PERCENT ?? 85);
-    const storageCriticalPercent = Number(process.env.ALERT_STORAGE_CRITICAL_PERCENT ?? 92);
+    const storageWarningPercent = envNumber('ALERT_STORAGE_WARNING_PERCENT', 85);
+    const storageCriticalPercent = envNumber('ALERT_STORAGE_CRITICAL_PERCENT', 92);
     const recordingsRoot = this.configService.get<string>('recordingsRoot') ?? './storage/recordings';
     try {
       const disk = await statfs(recordingsRoot);

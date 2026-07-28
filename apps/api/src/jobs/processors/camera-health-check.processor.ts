@@ -10,6 +10,7 @@ import { RecordingProcessManagerService } from '../../recordings/recording-proce
 import { FfmpegMjpegService } from '../../camera-stream/ffmpeg-mjpeg.service';
 import { GRID_LIVE_TARGET_FPS } from '../../camera-stream/helpers/live-delivery-profile.helper';
 import { AlarmsService } from '../../alarms/alarms.service';
+import { envNumber } from '../../common/config/env-number.helper';
 
 @Processor(CAMERA_HEALTH_CHECK_QUEUE)
 @Injectable()
@@ -122,7 +123,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
   }
 
   private async checkRecordingStaleness() {
-    const configuredThresholdSeconds = Number(process.env.RECORDING_STALE_THRESHOLD_SECONDS ?? 180);
+    const configuredThresholdSeconds = envNumber('RECORDING_STALE_THRESHOLD_SECONDS', 180);
     const defaultSegmentSeconds = Number(this.configService.get<number>('recordingSegmentSeconds') ?? 300);
     const staleThresholdSeconds = Math.max(
       configuredThresholdSeconds,
@@ -135,10 +136,10 @@ export class CameraHealthCheckProcessor extends WorkerHost {
     // comportamento de produção (reinício mais agressivo), então é decisão
     // explícita do dono via HEALTH_RECORDING_WRITE_STALL_ENABLED=true.
     const writeStallEnabled = String(process.env.HEALTH_RECORDING_WRITE_STALL_ENABLED ?? 'false') === 'true';
-    const staleCooldownSeconds = Number(process.env.HEALTH_RECORDING_STALE_COOLDOWN_SECONDS ?? 300);
+    const staleCooldownSeconds = envNumber('HEALTH_RECORDING_STALE_COOLDOWN_SECONDS', 300);
     const envAutoReconnectEnabled = String(process.env.HEALTH_RECORDING_STALE_AUTO_RECONNECT_ENABLED ?? 'true') !== 'false';
     const autoReconnectEnabled = envAutoReconnectEnabled;
-    const autoReconnectCooldownSeconds = Number(process.env.HEALTH_RECORDING_STALE_RECONNECT_COOLDOWN_SECONDS ?? 180);
+    const autoReconnectCooldownSeconds = envNumber('HEALTH_RECORDING_STALE_RECONNECT_COOLDOWN_SECONDS', 180);
     const staleAt = new Date(Date.now() - staleThresholdSeconds * 1000);
     const cooldownAt = new Date(Date.now() - staleCooldownSeconds * 1000);
     const reconnectCooldownAt = new Date(Date.now() - autoReconnectCooldownSeconds * 1000);
@@ -243,7 +244,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
               { autoReconnectCooldownSeconds, staleThresholdSeconds, detectedBy, writeStalled, writeProgress },
             );
             try {
-              const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+              const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
               await this.recordingManager.stop(camera.id);
               await this.recordingManager.start(camera.id, defaultSegment);
               await this.camerasService.registerEvent(
@@ -326,8 +327,8 @@ export class CameraHealthCheckProcessor extends WorkerHost {
     });
     if (!cameras.length) return;
 
-    const staleSeconds = Math.max(15, Number(process.env.HEALTH_MOTION_FRAME_STALE_SECONDS ?? 45));
-    const cooldownSeconds = Math.max(60, Number(process.env.HEALTH_MOTION_EVENT_COOLDOWN_SECONDS ?? 300));
+    const staleSeconds = envNumber('HEALTH_MOTION_FRAME_STALE_SECONDS', 45, { min: 15 });
+    const cooldownSeconds = envNumber('HEALTH_MOTION_EVENT_COOLDOWN_SECONDS', 300, { min: 60 });
     let processors: Record<string, any> = {};
     let serviceReachable = false;
     let serviceStatus: string | null = null;
@@ -412,14 +413,14 @@ export class CameraHealthCheckProcessor extends WorkerHost {
   }
 
   private async checkLiveStreamHealth() {
-    const maxPerRun = Math.max(1, Number(process.env.HEALTH_STREAM_CHECK_MAX_PER_RUN ?? 40));
-    const cooldownSeconds = Math.max(30, Number(process.env.HEALTH_STREAM_EVENT_COOLDOWN_SECONDS ?? 300));
-    const latencyThresholdMs = Math.max(500, Number(process.env.HEALTH_STREAM_LATENCY_THRESHOLD_MS ?? 5000));
+    const maxPerRun = envNumber('HEALTH_STREAM_CHECK_MAX_PER_RUN', 40, { min: 1 });
+    const cooldownSeconds = envNumber('HEALTH_STREAM_EVENT_COOLDOWN_SECONDS', 300, { min: 30 });
+    const latencyThresholdMs = envNumber('HEALTH_STREAM_LATENCY_THRESHOLD_MS', 5000, { min: 500 });
     const fpsDriftEnabled = String(process.env.HEALTH_STREAM_FPS_DRIFT_ENABLED ?? 'true') !== 'false';
-    const fpsDriftRatioThreshold = Math.max(0.05, Number(process.env.HEALTH_STREAM_FPS_DRIFT_RATIO ?? 0.25));
-    const fpsDriftAbsThreshold = Math.max(1, Number(process.env.HEALTH_STREAM_FPS_DRIFT_ABS ?? 2));
+    const fpsDriftRatioThreshold = envNumber('HEALTH_STREAM_FPS_DRIFT_RATIO', 0.25, { min: 0.05 });
+    const fpsDriftAbsThreshold = envNumber('HEALTH_STREAM_FPS_DRIFT_ABS', 2, { min: 1 });
     const fpsAutoRemediationEnabled = String(process.env.HEALTH_STREAM_FPS_AUTO_REMEDIATION_ENABLED ?? 'true') !== 'false';
-    const fpsAutoRemediationCooldownSeconds = Math.max(60, Number(process.env.HEALTH_STREAM_FPS_REMEDIATION_COOLDOWN_SECONDS ?? 900));
+    const fpsAutoRemediationCooldownSeconds = envNumber('HEALTH_STREAM_FPS_REMEDIATION_COOLDOWN_SECONDS', 900, { min: 60 });
     const fpsRemediationCooldownAt = new Date(Date.now() - fpsAutoRemediationCooldownSeconds * 1000);
     const cameras = await this.prisma.camera.findMany({
       where: { OR: [{ recordingEnabled: true }, { recordingMode: 'motion' }] },
@@ -591,7 +592,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
                     },
                   );
                   try {
-                    const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+                    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
                     await this.recordingManager.stop(camera.id);
                     await this.recordingManager.start(camera.id, defaultSegment);
                     await this.camerasService.registerEvent(

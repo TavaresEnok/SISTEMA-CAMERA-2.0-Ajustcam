@@ -14,6 +14,7 @@ import {
 } from '../cameras/helpers/rtsp-url.helper';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
+import { envNumber } from '../common/config/env-number.helper';
 
 const AI_MODES = ['motion', 'face', 'general'] as const;
 type AiMode = typeof AI_MODES[number];
@@ -920,7 +921,7 @@ export class AiManagerService implements OnModuleInit {
     // O gateway é otimização; ele JAMAIS pode atrasar ou impedir a subida da IA.
     const ensured = await this.withTimeout(
       this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid'),
-      Number(process.env.AI_SOURCE_GATEWAY_ENSURE_TIMEOUT_MS ?? 4000),
+      envNumber('AI_SOURCE_GATEWAY_ENSURE_TIMEOUT_MS', 4000),
     ).catch(() => null);
     const gatewayDecision = ensured?.pathName
       ? this.sourceGateway?.resolveSourceUrl({

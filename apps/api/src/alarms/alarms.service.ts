@@ -9,6 +9,7 @@ import { CreateAlarmRuleDto } from './dto/create-alarm-rule.dto';
 import { SetAlarmRuleEnabledDto } from './dto/set-alarm-rule-enabled.dto';
 import { SimulateAlarmRuleDto } from './dto/simulate-alarm-rule.dto';
 import { UpdateAlarmRuleDto } from './dto/update-alarm-rule.dto';
+import { envNumber } from '../common/config/env-number.helper';
 
 function inferSource(type: string): AlarmSource | null {
   if (type.startsWith('STREAM_')) return AlarmSource.STREAM;
@@ -55,7 +56,7 @@ export class AlarmsService {
 
   async resolveStaleMotionAlarms(now = new Date()) {
     const rule = await this.getRule(AlarmSource.MOTION, 'MOTION_DETECTED');
-    const configuredQuietSeconds = Number(process.env.MOTION_ALARM_QUIET_SECONDS ?? 300);
+    const configuredQuietSeconds = envNumber('MOTION_ALARM_QUIET_SECONDS', 300);
     const quietSeconds = Math.max(30, configuredQuietSeconds, rule?.dedupWindowSeconds ?? 0);
     const quietBefore = new Date(now.getTime() - quietSeconds * 1000);
 

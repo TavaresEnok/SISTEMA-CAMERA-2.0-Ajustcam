@@ -6,6 +6,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import { json, urlencoded, type NextFunction, type Request, type Response } from 'express';
+import { envNumber } from './common/config/env-number.helper';
 
 // @ts-ignore
 BigInt.prototype.toJSON = function () {
@@ -14,7 +15,7 @@ BigInt.prototype.toJSON = function () {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 0);
+  const trustProxyHops = envNumber('TRUST_PROXY_HOPS', 0);
   if (Number.isInteger(trustProxyHops) && trustProxyHops > 0 && trustProxyHops <= 5) {
     // Só habilite quando a API não estiver acessível diretamente: o valor indica
     // quantos proxies controlados existem entre cliente e Express.
@@ -73,7 +74,7 @@ async function bootstrap() {
   );
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const port = Number(process.env.API_PORT ?? 3000);
+  const port = envNumber('API_PORT', 3000);
   await app.listen(port);
 }
 

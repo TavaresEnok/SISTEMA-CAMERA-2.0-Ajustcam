@@ -4,6 +4,7 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { AccessControlService } from '../access-control/access-control.service';
 import { RecordingsService } from '../recordings/recordings.service';
 import { type AuthUser } from '../common/types/auth-user.type';
+import { envNumber } from '../common/config/env-number.helper';
 
 // Tipos de evento que valem REVISÃO (algo aconteceu, não ruído de saúde/status).
 const REVIEWABLE_TYPES = [
@@ -24,7 +25,7 @@ const RECORDING_MATCH_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
 // Recorte do badge de não-vistos. Sem janela, um usuário novo entra com a contagem
 // do histórico INTEIRO e o custo cresce sem teto. 30 dias cobre a utilidade real do
 // badge ("tem coisa nova pra ver?") com custo previsível.
-const UNSEEN_WINDOW_DAYS = Number(process.env.REVIEW_UNSEEN_WINDOW_DAYS ?? 30);
+const UNSEEN_WINDOW_DAYS = envNumber('REVIEW_UNSEEN_WINDOW_DAYS', 30);
 
 type ReviewFilters = {
   cameraId?: string;

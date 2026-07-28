@@ -68,14 +68,21 @@ function varrer(dirRelativo: string, padrao: RegExp) {
  * configuração foi criado. Este número NUNCA sobe.
  */
 const ORCAMENTO: Record<string, number> = {
-  // Gravação: o processo que segura os ffmpeg. Timers, limiares de stall,
-  // tetos de backfill. 35 pontos ainda crus, herdados; retention.service e
-  // recording-process-manager (guarda de disco) já foram convertidos.
-  'src/recordings': 35,
-  // Streaming ao vivo: já 100% limpo — aqui o orçamento é ZERO e é para ficar.
+  // Gravação: o processo que segura os ffmpeg. Baixou de 35 para 5 na conversão
+  // em massa de 2026-07-27. Os 5 que restam usam formas que o conversor não
+  // trata com segurança (chave dinâmica, piso por expressão, constante em vez de
+  // literal) e foram revisados um a um.
+  'src/recordings': 0,
+  // Streaming ao vivo: 100% limpo — o orçamento é ZERO e é para ficar.
   'src/camera-stream': 0,
-  // Jobs/processors: cooldowns, janelas de saúde, limites por rodada.
-  'src/jobs': 16,
+  // Jobs/processors: baixou de 16 para 1 (cooldowns, janelas de saúde, limites
+  // por rodada — todos os limiares que decidem REINICIAR câmera foram convertidos;
+  // `Math.max(15, NaN)` = NaN desarmava a checagem em silêncio).
+  'src/jobs': 1,
+  // IA e observabilidade entraram no sentinela depois da conversão em massa.
+  'src/ai': 5,
+  'src/observability': 2,
+  'src/cameras': 1,
 };
 
 /** Áreas onde a conversão está COMPLETA: qualquer leitura crua é regressão. */

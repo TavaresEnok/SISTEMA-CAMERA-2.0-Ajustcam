@@ -7,6 +7,7 @@ import { CamerasService } from './cameras.service';
 import { AiManagerService } from '../ai/ai-manager.service';
 import { AiService } from '../ai/ai.service';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
+import { envNumber } from '../common/config/env-number.helper';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const onvif = require('onvif');
 
@@ -74,15 +75,15 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
     // 10 min (era 30): observamos em campo (2026-07-21 19:04→19:30) o pull-point
     // ensurdecer em silêncio 4 min após conectar e só voltar na re-assinatura
     // forçada. A janela de re-assinatura é o TETO da surdez possível.
-    return Math.max(5, Number(process.env.AI_ONVIF_RESUBSCRIBE_MINUTES ?? 10)) * 60_000;
+    return envNumber('AI_ONVIF_RESUBSCRIBE_MINUTES', 10, { min: 5 }) * 60_000;
   }
 
   private silenceFallbackMs() {
-    return Math.max(1, Number(process.env.AI_ONVIF_SILENCE_FALLBACK_HOURS ?? 12)) * 3_600_000;
+    return envNumber('AI_ONVIF_SILENCE_FALLBACK_HOURS', 12, { min: 1 }) * 3_600_000;
   }
 
   private deadSyncsForFallback() {
-    return Math.max(1, Number(process.env.AI_ONVIF_DEAD_SYNCS_FOR_FALLBACK ?? 3));
+    return envNumber('AI_ONVIF_DEAD_SYNCS_FOR_FALLBACK', 3, { min: 1 });
   }
 
   async onModuleInit() {
@@ -347,7 +348,7 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
    * da nativa: desliga a reserva local, se estava ligada. Cooldown evita enxurrada.
    */
   private onCameraMotion(cameraId: string) {
-    const cooldownMs = Number(process.env.AI_ONVIF_TRIGGER_COOLDOWN_MS ?? 5000);
+    const cooldownMs = envNumber('AI_ONVIF_TRIGGER_COOLDOWN_MS', 5000);
     const now = Date.now();
     const state = this.getNativeState(cameraId);
     state.lastEventAt = now;

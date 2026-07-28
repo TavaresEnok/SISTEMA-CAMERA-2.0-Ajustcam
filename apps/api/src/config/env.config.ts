@@ -4,7 +4,7 @@ import { envBool, envNumber } from '../common/config/env-number.helper';
 // ─────────────────────────────────────────────────────────────────────────────
 // ESQUEMA DE CONFIGURAÇÃO — o `.env` é ENTRADA DE PRODUÇÃO, não literal de código.
 //
-// O que este arquivo fazia antes: `Number(process.env.X ?? 300)`. Isso devolve
+// O que este arquivo fazia antes: `envNumber('X', 300)`. Isso devolve
 // NaN para "300 ", "5min", "92%" ou vírgula decimal — e NaN não explode, ele
 // desarma comparações EM SILÊNCIO (já custou uma guarda de disco que nunca
 // disparou, com o disco a 100% e todas as câmeras paradas sem um erro no log).

@@ -84,7 +84,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   private integritySweepRunning = false;
   private readonly thumbnailGenerationConcurrency = Math.max(
     1,
-    Math.min(4, Number(process.env.RECORDING_THUMBNAIL_CONCURRENCY ?? 2)),
+    Math.min(4, envNumber('RECORDING_THUMBNAIL_CONCURRENCY', 2)),
   );
 
   constructor(
@@ -101,7 +101,11 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     // momento possível (precisando da prova). Aqui uma amostra pequena é
     // verificada de tempos em tempos e o problema vira evento na câmera.
     if (String(process.env.RECORDING_INTEGRITY_SWEEP_ENABLED ?? 'true') !== 'false') {
-      const intervalMs = Math.max(15 * 60_000, Number(process.env.RECORDING_INTEGRITY_SWEEP_INTERVAL_MS ?? 60 * 60_000));
+      // NaN aqui ia direto para o setInterval abaixo — rajada de ~1ms.
+      const intervalMs = envNumber('RECORDING_INTEGRITY_SWEEP_INTERVAL_MS', 60 * 60_000, {
+        min: 15 * 60_000,
+        onInvalid: (m) => this.logger.warn(m),
+      });
       this.integritySweepTimer = setInterval(() => void this.runIntegritySweep(), intervalMs);
       this.integritySweepTimer.unref?.();
       const firstRun = setTimeout(() => void this.runIntegritySweep(), 5 * 60_000);
@@ -110,7 +114,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
     if (String(process.env.RECORDING_THUMBNAIL_BACKFILL_ENABLED ?? 'true') === 'false') return;
     const timer = setTimeout(() => {
-      const limit = Math.max(1, Math.min(10_000, Number(process.env.RECORDING_THUMBNAIL_BACKFILL_LIMIT ?? 2_000)));
+      const limit = envNumber('RECORDING_THUMBNAIL_BACKFILL_LIMIT', 2_000, { min: 1, max: 10_000 });
       void this.enqueueMissingThumbnails(limit).catch((error) => {
         this.logger.warn(`Falha ao agendar backfill de thumbnails: ${error instanceof Error ? error.message : String(error)}`);
       });
@@ -137,7 +141,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     if (this.integritySweepRunning) return;
     this.integritySweepRunning = true;
     try {
-      const sampleSize = Math.max(1, Math.min(20, Number(process.env.RECORDING_INTEGRITY_SWEEP_SAMPLE ?? 3)));
+      const sampleSize = envNumber('RECORDING_INTEGRITY_SWEEP_SAMPLE', 3, { min: 1, max: 20 });
       // Gravações fechadas (endedAt != null) das últimas 24h: as recentes são as
       // que ainda podem ser salvas/reprocessadas se algo estiver errado.
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -220,7 +224,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private getCacheTtlMs() {
-    const ttl = Number(process.env.RECORDING_DIAGNOSTICS_TTL_SECONDS ?? 900);
+    const ttl = envNumber('RECORDING_DIAGNOSTICS_TTL_SECONDS', 900);
     return Math.max(60, Number.isFinite(ttl) ? ttl : 900) * 1000;
   }
 
@@ -761,7 +765,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       'json',
       filePath,
     ], {
-      timeout: Math.max(5_000, Number(process.env.RECORDING_METADATA_PROBE_TIMEOUT_MS ?? 15_000)),
+      timeout: envNumber('RECORDING_METADATA_PROBE_TIMEOUT_MS', 15_000, { min: 5_000 }),
       maxBuffer: 1024 * 1024,
     });
     const parsed = JSON.parse(stdout || '{}') as { format?: { duration?: string; size?: string } };
@@ -790,7 +794,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     });
     const result = { scanned: records.length, updated: 0, missing: 0, probeFailed: 0 };
     let nextIndex = 0;
-    const concurrency = Math.max(1, Math.min(4, Number(process.env.RECORDING_METADATA_RECONCILE_CONCURRENCY ?? 2)));
+    const concurrency = envNumber('RECORDING_METADATA_RECONCILE_CONCURRENCY', 2, { min: 1, max: 4 });
 
     const worker = async () => {
       while (true) {
@@ -915,7 +919,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       try {
         if (existsSync(outputPath) && statSync(outputPath).size > 0) return;
         const temporaryPath = `${outputPath}.${process.pid}.${Date.now()}.tmp.jpg`;
-        const configuredSecond = Math.max(0, Number(process.env.RECORDING_THUMBNAIL_SECOND ?? 2));
+        const configuredSecond = envNumber('RECORDING_THUMBNAIL_SECOND', 2, { min: 0 });
         const maximumSecond = Math.max(0, (durationSeconds ?? 10) - 0.25);
         const seekSeconds = Math.min(configuredSecond, maximumSecond);
         let lastError: unknown = null;
@@ -981,8 +985,8 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   // varrer horas de vídeo sem baixar o vídeo nem decodificar em JS.
   // ───────────────────────────────────────────────────────────────────────
   private buildTimelinePreviewPlan(durationSeconds: number | null | undefined): TimelinePreviewPlan {
-    const tileWidth = Math.max(16, Number(process.env.RECORDING_PREVIEW_TILE_WIDTH ?? 160));
-    const maxTiles = Math.max(1, Number(process.env.RECORDING_PREVIEW_MAX_TILES ?? 120));
+    const tileWidth = envNumber('RECORDING_PREVIEW_TILE_WIDTH', 160, { min: 16 });
+    const maxTiles = envNumber('RECORDING_PREVIEW_MAX_TILES', 120, { min: 1 });
     return planTimelinePreview({ durationSeconds, tileWidth, maxTiles });
   }
 
@@ -1332,7 +1336,11 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       lastRecordingAt: string | null;
       lastRecordingAgeSeconds: number | null;
     }>();
-    const minExpectedBytes = Math.max(32 * 1024, Number(process.env.RECORDING_MIN_EXPECTED_FILE_BYTES ?? 128 * 1024));
+    const minExpectedBytes = envNumber('RECORDING_MIN_EXPECTED_FILE_BYTES', 128 * 1024, {
+      min: 32 * 1024,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    });
 
     for (const record of records) {
       const diagnostics = await this.getRecordingDiagnostics(record.id, false) as any;
@@ -1604,7 +1612,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     if (toDate.getTime() <= fromDate.getTime()) {
       throw new BadRequestException('Intervalo inválido: "to" precisa ser depois de "from".');
     }
-    const maxHours = Math.max(1, Math.min(72, Number(process.env.VOD_PLAYLIST_MAX_HOURS ?? 24)));
+    const maxHours = envNumber('VOD_PLAYLIST_MAX_HOURS', 24, { min: 1, max: 72 });
     if (toDate.getTime() - fromDate.getTime() > maxHours * 60 * 60 * 1000) {
       throw new BadRequestException(`Intervalo máximo da playlist VOD é de ${maxHours}h.`);
     }
@@ -1615,7 +1623,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     await this.accessControlService.assertCanViewCamera(user, cameraId);
 
     const maxSegments = Math.max(1, Math.min(2_000, Number(params.maxSegments ?? process.env.VOD_PLAYLIST_MAX_SEGMENTS ?? 720)));
-    const lookbackMinutes = Math.max(1, Math.min(360, Number(process.env.VOD_PLAYLIST_LOOKBACK_MINUTES ?? 60)));
+    const lookbackMinutes = envNumber('VOD_PLAYLIST_LOOKBACK_MINUTES', 60, { min: 1, max: 360 });
     const lookbackStart = new Date(fromDate.getTime() - lookbackMinutes * 60 * 1000);
 
     const records = await this.prisma.recording.findMany({

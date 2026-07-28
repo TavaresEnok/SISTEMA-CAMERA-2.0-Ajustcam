@@ -27,6 +27,7 @@ import { CommercialPolicyService } from '../commercial-policy/commercial-policy.
 import { ModuleRef } from '@nestjs/core';
 import { AiManagerService } from '../ai/ai-manager.service';
 import { AiService } from '../ai/ai.service';
+import { envNumber } from '../common/config/env-number.helper';
 
 @Controller()
 export class RecordingsController {
@@ -80,7 +81,7 @@ export class RecordingsController {
   ) {
     await this.accessControlService.assertCanRecordCamera(user, cameraId);
     await this.commercialPolicy.assertFeature('localRecording', user);
-    const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+    const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
     const segmentSeconds = dto.segmentSeconds ?? defaultSegment;
     const result = await this.recordingManager.start(cameraId, segmentSeconds, { recordingMode: 'manual' });
     await this.auditService.log(user.id, 'recording.start', 'Camera', cameraId, { status: result.status }, req);
@@ -182,7 +183,7 @@ export class RecordingsController {
       try {
         await this.accessControlService.assertCanRecordCamera(user, cameraId);
         await this.recordingManager.stop(cameraId);
-        const defaultSegment = Number(process.env.RECORDING_SEGMENT_SECONDS ?? 300);
+        const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300);
         await this.recordingManager.start(cameraId, defaultSegment);
         results.push({ cameraId, status: 'restarted' });
       } catch (error) {
