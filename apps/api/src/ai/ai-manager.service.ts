@@ -318,12 +318,31 @@ export class AiManagerService implements OnModuleInit {
   }
 
   async startCamera(cameraId: string, options?: { allowCameraTrigger?: boolean }) {
-    if (!(await this.commercialPolicy.isAllowed('aiAdvanced'))) {
-      return { status: 'disabled', cameraId, reason: 'commercial_restriction' };
-    }
     const settings = await this.getSettings();
     if (!settings.enabled) {
       return { status: 'disabled', cameraId };
+    }
+    // ⚠️ O portão é o da capacidade que ESTE start vai usar — a mesma lição de
+    // `performSyncAll`, que aqui faltava. Abrir com `aiAdvanced` devolvia
+    // `commercial_restriction` no estado NORMAL do produto ("somente
+    // movimento"), em silêncio: sem log, sem erro, com cara de sucesso.
+    //
+    // Isso matava a auto-cura. Quando o ai-service reinicia ele perde todos os
+    // processadores; o watchdog percebe e chama este método — que respondia
+    // "desabilitado" e voltava. Câmera armada por movimento ficava sem detecção
+    // e, portanto, SEM GRAVAR, até alguém reiniciar a API. Visto em produção
+    // em 2026-07-28. O `.catch()` do watchdog não salvava: não havia exceção.
+    //
+    // Assimetria proposital no tratamento de erro: movimento falha ABERTO
+    // (central fora do ar não pode significar "pare de gravar") e objeto/face
+    // falham FECHADO (na dúvida, a IA pesada fica desligada).
+    const motionAllowed = await this.commercialPolicy.isAllowed('aiMotion').catch(() => true);
+    if (!motionAllowed) {
+      return { status: 'disabled', cameraId, reason: 'commercial_restriction' };
+    }
+    if (settings.mode !== 'motion'
+      && !(await this.commercialPolicy.isAllowed('aiAdvanced').catch(() => false))) {
+      return { status: 'disabled', cameraId, reason: 'commercial_restriction' };
     }
     const cam = await this.camerasService.getCameraOrThrow(cameraId);
     if (cam.aiEnabled === false || !isCameraAllowedByAiEnv(cam)) {

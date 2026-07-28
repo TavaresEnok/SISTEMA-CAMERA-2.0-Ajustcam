@@ -87,3 +87,87 @@ test('sync: aiMotion é feature comercial reconhecida (senão o default seria ne
   assert.match(src, /'aiMotion'/, 'aiMotion precisa existir no tipo CommercialFeature');
   assert.match(src, /aiMotion: true/, 'e no default permissivo');
 });
+
+// ── O MESMO ERRO, UM NÍVEL ABAIXO: `startCamera` ────────────────────────────
+//
+// `performSyncAll` aprendeu que `aiAdvanced` é OBJETO/FACE, não "IA em geral".
+// `startCamera` não: ele abria com `isAllowed('aiAdvanced')` e devolvia
+// `commercial_restriction` — em SILÊNCIO, sem log e sem erro.
+//
+// Isso matava exatamente o caminho de auto-cura. Quando o ai-service reinicia,
+// ele perde todos os processadores; o watchdog percebe, chama `startCamera` e
+// nada acontece, porque no estado NORMAL e DESEJADO ("somente movimento")
+// `aiAdvanced` é false. Resultado observado em produção em 2026-07-28: câmera
+// armada por movimento ficou sem detecção — logo, SEM GRAVAR — até alguém
+// reiniciar a API. O `.catch()` do watchdog não ajudava: não havia erro, havia
+// um retorno bem-comportado dizendo "desabilitado".
+//
+// Regra: o portão de `startCamera` tem que ser o da capacidade que ele vai
+// usar — `aiMotion` para modo movimento, `aiAdvanced` só para objeto/face.
+
+import { AiManagerService } from '../src/ai/ai-manager.service';
+
+function managerFake(opts: { mode?: string; allowed: Record<string, boolean> }) {
+  const calls: string[] = [];
+  const mgr: any = Object.create(AiManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.commercialPolicy = {
+    isAllowed: async (feature: string) => opts.allowed[feature] ?? false,
+  };
+  mgr.getSettings = async () => ({ enabled: true, mode: opts.mode ?? 'motion' });
+  mgr.camerasService = {
+    getCameraOrThrow: async () => ({ id: 'cam-1', name: 'Portaria', aiEnabled: true, motionTrigger: 'SYSTEM' }),
+  };
+  mgr.buildAiSource = async () => ({ rtspUrl: 'rtsp://x/grid', info: {} });
+  mgr.aiService = {
+    startAnalysisWithConfig: async (id: string, _url: string, mode: string) => {
+      calls.push(`start:${id}:${mode}`);
+      return { status: 'started' };
+    },
+  };
+  return { mgr, calls };
+}
+
+test('startCamera: "somente movimento" (aiAdvanced=false) PRECISA iniciar a análise', async () => {
+  const { mgr, calls } = managerFake({ mode: 'motion', allowed: { aiMotion: true, aiAdvanced: false } });
+
+  const result = await mgr.startCamera('cam-1');
+
+  assert.deepEqual(calls, ['start:cam-1:motion'], 'este é o estado normal do produto: tem que ligar o MOG2');
+  assert.notEqual((result as any)?.status, 'disabled', 'devolver "disabled" aqui é a gravação parando em silêncio');
+});
+
+test('startCamera: movimento PROIBIDO pela licença continua bloqueando', async () => {
+  const { mgr, calls } = managerFake({ mode: 'motion', allowed: { aiMotion: false, aiAdvanced: false } });
+
+  const result = await mgr.startCamera('cam-1');
+
+  assert.deepEqual(calls, [], 'sem direito nem a movimento, nada pode subir');
+  assert.equal((result as any).status, 'disabled');
+});
+
+test('startCamera: modo OBJETO sem aiAdvanced continua bloqueado (a IA pesada segue desligada)', async () => {
+  const { mgr, calls } = managerFake({ mode: 'object', allowed: { aiMotion: true, aiAdvanced: false } });
+
+  const result = await mgr.startCamera('cam-1');
+
+  assert.deepEqual(calls, [], 'liberar movimento não pode virar uma porta para objeto/face');
+  assert.equal((result as any).status, 'disabled');
+});
+
+test('startCamera: modo OBJETO COM aiAdvanced sobe normalmente', async () => {
+  const { mgr, calls } = managerFake({ mode: 'object', allowed: { aiMotion: true, aiAdvanced: true } });
+
+  await mgr.startCamera('cam-1');
+
+  assert.deepEqual(calls, ['start:cam-1:object']);
+});
+
+test('startCamera: falha ao consultar a política não pode derrubar o movimento', async () => {
+  const { mgr, calls } = managerFake({ mode: 'motion', allowed: {} });
+  mgr.commercialPolicy = { isAllowed: async () => { throw new Error('central fora do ar'); } };
+
+  await mgr.startCamera('cam-1');
+
+  assert.deepEqual(calls, ['start:cam-1:motion'], 'central inacessível não pode significar "pare de gravar"');
+});
