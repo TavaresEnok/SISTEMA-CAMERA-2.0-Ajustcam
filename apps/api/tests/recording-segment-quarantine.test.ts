@@ -377,6 +377,11 @@ test('D2 pré-evento: com a gravação JÁ em curso o ring não é ressuscitado 
   const mgr = motionManager(5);
   motionHarness(mgr, events);
   armRing(mgr, 'cam-1', events, false);
+  // "JÁ gravando" precisa ser dito pelo canal que o código de fato consulta: no
+  // modo local a autoridade é `this.active` (o processo que ESTE nó tem), não o
+  // `getStatus`, que é inferência para TELA e mentia depois de um restart.
+  // A asserção abaixo é a mesma de antes — só o fixture passou a ser fiel.
+  mgr.active.set('cam-1', {});
   mgr.getStatus = async () => ({ isRecording: true });
   mgr.start = async () => { events.push('rec_start'); return { status: 'recording_started' }; };
 

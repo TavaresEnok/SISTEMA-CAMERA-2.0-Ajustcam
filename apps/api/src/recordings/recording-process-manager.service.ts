@@ -581,10 +581,25 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const postRollSeconds = this.getMotionPostRollSeconds();
     const segmentSeconds = this.getMotionSegmentSeconds();
 
-    const runtimeStatus = await this.getStatus(cameraId).catch(() => ({ isRecording: false }));
+    // AUTORIDADE ≠ INFERÊNCIA. `getStatus` responde para TELA: no modo local,
+    // sem estado em memória, ele INFERE "gravando" a partir de um segmento
+    // recente (<15 min). Ótimo para o painel, péssimo como decisão.
+    //
+    // Depois de um restart da API, `this.active` está vazio — nenhum ffmpeg
+    // sobreviveu — mas o último segmento ainda é recente. A câmera se declarava
+    // gravando, este método devolvia `already_recording` e o movimento NÃO
+    // gerava gravação nenhuma até a janela vencer. Medido em produção em
+    // 2026-07-28: 15 minutos de imagem perdidos por reinício, em silêncio.
+    //
+    // No modo local quem manda é o processo que ESTE nó tem. No modo worker o
+    // ffmpeg vive em outro nó, `active` está vazio por definição, e a
+    // inferência é a única informação disponível.
+    const alreadyRecording = this.controlMode === 'local'
+      ? this.active.has(cameraId)
+      : (await this.getStatus(cameraId).catch(() => ({ isRecording: false }))).isRecording;
     let startStatus = 'already_recording';
 
-    if (!runtimeStatus.isRecording) {
+    if (!alreadyRecording) {
       // PRÉ-EVENTO: promove os segundos ANTERIORES ao gatilho (se habilitado). Best
       // effort e isolado: se falhar, a gravação normal do movimento segue igual.
       // Só faz sentido com o ring de pé — um ring criado AGORA não tem passado
