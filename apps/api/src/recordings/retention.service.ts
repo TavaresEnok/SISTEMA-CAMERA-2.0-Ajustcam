@@ -8,6 +8,7 @@ import { SettingsService } from '../settings/settings.service';
 import { ensureFileUnderRoot } from './helpers/safe-file.helper';
 import { envBool, envNumber } from '../common/config/env-number.helper';
 import { buildTimelinePreviewPath } from './helpers/timeline-preview.helper';
+import { buildCameraRootDir, parseCameraIdFromDirName } from './helpers/recording-path.helper';
 
 type ProtectionSets = {
   recordingIds: Set<string>;
@@ -410,6 +411,10 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     // sobra derivado de conteúdo no disco após a retenção apagar a origem.
     this.removeFile(buildTimelinePreviewPath(fullPath));
     this.removeFile(`${fullPath}.invalid.json`);
+    // Marcador de quarentena da recuperação de órfãos. Nome próprio porque
+    // `.invalid.json` já é do processador de miniaturas — ver
+    // `segmentQuarantineMarkerPath`. Some com o vídeo, senão sobra sidecar órfão.
+    this.removeFile(`${fullPath}.orphan-quarantine.json`);
     this.removeFile(join(root, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`));
     await this.prisma.recording.delete({ where: { id: recording.id } });
     return true;
@@ -662,58 +667,112 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  /**
+   * Varredura de derivados órfãos (thumbnail, sprite de scrubbing, MP4 de
+   * compatibilidade) — POR CÂMERA.
+   *
+   * Antes, montava três Sets com o acervo INTEIRO de Recording para depois
+   * varrer o disco. Correto, mas o pico de memória crescia com câmeras ×
+   * retenção e o job é periódico: 100 câmeras a 30 dias são ~800 mil linhas
+   * viradas em três conjuntos de caminhos longos. Agora cada câmera é resolvida
+   * e descartada antes da próxima — mesmo resultado, pico de UMA câmera.
+   *
+   * O laço é dirigido pelos DIRETÓRIOS do disco, não pela tabela Camera: a pasta
+   * de uma câmera EXCLUÍDA é justamente onde há mais derivado órfão para limpar,
+   * e iterar pela tabela a deixaria intocada para sempre.
+   */
   private async cleanupOrphanDerivedArtifacts() {
     const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
-    const rows = await this.prisma.recording.findMany({ select: { id: true, cameraId: true, filePath: true } });
-    const expectedThumbnails = new Set<string>();
-    const expectedPreviews = new Set<string>();
-    const expectedCompatible = new Set<string>();
-    const validIds = new Set<string>();
-    for (const row of rows) {
-      const filePath = ensureFileUnderRoot(root, row.filePath);
-      expectedThumbnails.add(this.derivedThumbnailPath(filePath));
-      expectedPreviews.add(buildTimelinePreviewPath(filePath));
-      expectedCompatible.add(join(root, '.playback-compatible', row.cameraId, `${row.id}.mp4`));
-      validIds.add(row.id);
+    const compatibleRoot = join(root, '.playback-compatible');
+
+    const listDirs = (dir: string) => {
+      if (!existsSync(dir)) return [] as string[];
+      try {
+        return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch {
+        return [] as string[];
+      }
+    };
+
+    // Toda câmera com rastro no disco, venha do acervo (`camera-<id>/`) ou do
+    // cache de compatibilidade (`.playback-compatible/<id>/`).
+    const cameraIds = new Set<string>();
+    for (const name of listDirs(root)) {
+      const cameraId = parseCameraIdFromDirName(name);
+      if (cameraId) cameraIds.add(cameraId);
     }
+    for (const name of listDirs(compatibleRoot)) cameraIds.add(name);
 
     let orphanThumbnailsDeleted = 0;
     let orphanCompatibleFilesDeleted = 0;
-    const walk = (dir: string) => {
-      if (!existsSync(dir)) return;
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(fullPath);
-          continue;
-        }
-        if (entry.name.endsWith('.thumb.jpg') && !expectedThumbnails.has(fullPath)) {
-          if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
-        } else if (entry.name.endsWith('.preview.jpg') && !expectedPreviews.has(fullPath)) {
-          if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
-        } else if (fullPath.includes(`${join(root, '.playback-compatible')}/`) && entry.name.endsWith('.mp4') && !expectedCompatible.has(fullPath)) {
-          if (this.removeFile(fullPath)) orphanCompatibleFilesDeleted += 1;
-        }
-      }
-    };
-    walk(root);
 
-    const diagnosticsPath = join(root, '.diagnostics-cache', 'recording-health.json');
-    if (existsSync(diagnosticsPath)) {
-      try {
-        const cache = JSON.parse(readFileSync(diagnosticsPath, 'utf8')) as Record<string, unknown>;
-        let changed = false;
-        for (const id of Object.keys(cache)) {
-          if (validIds.has(id)) continue;
-          delete cache[id];
-          changed = true;
-        }
-        if (changed) writeFileSync(diagnosticsPath, JSON.stringify(cache), 'utf8');
-      } catch {
-        // Cache diagnóstico é best effort; não interrompe retenção.
+    for (const cameraId of cameraIds) {
+      const rows = await this.prisma.recording.findMany({
+        where: { cameraId },
+        select: { id: true, filePath: true },
+      });
+      const expectedThumbnails = new Set<string>();
+      const expectedPreviews = new Set<string>();
+      const expectedCompatible = new Set<string>();
+      for (const row of rows) {
+        const filePath = ensureFileUnderRoot(root, row.filePath);
+        expectedThumbnails.add(this.derivedThumbnailPath(filePath));
+        expectedPreviews.add(buildTimelinePreviewPath(filePath));
+        expectedCompatible.add(join(compatibleRoot, cameraId, `${row.id}.mp4`));
       }
+
+      const walk = (dir: string, compatible: boolean) => {
+        if (!existsSync(dir)) return;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const fullPath = join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walk(fullPath, compatible);
+            continue;
+          }
+          if (entry.name.endsWith('.thumb.jpg') && !expectedThumbnails.has(fullPath)) {
+            if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
+          } else if (entry.name.endsWith('.preview.jpg') && !expectedPreviews.has(fullPath)) {
+            if (this.removeFile(fullPath)) orphanThumbnailsDeleted += 1;
+          } else if (compatible && entry.name.endsWith('.mp4') && !expectedCompatible.has(fullPath)) {
+            if (this.removeFile(fullPath)) orphanCompatibleFilesDeleted += 1;
+          }
+        }
+      };
+      walk(buildCameraRootDir(root, cameraId), false);
+      walk(join(compatibleRoot, cameraId), true);
     }
+
+    await this.pruneDiagnosticsCache(root);
     return { orphanThumbnailsDeleted, orphanCompatibleFilesDeleted };
+  }
+
+  /**
+   * Poda o cache diagnóstico das gravações que já não existem.
+   *
+   * Consulta pelas CHAVES DO CACHE (`id in [...]`) em vez de carregar todos os
+   * ids do acervo: o custo passa a ser o tamanho do cache — que é o que está
+   * sendo podado — e não o do banco.
+   */
+  private async pruneDiagnosticsCache(root: string) {
+    const diagnosticsPath = join(root, '.diagnostics-cache', 'recording-health.json');
+    if (!existsSync(diagnosticsPath)) return;
+    try {
+      const cache = JSON.parse(readFileSync(diagnosticsPath, 'utf8')) as Record<string, unknown>;
+      const ids = Object.keys(cache);
+      if (!ids.length) return;
+      const alive = new Set(
+        (await this.prisma.recording.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((r) => r.id),
+      );
+      let changed = false;
+      for (const id of ids) {
+        if (alive.has(id)) continue;
+        delete cache[id];
+        changed = true;
+      }
+      if (changed) writeFileSync(diagnosticsPath, JSON.stringify(cache), 'utf8');
+    } catch {
+      // Cache diagnóstico é best effort; não interrompe retenção.
+    }
   }
 
   private async diskUsagePercent(root: string) {

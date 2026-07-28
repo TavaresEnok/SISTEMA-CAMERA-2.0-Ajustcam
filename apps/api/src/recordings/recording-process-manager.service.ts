@@ -30,7 +30,7 @@ import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper'
 // serviço crítico. Toda chamada é síncrona, trivial e envolvida em try/catch —
 // observabilidade JAMAIS pode derrubar uma gravação.
 import { cameraMetrics } from '../observability/camera-metrics.service';
-import { buildRecordingOutputDir, buildRecordingOutputPattern } from './helpers/recording-path.helper';
+import { buildCameraRootDir, buildRecordingOutputDir, buildRecordingOutputPattern } from './helpers/recording-path.helper';
 import {
   appendStderrChunk,
   createStderrRing,
@@ -1244,8 +1244,20 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 3;
   }
 
+  /**
+   * Marcador de quarentena. O nome DEPENDE da extensão, e isso é deliberado:
+   *
+   *  - `.ts`  → `<arquivo>.invalid.json` — convenção já em produção; ninguém
+   *    mais escreve marcador ao lado de um `.ts`, então não há colisão.
+   *  - demais → `<arquivo>.orphan-quarantine.json` — porque
+   *    `<arquivo>.mp4.invalid.json` JÁ TEM DONO: o processador de miniaturas o
+   *    escreve para dizer "não consegui gerar a miniatura", caso em que o vídeo
+   *    está BOM. Reusar o nome faria um MP4 perfeitamente reproduzível sair do
+   *    rodízio de recuperação por uma falha que não é dele — e faria a retenção
+   *    e o `recordings.service` lerem quarentena como falha de miniatura.
+   */
   private segmentQuarantineMarkerPath(filePath: string) {
-    return `${filePath}.invalid.json`;
+    return /\.ts$/i.test(filePath) ? `${filePath}.invalid.json` : `${filePath}.orphan-quarantine.json`;
   }
 
   /** Seam de I/O: há marcador de quarentena ao lado deste arquivo? Nunca lança. */
@@ -1262,7 +1274,12 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
    * Devolve `true` quando o teto estourou e o arquivo foi posto em QUARENTENA
    * (a partir daí ele não deve mais ser retentado).
    */
-  private async registerSegmentRemuxFailure(cameraId: string, filePath: string, error: unknown): Promise<boolean> {
+  private async registerSegmentRemuxFailure(
+    cameraId: string,
+    filePath: string,
+    error: unknown,
+    stage: 'remux' | 'leitura' = 'remux',
+  ): Promise<boolean> {
     const attempts = (this.segmentRemuxFailures.get(filePath) ?? 0) + 1;
     const maxAttempts = this.getSegmentRemuxMaxAttempts();
     // sanitizeSensitiveText NÃO é decoração aqui: o texto vem do stderr do FFmpeg,
@@ -1273,7 +1290,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     if (attempts < maxAttempts) {
       this.segmentRemuxFailures.set(filePath, attempts);
       this.logger.warn(
-        `Falha ao remuxar segmento (tentativa ${attempts}/${maxAttempts}) camera=${cameraId} arquivo=${basename(filePath)}: ${reason}`,
+        `Falha de ${stage} do segmento (tentativa ${attempts}/${maxAttempts}) camera=${cameraId} arquivo=${basename(filePath)}: ${reason}`,
       );
       return false;
     }
@@ -1282,7 +1299,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     try {
       await writeFile(
         this.segmentQuarantineMarkerPath(filePath),
-        JSON.stringify({ cameraId, filePath, attempts, reason, quarantinedAt: new Date().toISOString() }, null, 2) + '\n',
+        JSON.stringify({ cameraId, filePath, stage, attempts, reason, quarantinedAt: new Date().toISOString() }, null, 2) + '\n',
         { mode: 0o600 },
       );
     } catch (writeError) {
@@ -1300,7 +1317,9 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   private async recoverOrphanedSegments() {
     if (!this.checkFfmpegAvailable()) return;
     const graceSeconds = envNumber('RECORDING_ORPHAN_RECOVERY_GRACE_SECONDS', 300, { min: 60 });
-    const invalidDeleteSeconds = Math.max(graceSeconds, envNumber('RECORDING_ORPHAN_INVALID_DELETE_SECONDS', 3600));
+    // RECORDING_ORPHAN_INVALID_DELETE_SECONDS foi APOSENTADO junto com o `unlink`
+    // que ele governava — ver o bloco (D) logo abaixo. Deixar a variável inerte é
+    // proposital: instalação que a tenha no .env não quebra, apenas não apaga mais.
     const limit = envNumber('RECORDING_ORPHAN_RECOVERY_LIMIT', 2_000, { min: 1, max: 10_000 });
     const cameras = await this.prisma.camera.findMany({ select: { id: true } });
     const registeredPaths = new Set((await this.prisma.recording.findMany({ select: { filePath: true } })).map((row) => row.filePath));
@@ -1309,7 +1328,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
     for (const camera of cameras) {
       if (this.active.has(camera.id)) continue;
-      const cameraRoot = join(this.recordingsRoot, `camera-${camera.id}`);
+      const cameraRoot = buildCameraRootDir(this.recordingsRoot, camera.id);
       if (!existsSync(cameraRoot)) continue;
       const walk = (dir: string) => {
         if (candidates.length >= limit || this.active.has(camera.id)) return;
@@ -1334,20 +1353,29 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
 
     let recovered = 0;
-    let invalidDeleted = 0;
+    let quarantined = 0;
     const defaultSegmentSeconds = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 1 });
+
+    // ── (D) UMA ÚNICA POLÍTICA PARA A MESMA FALHA ────────────────────────────
+    // Antes, "não consegui recuperar este segmento" tinha DUAS respostas neste
+    // mesmo arquivo: `performSegmentScan` (câmera ativa) contava tentativas e
+    // punha em quarentena, preservando o vídeo; aqui, um `unlink` depois de 1h,
+    // sem contador e sem marcador.
+    //
+    // A assimetria era perversa porque este laço PULA câmera ativa: a única
+    // política que destruía era a que só alcança gravação de câmera que parou —
+    // justamente o material que ninguém está olhando e que tem mais chance de
+    // ser o incidente que importava. Um soluço de ffprobe bastava.
+    //
+    // Agora ambos os ramos passam pelo mesmo `registerSegmentRemuxFailure`:
+    // teto de tentativas, marcador com o motivo e o arquivo INTACTO no disco.
     for (const candidate of candidates) {
       if (this.active.has(candidate.cameraId)) continue;
+      // Teto já gasto: sai do rodízio sem custar ffmpeg/ffprobe de novo.
+      if (this.isSegmentQuarantined(candidate.filePath)) continue;
 
       if (candidate.kind === 'ts') {
-        // Em QUARENTENA: o teto de tentativas já foi gasto neste arquivo. Não
-        // remuxa de novo (era por aqui que o loop de ffmpeg renascia depois que a
-        // câmera parava de gravar) e NÃO apaga — nem pelo prazo de inválidos.
-        // O marcador `<...>.ts.invalid.json` é NOSSO; o `<...>.mp4.invalid.json`
-        // do processador de miniaturas tem outro significado e por isso o MP4
-        // órfão segue com o tratamento de sempre.
-        if (this.isSegmentQuarantined(candidate.filePath)) continue;
-
+        // .mp4 gêmeo já registrado → o .ts é só lixo de captura, não gravação.
         const mp4Twin = candidate.filePath.replace(/\.ts$/i, '.mp4');
         if (registeredPaths.has(mp4Twin)) {
           await unlink(candidate.filePath).catch(() => undefined);
@@ -1356,36 +1384,27 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         try {
           const mp4Path = await this.remuxAndRegisterTsSegment(candidate.cameraId, candidate.filePath, defaultSegmentSeconds);
           registeredPaths.add(mp4Path);
+          this.segmentRemuxFailures.delete(candidate.filePath);
           recovered += 1;
         } catch (error) {
-          if (candidate.ageSeconds >= invalidDeleteSeconds) {
-            await unlink(candidate.filePath).catch(() => undefined);
-            invalidDeleted += 1;
-          } else {
-            this.logger.warn(`Falha ao recuperar segmento .ts órfão ${basename(candidate.filePath)}: ${sanitizeSensitiveText(error)}`);
-          }
+          if (await this.registerSegmentRemuxFailure(candidate.cameraId, candidate.filePath, error)) quarantined += 1;
         }
         continue;
       }
 
-      const metadata = await this.probeRecordedFileMetadata(candidate.filePath);
-      if (metadata.durationSecondsExact == null) {
-        if (candidate.ageSeconds >= invalidDeleteSeconds) {
-          await unlink(candidate.filePath).catch(() => undefined);
-          invalidDeleted += 1;
-        }
-        continue;
-      }
       try {
+        const metadata = await this.probeRecordedFileMetadata(candidate.filePath);
+        if (metadata.durationSecondsExact == null) throw new Error('mp4_orfao_ilegivel: ffprobe não devolveu duração');
         await this.registerSegment(candidate.cameraId, candidate.filePath, defaultSegmentSeconds);
         registeredPaths.add(candidate.filePath);
+        this.segmentRemuxFailures.delete(candidate.filePath);
         recovered += 1;
       } catch (error) {
-        this.logger.warn(`Falha ao recuperar segmento órfão ${basename(candidate.filePath)}: ${sanitizeSensitiveText(error)}`);
+        if (await this.registerSegmentRemuxFailure(candidate.cameraId, candidate.filePath, error, 'leitura')) quarantined += 1;
       }
     }
-    if (candidates.length || recovered || invalidDeleted) {
-      this.logger.log(`Recuperação de segmentos órfãos: inspecionados=${candidates.length}, recuperados=${recovered}, inválidos removidos=${invalidDeleted}.`);
+    if (candidates.length || recovered || quarantined) {
+      this.logger.log(`Recuperação de segmentos órfãos: inspecionados=${candidates.length}, recuperados=${recovered}, em quarentena=${quarantined} (nenhum arquivo apagado).`);
     }
   }
 
@@ -1767,7 +1786,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const sourceCodec = await this.probeSourceCodec(rtspUrl, recordingTransport);
     const startDate = new Date();
     const outputDir = buildRecordingOutputDir(this.recordingsRoot, cameraId, startDate);
-    const cameraRootDir = join(this.recordingsRoot, `camera-${cameraId}`);
+    const cameraRootDir = buildCameraRootDir(this.recordingsRoot, cameraId);
     // Captura sempre em .ts; o .mp4 final (this.recordingFormat) nasce no remux.
     const outputPattern = buildRecordingOutputPattern(outputDir, 'ts');
 

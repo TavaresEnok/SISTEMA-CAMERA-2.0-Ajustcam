@@ -11,3 +11,20 @@ export function buildRecordingOutputDir(recordingsRoot: string, cameraId: string
 export function buildRecordingOutputPattern(outputDir: string, format: string): string {
   return join(outputDir, `%Y-%m-%d_%H-%M-%S.${format}`);
 }
+
+/**
+ * Raiz de uma câmera no acervo. Existe para que o prefixo `camera-` tenha UM
+ * dono: ele é lido de volta pela retenção (que APAGA derivados) e pela
+ * recuperação de órfãos, e um rename solto ali faria a varredura simplesmente
+ * não encontrar nada — falhando em silêncio, sem erro nenhum.
+ */
+export function buildCameraRootDir(recordingsRoot: string, cameraId: string): string {
+  return join(recordingsRoot, `camera-${cameraId}`);
+}
+
+/** Inverso de `buildCameraRootDir`: devolve o cameraId, ou null se não for pasta de câmera. */
+export function parseCameraIdFromDirName(dirName: string): string | null {
+  return dirName.startsWith('camera-') && dirName.length > 'camera-'.length
+    ? dirName.slice('camera-'.length)
+    : null;
+}

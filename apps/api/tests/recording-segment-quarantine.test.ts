@@ -415,3 +415,134 @@ test('D2 pré-evento: com o recurso DESLIGADO (padrão de produção) nada de ri
 
   assert.deepEqual(events, ['rec_stop'], 'MOTION_PRE_EVENT_SECONDS=0 mantém a produção intocada');
 });
+
+// ── (D) UMA ÚNICA POLÍTICA PARA A MESMA FALHA ────────────────────────────────
+//
+// `performSegmentScan` (câmera ATIVA) e `recoverOrphanedSegments` (câmera
+// PARADA) tratavam o MESMO evento — "não consegui recuperar este segmento" —
+// com políticas OPOSTAS: a primeira punha em quarentena e preservava o arquivo;
+// a segunda dava `unlink` depois de 1h, sem contador e sem marcador.
+//
+// A assimetria era perversa: a recuperação de órfãos PULA câmera ativa, então a
+// única política que apagava era a que só alcança gravação de câmera que parou —
+// exatamente o material que ninguém está olhando e que tem mais chance de ser o
+// incidente que importava. Um soluço de ffprobe bastava para destruir vídeo bom.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function orphanManager(root: string) {
+  const mgr = makeManager({ recordingsRoot: root });
+  mgr.checkFfmpegAvailable = () => true;
+  mgr.prisma = {
+    camera: { findMany: async () => [{ id: 'cam-1' }] },
+    recording: { findMany: async () => [] },
+  };
+  return mgr;
+}
+
+/** Órfão com idade além do antigo prazo de remoção (3600s) — o caso que apagava. */
+function seedOrphan(root: string, fileName: string) {
+  const dir = join(root, 'camera-cam-1', '2026', '07', '27', '10');
+  mkdirSync(dir, { recursive: true });
+  const target = join(dir, fileName);
+  writeFileSync(target, 'conteudo-de-video-fake');
+  const old = Date.now() / 1000 - 7200;
+  utimesSync(target, old, old);
+  return target;
+}
+
+test('D4 órfão .mp4: ilegível pelo ffprobe vai para QUARENTENA e NÃO é apagado', async () => {
+  const root = makeTempDir();
+  try {
+    const target = seedOrphan(root, '2026-07-27_10-00-00.mp4');
+    const mgr = orphanManager(root);
+    mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: null, sizeBytes: 0, hasVideoStream: false });
+
+    for (let i = 0; i < 5; i += 1) await mgr.recoverOrphanedSegments();
+
+    assert.equal(existsSync(target), true, 'VMS probatório: órfão ilegível NUNCA pode ser apagado');
+    assert.equal(existsSync(mgr.segmentQuarantineMarkerPath(target)), true, 'estourado o teto, deve haver marcador de quarentena');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D4 órfão .mp4: o marcador NÃO colide com o `.invalid.json` das miniaturas', async () => {
+  const root = makeTempDir();
+  try {
+    const target = seedOrphan(root, '2026-07-27_10-00-00.mp4');
+    const mgr = orphanManager(root);
+    mgr.probeRecordedFileMetadata = async () => ({ durationSecondsExact: null, sizeBytes: 0, hasVideoStream: false });
+
+    for (let i = 0; i < 5; i += 1) await mgr.recoverOrphanedSegments();
+
+    // `<arquivo>.mp4.invalid.json` JÁ TEM DONO: thumbnail-generation.processor o
+    // escreve para dizer "não deu para gerar miniatura" — o vídeo ali está BOM.
+    // Se a quarentena reusasse esse nome, um MP4 perfeitamente reproduzível cuja
+    // miniatura falhou seria lido como irrecuperável e sairia do rodízio.
+    assert.equal(existsSync(`${target}.invalid.json`), false, 'a quarentena não pode sequestrar o marcador das miniaturas');
+    assert.notEqual(mgr.segmentQuarantineMarkerPath(target), `${target}.invalid.json`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D4 órfão .mp4: falha TRANSITÓRIA de probe não quarentena — a tentativa seguinte recupera', async () => {
+  const root = makeTempDir();
+  try {
+    const target = seedOrphan(root, '2026-07-27_10-00-00.mp4');
+    const mgr = orphanManager(root);
+    let probes = 0;
+    mgr.probeRecordedFileMetadata = async () => {
+      probes += 1;
+      return probes === 1
+        ? { durationSecondsExact: null, sizeBytes: 0, hasVideoStream: false }
+        : { durationSecondsExact: 60, sizeBytes: 5000, hasVideoStream: true };
+    };
+    let registered = 0;
+    mgr.registerSegment = async () => { registered += 1; };
+
+    await mgr.recoverOrphanedSegments();
+    await mgr.recoverOrphanedSegments();
+
+    assert.equal(registered, 1, 'um soluço de ffprobe não pode custar a gravação: a 2ª passada recupera');
+    assert.equal(existsSync(mgr.segmentQuarantineMarkerPath(target)), false, 'uma falha isolada não é quarentena');
+    assert.equal(existsSync(target), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D4 órfão .ts: remux que falha em câmera PARADA também não apaga (mesma política da ativa)', async () => {
+  const root = makeTempDir();
+  try {
+    const target = seedOrphan(root, '2026-07-27_10-00-00.ts');
+    const mgr = orphanManager(root);
+    mgr.remuxAndRegisterTsSegment = async () => { throw new Error('remux_ts_falhou: moov ausente'); };
+
+    for (let i = 0; i < 5; i += 1) await mgr.recoverOrphanedSegments();
+
+    assert.equal(existsSync(target), true, 'câmera parada não pode ter política de destruição diferente da ativa');
+    assert.equal(existsSync(`${target}.invalid.json`), true, 'o .ts mantém a convenção de marcador já em produção');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D4 órfão: a quarentena tem TETO — o mesmo arquivo não gasta ffprobe para sempre', async () => {
+  const root = makeTempDir();
+  try {
+    seedOrphan(root, '2026-07-27_10-00-00.mp4');
+    const mgr = orphanManager(root);
+    let probes = 0;
+    mgr.probeRecordedFileMetadata = async () => {
+      probes += 1;
+      return { durationSecondsExact: null, sizeBytes: 0, hasVideoStream: false };
+    };
+
+    for (let i = 0; i < 8; i += 1) await mgr.recoverOrphanedSegments();
+
+    assert.equal(probes, 3, 'era este o defeito original do .ts: retentar sem teto, queimando CPU para sempre');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
