@@ -33,6 +33,27 @@ webrtcAdditionalHosts: ['127.0.0.1']  # default inócuo; o valor real por instal
 # (vídeo piscando/reconectando). Anunciamos apenas o host real acima.
 webrtcIPsFromInterfaces: no
 
+# Candidato ICE por TCP, no MESMO número de porta do UDP.
+#
+# Sem isto o WebRTC é UDP-ou-nada: não há TURN configurado, então rede que
+# perde/bloqueia UDP 8189 (operadora móvel, Wi-Fi corporativo, VPN) não tem
+# plano B — o handshake estoura em 10s e o cliente refaz a sessão em laço.
+# MEDIDO em produção: 331 sessões criadas, só 108 chegaram a ler um path;
+# 2 de cada 3 morriam em "deadline exceeded while waiting connection", e cada
+# tile sobrevivente reconectava ~12 vezes. O sintoma para quem assiste não é
+# "erro de rede", é grade em 0–3 fps e "o sistema desconecta sozinho".
+webrtcLocalTCPAddress: :8189
+
+# Tempo esperando o path entregar as faixas antes de desistir da sessão.
+#
+# O default de 2s foi calibrado para path já publicando. Aqui os paths são
+# ON-DEMAND: abrir um tile frio dispara a conexão com a câmera, que leva até
+# `sourceOnDemandStartTimeout` (6s) pela WAN. Com 2s, TODO tile frio falhava
+# antes de a primeira imagem existir — e ao abrir a grade os 21 tiles estão
+# frios ao mesmo tempo, então a falha vinha em bloco e virava tempestade de
+# retentativa. Alinhado com o timeout de origem, com folga para o RTT.
+webrtcTrackGatherTimeout: 8s
+
 pathDefaults:
   rtspTransport: tcp
 

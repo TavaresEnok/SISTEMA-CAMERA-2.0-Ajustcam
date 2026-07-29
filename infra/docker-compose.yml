@@ -594,6 +594,11 @@ services:
       # Mídia WebRTC (ICE/UDP): PRECISA ser pública — o browser conecta direto no IP anunciado
       # (mediamtx.yml webrtcAdditionalHosts) nesta porta. Sem ela o vídeo WebRTC não flui.
       - "8189:8189/udp"
+      # Mesma porta em TCP: candidato ICE de fallback para rede que perde ou
+      # bloqueia UDP. Sem TURN configurado, UDP era o único caminho — e quando
+      # ele falhava o cliente entrava em laço de reconexão (medido: 2 de cada 3
+      # sessões morriam no handshake). Ver webrtcLocalTCPAddress no mediamtx.yml.
+      - "8189:8189/tcp"
     # init: roda o tini como PID 1, que COLHE processos zumbis. Sem isto o MediaMTX
     # (PID 1) não faz reaping e cada ffmpeg de restream órfão vira zumbi que acumula
     # para sempre (já observado: centenas). Em escala isso esgota a tabela de PIDs.
