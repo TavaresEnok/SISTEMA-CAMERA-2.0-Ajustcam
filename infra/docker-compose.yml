@@ -248,6 +248,12 @@ services:
       - DRAC_VERSION=${DRAC_VERSION:-local}
       - DRAC_LAUNCH_PROFILE=${DRAC_LAUNCH_PROFILE:-standard}
       - RECORDINGS_ROOT=/storage
+      # QUEM GRAVA. `local` (default) = a API sobe o ffmpeg; `worker` = a API só
+      # publica o comando e quem grava é o camera-worker (profile legacy-worker).
+      # Precisa ser o MESMO valor nos dois serviços: com a API em `local` e o
+      # worker no ar, os dois gravariam as mesmas câmeras em paralelo. O worker
+      # recusa subir fora do modo `worker` justamente para tornar isso impossível.
+      - RECORDING_CONTROL_MODE=${RECORDING_CONTROL_MODE:-local}
       - POSTGRES_BACKUP_DIR=/backups/postgres
       - RECORDING_AUTO_START_ENABLED=${RECORDING_AUTO_START_ENABLED:-false}
       - RECORDING_AUTO_START_DELAY_MS=${RECORDING_AUTO_START_DELAY_MS:-10000}
@@ -299,6 +305,17 @@ services:
       - CAMERA_TEST_ALLOW_PUBLIC_IP=${CAMERA_TEST_ALLOW_PUBLIC_IP:-false}
       - CAMERA_ALLOWED_CIDRS=${CAMERA_ALLOWED_CIDRS:-}
       - CAMERA_DENIED_CIDRS=${CAMERA_DENIED_CIDRS:-}
+      # Quantas câmeras degradadas o health check re-sonda por ciclo (60s).
+      # NÃO é um número livre: cada sonda abre uma sessão RTSP no equipamento do
+      # cliente, e DVR tem limite de sessões concorrentes. Alto demais e a sonda
+      # come as sessões que a IA/gravação precisam — o DVR passa a responder
+      # "SETUP failed: 503 ServerUnavailable" e a gravação por movimento morre
+      # enquanto o painel jura que está só "verificando saúde".
+      - HEALTH_AUTO_REMEDIATION_MAX_PER_RUN=${HEALTH_AUTO_REMEDIATION_MAX_PER_RUN:-5}
+      # Sonda RTSP: stream principal Hikvision via WAN precisa de >5,5s para o
+      # ffprobe fechar metadados; matar cedo = câmera saudável marcada OFFLINE.
+      - CAMERA_RTSP_PROBE_TIMEOUT_MS=${CAMERA_RTSP_PROBE_TIMEOUT_MS:-4500}
+      - CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS=${CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS:-5500}
       - FFMPEG_RTSP_FALLBACK_TRANSPORTS=tcp,udp
       - FFMPEG_RTSP_FALLBACK_PORTS=51488,51489,51490
       - FFMPEG_RTSP_ENABLE_PORT_FALLBACK=false
@@ -364,9 +381,16 @@ services:
     # APKs eram copiados pra dentro do container e sumiam a cada recriação.
     volumes:
       - ./apk:/usr/share/nginx/html/apk:ro
+    # `uid`/`gid` do usuário nginx (101) são OBRIGATÓRIOS aqui.
+    #
+    # O container roda como `nginx` (não-root) com `read_only: true`, e um tmpfs
+    # monta VAZIO e pertencendo a root — mascarando os diretórios que a imagem
+    # trazia. Sem o uid/gid, o nginx não consegue criar `client_temp` e o
+    # container entra em laço de reinício com
+    # "mkdir() /var/cache/nginx/client_temp failed (13: Permission denied)".
     tmpfs:
-      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=64m
-      - /var/run:rw,noexec,nosuid,nodev,size=8m
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=64m,uid=101,gid=101
+      - /var/run:rw,noexec,nosuid,nodev,size=8m,uid=101,gid=101
     depends_on:
       - api
       - drac-central
@@ -400,6 +424,10 @@ services:
       - CAMERA_SECRET_KEY=${CAMERA_SECRET_KEY:?CAMERA_SECRET_KEY is required}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       - STORAGE_ROOT=/storage
+      # MESMO valor do serviço `api` (ver comentário lá). O worker RECUSA subir se
+      # não for `worker` — sem isso, habilitar este profile com a API no default
+      # `local` faria API e worker gravarem a mesma câmera ao mesmo tempo.
+      - RECORDING_CONTROL_MODE=${RECORDING_CONTROL_MODE:-local}
     volumes:
       - ./storage:/storage
     tmpfs:

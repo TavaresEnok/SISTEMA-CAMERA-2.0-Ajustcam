@@ -308,6 +308,18 @@ export class CamerasService {
     });
   }
 
+  /**
+   * Uma câmera, no MESMO formato de `findAllInternal` (mesmos includes), para o
+   * worker consultar sem baixar o parque inteiro. Devolve `null` quando não
+   * existe — quem chama decide o status HTTP.
+   */
+  async findOneInternal(id: string) {
+    return this.prisma.camera.findUnique({
+      where: { id },
+      include: { site: true, area: true, group: true },
+    });
+  }
+
   async findOne(id: string) {
     const camera = await this.getCameraOrThrow(id);
     return sanitizeCamera(camera);
@@ -1685,11 +1697,29 @@ export class CamerasService {
         try {
           const password = this.cryptoService.decrypt(camera.passwordEncrypted);
           const liveProfile = resolveDeliveryRtspProfile(camera);
-          const rtspPathCandidates = this.buildRtspPathCandidates({
-            channel: liveProfile.channel,
-            subtype: liveProfile.subtype,
-            customPath: camera.rtspPath,
-          });
+          // DESCOBERTA é do cadastro; aqui é só CONFERÊNCIA DE SAÚDE.
+          //
+          // `buildRtspPathCandidates` devolve 16 caminhos e `probeRtspPaths` os
+          // testa TODOS (não para no primeiro sucesso — precisa pontuar para
+          // escolher o melhor). Isso é o certo ao cadastrar uma câmera
+          // desconhecida, e é destrutivo aqui: o health check roda a cada 60s e
+          // DVR tem limite de sessões RTSP concorrentes. Com 19 câmeras atrás de
+          // um único DVR, a sonda consumia todas as sessões e o próprio
+          // equipamento passava a responder "SETUP failed: 503
+          // ServerUnavailable" — derrubando a análise de movimento (e portanto a
+          // gravação) enquanto o painel dizia apenas "verificando saúde".
+          //
+          // Quando o caminho já é conhecido ele é a ÚNICA resposta certa: 1
+          // sessão em vez de 16. A varredura completa fica para quem ainda não
+          // tem caminho gravado.
+          const knownPath = camera.rtspPath?.trim();
+          const rtspPathCandidates = knownPath
+            ? [knownPath]
+            : this.buildRtspPathCandidates({
+                channel: liveProfile.channel,
+                subtype: liveProfile.subtype,
+                customPath: camera.rtspPath,
+              });
           const probe = await this.probeRtspPaths({
             ip: camera.ip,
             rtspPorts: [camera.rtspPort],

@@ -832,7 +832,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     const entry = this.preBufferProcs.get(cameraId);
     if (!entry) return;
     this.preBufferProcs.delete(cameraId);
-    try { entry.process.kill('SIGTERM'); } catch { /* já morto */ }
+    // SIGTERM SOZINHO NÃO É GARANTIA DE MORTE. Um ffmpeg encravado (I/O de rede
+    // pendurado no RTSP) ignora o SIGTERM e continua vivo segurando o lock do
+    // path — o modo de falha que aparece como "Reconectando" eterno numa câmera.
+    // O caminho da gravação principal já escalona (killProcessSafely: SIGTERM →
+    // 1,5s → SIGKILL); o ring do pré-evento ficava de fora e podia vazar
+    // processo. Mesma escada aqui, pelo mesmo motivo.
+    try { this.killProcessSafely(entry.process); } catch { /* já morto */ }
     // Limpa o ring: sem gatilho pendente, esses segmentos não viram gravação.
     for (const file of readdirSync(entry.dir, { withFileTypes: true }).filter((f) => f.name.endsWith('.ts'))) {
       await unlink(join(entry.dir, file.name)).catch(() => undefined);
@@ -2242,6 +2248,22 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   }
 
   async stopAll() {
+    // ARMADILHA DOCUMENTADA: em modo `worker` a API não segura processo nenhum,
+    // então `this.active` está VAZIO e este método não para coisa alguma — quem
+    // grava é o worker. Quem chama isto esperando "parar tudo" (a restrição
+    // comercial da Central é o caso real) precisa saber que, nesse modo, o
+    // desligamento acontece pela máscara de `recordingEnabled` no endpoint
+    // `/cameras/internal/*`, que o laço do worker relê a cada 60s.
+    //
+    // O log existe para que um silêncio aqui nunca seja confundido com sucesso.
+    if (this.controlMode === 'worker') {
+      this.logger.warn(
+        'stopAll() em modo worker: a API não controla os processos de gravação. '
+        + 'O desligamento efetivo vem da política aplicada em /cameras/internal/* '
+        + '(o worker relê e para em até 60s).',
+      );
+      return;
+    }
     const cameraIds = [...this.active.keys()];
     for (const cameraId of cameraIds) {
       await this.stop(cameraId);

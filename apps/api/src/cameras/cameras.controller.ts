@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { UserRole, CameraStatus, AlarmPriority, AlarmSource } from '@prisma/client';
 import { type Request, type Response } from 'express';
@@ -799,11 +799,59 @@ export class CamerasController {
     return event;
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // RESTRIÇÃO COMERCIAL APLICADA NA FRONTEIRA QUE O WORKER LÊ.
+  //
+  // O worker legado tem DOIS motores de gravação: os comandos via Redis e um
+  // laço próprio de 60s que grava toda câmera com `recordingEnabled=true`,
+  // consultando só este endpoint. O caminho de comando já é barrado
+  // (`start()` chama `assertFeature('localRecording')` antes de publicar), mas o
+  // laço autônomo não passava por lugar nenhum que soubesse da política — então
+  // uma instalação inadimplente continuava gravando.
+  //
+  // Publicar um "stop" NÃO resolveria: o laço relê este endpoint e reiniciaria a
+  // gravação no ciclo seguinte, desfazendo o comando em até 60s. A correção
+  // precisa mudar o que o worker LÊ.
+  //
+  // E a máscara é aplicada na RESPOSTA, não no banco. Zerar `recordingEnabled`
+  // no Postgres destruiria a intenção do operador: quando o cliente voltasse a
+  // pagar, ninguém saberia mais quais câmeras deviam gravar. Como overlay, a
+  // restrição some sozinha e a gravação retoma exatamente o que estava
+  // configurado.
+  //
+  // Latência de aplicação: até um ciclo do laço (60s). Aceitável para bloqueio
+  // comercial — e o caminho de comando, esse, é imediato.
+  // ───────────────────────────────────────────────────────────────────────────
+  private async maskRecordingWhenRestricted<T extends { recordingEnabled?: boolean }>(
+    cameras: T[],
+  ): Promise<T[]> {
+    if (await this.commercialPolicy.isAllowed('localRecording')) return cameras;
+    return cameras.map((camera) => ({ ...camera, recordingEnabled: false }));
+  }
+
   @Public()
   @UseGuards(ServiceTokenGuard)
   @Get('internal/list')
   async internalList() {
-    return this.camerasService.findAllInternal();
+    return this.maskRecordingWhenRestricted(await this.camerasService.findAllInternal());
+  }
+
+  // Consulta de UMA câmera para o worker. Existe para matar um N+1 real: o laço
+  // de gravação chamava a lista COMPLETA (com joins de site/área/grupo) uma vez
+  // por segmento POR CÂMERA — num parque de 200 câmeras isso é 200 respostas de
+  // 200 registros a cada virada de segmento, crescendo ao quadrado.
+  //
+  // Declarado DEPOIS de `internal/list` de propósito: as duas rotas têm dois
+  // segmentos, e o Express casa na ordem de declaração — invertido, `:id`
+  // engoliria `list`.
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Get('internal/:id')
+  async internalOne(@Param('id') id: string) {
+    const camera = await this.camerasService.findOneInternal(id);
+    if (!camera) throw new NotFoundException('Camera não encontrada.');
+    const [masked] = await this.maskRecordingWhenRestricted([camera]);
+    return masked;
   }
 
   @Roles(UserRole.VIEWER)

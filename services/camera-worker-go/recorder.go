@@ -50,6 +50,19 @@ func startRecording(ctx context.Context, cam Camera, apiURL, secretToken string)
 		}
 		mu.Unlock()
 
+		// A câmera acabou de ser DESATIVADA pelo operador: para no próximo
+		// segmento em vez de esperar o laço de 60s notar. O `fetchCameraByID`
+		// acima já trouxe o estado fresco — é o ponto mais barato para reagir, e
+		// o que evita continuar gravando uma câmera que a interface já mostra
+		// como desligada.
+		if !cameraIsEnabled(currentCam) {
+			mu.Lock()
+			stopRecordingLocked(currentCam.ID)
+			mu.Unlock()
+			fmt.Printf("[%s] Parando loop de gravação (câmera desativada).\n", currentCam.Name)
+			return
+		}
+
 		now := time.Now()
 		dirPath := filepath.Join(storageRoot, currentCam.ID, now.Format("2006/01/02"))
 		if err := os.MkdirAll(dirPath, 0755); err != nil {

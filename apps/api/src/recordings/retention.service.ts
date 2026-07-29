@@ -870,6 +870,33 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       });
       let current = initialPercent;
       let totalDeleted = 0;
+      // ───────────────────────────────────────────────────────────────────────
+      // FREIO DE "APAGAR SEM ADIANTAR".
+      //
+      // Este laço apaga por PRESSÃO DE DISCO, não por idade: sem filtro de data,
+      // da mais velha para a mais nova, até 100 lotes de 20 = 2000 gravações.
+      // Ele confia que apagar gravação reduz `diskUsagePercent(root)`.
+      //
+      // Quando essa premissa é falsa, o laço vira uma trituradora de acervo. O
+      // caso real: o volume das gravações NÃO monta, `recordingsRoot` cai no
+      // disco do sistema (cheio por outro motivo), e aí nenhuma exclusão move o
+      // percentual — o laço segue apagando prova até acabar o acervo, sem nunca
+      // atingir o alvo. É o mesmo perigo que o Frigate trava em
+      // `util/media.py` antes de sincronizar disco↔banco: contagem anormal de
+      // exclusão é sintoma de configuração/mount errado, não de acervo velho.
+      //
+      // O sinal aqui é mais preciso que um limiar de contagem: se um lote
+      // apagou de fato e MESMO ASSIM o uso do disco não caiu, o espaço não está
+      // sendo ocupado pelo que estamos apagando. Uma limpeza legítima sempre
+      // libera espaço, então este freio não dispara em operação normal.
+      // ───────────────────────────────────────────────────────────────────────
+      const maxNoProgressBatches = envNumber('RETENTION_DISK_MAX_NOPROGRESS_BATCHES', 3, {
+        min: 1,
+        max: 20,
+        integer: true,
+        onInvalid: (m) => this.logger.warn(m),
+      });
+      let noProgressBatches = 0;
       this.logger.warn(`Espaço em disco crítico: ${initialPercent}%. Removendo apenas gravações sem hold até ${target}%.`);
       for (let iteration = 0; iteration < 100 && current > target; iteration += 1) {
         const oldest = await this.prisma.recording.findMany({
@@ -891,7 +918,23 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           }
         }
         if (!batchDeleted) break;
+        const before = current;
         current = await this.diskUsagePercent(root);
+        if (current < before) {
+          noProgressBatches = 0;
+          continue;
+        }
+        // Apagou de verdade e o disco não cedeu: o espaço não é das gravações.
+        noProgressBatches += 1;
+        if (noProgressBatches >= maxNoProgressBatches) {
+          this.logger.error(
+            `Guardião de disco ABORTADO: ${noProgressBatches} lote(s) seguidos apagaram gravação sem reduzir o uso do disco `
+            + `(${before}% → ${current}%, alvo ${target}%). O espaço NÃO está sendo ocupado pelas gravações — `
+            + `verifique se o volume de "${root}" está montado e se outra coisa encheu o disco. `
+            + `${totalDeleted} gravação(ões) já foram removidas nesta passagem; o laço parou para não destruir o acervo à toa.`,
+          );
+          break;
+        }
       }
       this.logger.log(`Guardião de disco concluído: ${totalDeleted} removida(s), uso ${initialPercent}% → ${current}%.`);
     } catch (error) {

@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -47,6 +49,13 @@ type Camera struct {
 	RecordingChannel       *int   `json:"recordingChannel"`
 	RecordingSubtype       *int   `json:"recordingSubtype"`
 	Status                 string `json:"status"`
+	// Ponteiro DE PROPÓSITO. Com `bool`, um JSON que não trouxesse o campo
+	// desserializaria como `false` — ou seja, "câmera desativada" — e o worker
+	// pararia de gravar TUDO em silêncio. Com `*bool`, ausência vira `nil` e é
+	// tratada como habilitada, preservando o comportamento atual; só o valor
+	// EXPLÍCITO `false` desliga. Mesma semântica do lado da API, que testa
+	// `camera.enabled === false` em vez de `!camera.enabled`.
+	Enabled                *bool  `json:"enabled"`
 	RecordingEnabled       bool   `json:"recordingEnabled"`
 	PreferredRtspTransport string `json:"preferredRtspTransport"`
 	RecordingVideoCodec    string `json:"recordingVideoCodec"`
@@ -77,6 +86,69 @@ func requireStrongEnv(name string, minLen int, blocked map[string]bool) string {
 	return value
 }
 
+// assertWorkerControlMode impede a DUPLICAÇÃO de gravação entre a API e este worker.
+//
+// Os dois lados gravam as MESMAS câmeras, e a exclusividade entre eles existe
+// só do lado da API: `RecordingProcessManagerService.start()/stop()` desviam no
+// topo por `RECORDING_CONTROL_MODE` e, em modo `worker`, não sobem ffmpeg algum
+// — apenas publicam o comando. Só que o default desse env é `local`, e este
+// worker NUNCA leu essa variável: o laço de 60s dele inicia gravação para toda
+// câmera com `recordingEnabled=true`, sem consultar Redis nem a API.
+//
+// Resultado antes deste guard: subir o profile `legacy-worker` com a API no
+// default fazia API e worker gravarem a mesma câmera ao mesmo tempo — dobro de
+// CPU, dobro de disco, linhas duplicadas e duas sessões RTSP numa câmera que o
+// resto do sistema trata como limitada a 2-4 sessões. Não era um risco de
+// "vários workers": acontecia com UM worker, na configuração padrão.
+//
+// O banner acima já mandava usar `RECORDING_CONTROL_MODE=worker`, mas era texto
+// impresso, não regra. Aqui vira regra: sem o modo certo, o worker RECUSA subir.
+// Falhar no boot é o comportamento seguro — o container reinicia e reclama alto,
+// enquanto gravar duplicado corrompe o acervo em silêncio.
+// cameraIsEnabled diz se a câmera está ativa para o sistema.
+//
+// Ausência do campo (`nil`) conta como ATIVA: só o `false` explícito desliga.
+// A escolha é deliberada — se um dia o payload da API deixar de trazer
+// `enabled`, o pior resultado aceitável é continuar gravando como hoje; tratar
+// ausência como "desativada" pararia a gravação de todo o parque em silêncio,
+// que é o modo de falha caro num VMS.
+func cameraIsEnabled(cam Camera) bool {
+	return cam.Enabled == nil || *cam.Enabled
+}
+
+// cameraIsRecordable junta as duas condições que autorizam gravar: a câmera
+// precisa estar ativa E com gravação ligada. Antes só a segunda era olhada.
+func cameraIsRecordable(cam Camera) bool {
+	return cameraIsEnabled(cam) && cam.RecordingEnabled
+}
+
+// controlModeRefusal devolve o motivo da recusa, ou "" quando o worker pode
+// subir. Separada de `assertWorkerControlMode` porque `log.Fatalf` mata o
+// processo e não é testável — a REGRA é o que precisa de teste.
+func controlModeRefusal(raw string) string {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "worker" {
+		return ""
+	}
+	if mode == "" {
+		return "RECORDING_CONTROL_MODE não definido (a API assume 'local' por padrão). " +
+			"Neste estado a API grava por conta própria e este worker gravaria as MESMAS " +
+			"câmeras em paralelo. Defina RECORDING_CONTROL_MODE=worker nos DOIS serviços " +
+			"ou não suba o profile legacy-worker."
+	}
+	return fmt.Sprintf(
+		"RECORDING_CONTROL_MODE=%q: este worker só pode rodar com 'worker'. "+
+			"Com qualquer outro valor quem grava é a API, e subir o worker duplicaria a gravação.",
+		mode,
+	)
+}
+
+func assertWorkerControlMode() {
+	if reason := controlModeRefusal(os.Getenv("RECORDING_CONTROL_MODE")); reason != "" {
+		log.Fatal(reason)
+	}
+}
+
 func main() {
 	fmt.Println("Camera Worker Go - Iniciando...")
 	// Aviso alto e claro: quem sobe este worker precisa saber que a gravação dele
@@ -87,6 +159,10 @@ func main() {
 	log.Println("O pipeline oficial e o da API, que grava em COPIA sem reencode.")
 	log.Println("Use apenas com RECORDING_CONTROL_MODE=worker e ciente da diferenca.")
 	log.Println("=====================================================================")
+
+	// O aviso acima é só texto; isto é a regra. Sem o modo correto, subir este
+	// worker duplicaria a gravação da API — então ele não sobe.
+	assertWorkerControlMode()
 
 	apiURL := os.Getenv("API_URL")
 	if apiURL == "" {
@@ -165,7 +241,12 @@ func main() {
 
 			for _, cam := range cameras {
 				mu.Lock()
-				if cam.RecordingEnabled {
+				// `enabled=false` é uma decisão DELIBERADA do operador (cliente
+				// desligado, câmera em área sensível, LGPD): a API recusa gravar
+				// nesse estado e some com a câmera para não-admins. O worker
+				// ignorava a flag e continuava gravando — o operador via a câmera
+				// desativada na interface enquanto o disco seguia enchendo com ela.
+				if cameraIsRecordable(cam) {
 					if !activeRecordings[cam.ID] {
 						fmt.Printf("[%s] Iniciando loop de gravação...\n", cam.Name)
 						startRecordingLocked(ctx, cam, apiURL, serviceToken)
@@ -178,7 +259,11 @@ func main() {
 				}
 				mu.Unlock()
 
-				go processCamera(ctx, cam, secretKey, apiURL, serviceToken)
+				// Câmera desativada também não deve ser sondada: o probe abre
+				// sessão RTSP nela, o que é justamente o que desativar evita.
+				if cameraIsEnabled(cam) {
+					go processCamera(ctx, cam, secretKey, apiURL, serviceToken)
+				}
 			}
 		}
 
@@ -261,17 +346,75 @@ func fetchCameras(ctx context.Context, apiURL, serviceToken string) ([]Camera, e
 	return cameras, nil
 }
 
+// fetchCameraByID busca UMA câmera.
+//
+// Antes isto baixava o parque INTEIRO (com joins de site/área/grupo) e filtrava
+// em memória — e é chamado a cada segmento, por câmera. Num parque de 200
+// câmeras davam 200 respostas de 200 registros a cada virada de segmento: o
+// custo crescia ao quadrado do número de câmeras.
+//
+// O endpoint dedicado devolve o mesmo formato. Se ele não existir (API mais
+// antiga que este worker), o código cai para a lista completa — degradar em
+// eficiência é melhor que parar de gravar por causa de um 404.
 func fetchCameraByID(ctx context.Context, apiURL, serviceToken, id string) (*Camera, error) {
-	cameras, err := fetchCameras(ctx, apiURL, serviceToken)
-	if err != nil {
+	cam, err := fetchCameraByIDDirect(ctx, apiURL, serviceToken, id)
+	if err == nil {
+		return cam, nil
+	}
+	if !errors.Is(err, errInternalCameraRouteMissing) {
 		return nil, err
 	}
-	for _, cam := range cameras {
-		if cam.ID == id {
-			return &cam, nil
+
+	cameras, listErr := fetchCameras(ctx, apiURL, serviceToken)
+	if listErr != nil {
+		return nil, listErr
+	}
+	for _, item := range cameras {
+		if item.ID == id {
+			found := item
+			return &found, nil
 		}
 	}
 	return nil, fmt.Errorf("camera %s não encontrada", id)
+}
+
+// errInternalCameraRouteMissing distingue "API não tem a rota" (cai para o
+// caminho antigo) de "a câmera não existe" (erro de verdade).
+var errInternalCameraRouteMissing = errors.New("rota interna de câmera indisponível")
+
+func fetchCameraByIDDirect(ctx context.Context, apiURL, serviceToken, id string) (*Camera, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, apiRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, "GET", apiURL+"/cameras/internal/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Service-Token", serviceToken)
+
+	client := &http.Client{Timeout: apiRequestTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// 404 aqui é ambíguo: rota inexistente ou câmera inexistente. Cair para a
+		// lista resolve os dois casos sem precisar adivinhar.
+		return nil, errInternalCameraRouteMissing
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status code erro: %d", resp.StatusCode)
+	}
+
+	var cam Camera
+	if err := json.NewDecoder(resp.Body).Decode(&cam); err != nil {
+		return nil, err
+	}
+	if cam.ID == "" {
+		return nil, fmt.Errorf("camera %s devolvida sem id", id)
+	}
+	return &cam, nil
 }
 
 func subscribeCommands(ctx context.Context, rdb *redis.Client, apiURL, serviceToken, channel string) {
@@ -305,6 +448,14 @@ func handleRecordingCommand(ctx context.Context, cmd RecordingCommand, apiURL, s
 		cam, err := fetchCameraByID(ctx, apiURL, serviceToken, cmd.CameraID)
 		if err != nil {
 			log.Printf("START: não foi possível carregar câmera %s: %v", cmd.CameraID, err)
+			return
+		}
+		// Mesma regra do laço periódico: câmera desativada não grava, nem por
+		// comando explícito. Sem isto, um START publicado antes da desativação
+		// (ou uma remediação de health-check) religaria a gravação de uma câmera
+		// que o operador desligou de propósito.
+		if !cameraIsEnabled(*cam) {
+			log.Printf("[%s] START ignorado: câmera desativada (enabled=false)", cam.Name)
 			return
 		}
 		mu.Lock()

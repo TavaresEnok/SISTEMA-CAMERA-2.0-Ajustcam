@@ -7,6 +7,8 @@ import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import { json, urlencoded, type NextFunction, type Request, type Response } from 'express';
 import { envNumber } from './common/config/env-number.helper';
+import { RedactingLogger } from './common/logging/redacting-logger';
+import { redactSensitiveText } from './common/security/sensitive-text.helper';
 
 // @ts-ignore
 BigInt.prototype.toJSON = function () {
@@ -39,12 +41,20 @@ BigInt.prototype.toJSON = function () {
 // ─────────────────────────────────────────────────────────────────────────────
 process.on('unhandledRejection', (reason) => {
   const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  // A rotina de fundo que mais rejeita sem catch é justamente a de mídia, e a
+  // mensagem do FFmpeg carrega a URL RTSP INTEIRA — com usuário e senha. Este
+  // handler escreve direto no console (não passa pelo logger do Nest), então a
+  // redação precisa ser explícita aqui: sem ela, esta rede de segurança viraria
+  // o maior vazador de credencial do processo.
   // eslint-disable-next-line no-console
-  console.error(`[unhandledRejection] rotina de fundo falhou sem catch — a API SEGUE viva: ${detail}`);
+  console.error(`[unhandledRejection] rotina de fundo falhou sem catch — a API SEGUE viva: ${redactSensitiveText(detail)}`);
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // O logger é trocado ANTES de qualquer outra coisa subir: a partir daqui todo
+  // `Logger.log/error/...` da aplicação passa pela redação de credencial, sem
+  // depender de o autor de cada ponto de chamada lembrar de sanitizar.
+  const app = await NestFactory.create(AppModule, { logger: new RedactingLogger() });
   const trustProxyHops = envNumber('TRUST_PROXY_HOPS', 0);
   if (Number.isInteger(trustProxyHops) && trustProxyHops > 0 && trustProxyHops <= 5) {
     // Só habilite quando a API não estiver acessível diretamente: o valor indica

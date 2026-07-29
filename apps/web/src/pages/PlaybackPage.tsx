@@ -32,6 +32,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { toast } from '../hooks/use-toast';
+import { SyncedCameraPlayer } from '../components/SyncedCameraPlayer';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
@@ -1172,7 +1173,48 @@ export default function PlaybackPage() {
       .slice(0, 4)
       .map((cameraId) => cameras.find((camera) => camera.id === cameraId))
       .filter((camera): camera is NonNullable<typeof camera> => Boolean(camera))
+      // Câmera privada de terceiro fica FORA da comparação. O backend já barra
+      // (o gate de playback é server-side, não cosmético), então isto não é o
+      // controle de acesso — é não oferecer o que seria negado e não rotular
+      // "sem gravação" o que na verdade é "sem permissão". Mesma regra do
+      // CameraTile no ao vivo.
+      .filter((camera) => !(camera.isPrivate === true && camera.canViewContent === false))
   ), [cameras, compareCameraIds, selectedCamId]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // SINCRONIA MULTI-CÂMERA.
+  //
+  // O `playhead` (minuto do dia, float) é a posição que o operador manipula e
+  // que o player da câmera principal já dirige. Aqui ele vira INSTANTE DE PAREDE
+  // — a única linguagem em que faz sentido falar com câmeras diferentes, porque
+  // cada uma tem fronteiras de arquivo e buracos próprios.
+  //
+  // Os seguidores NUNCA escrevem `playhead`. Só o player principal escreve (via
+  // onTimeUpdate); se um seguidor também escrevesse, a guarda de
+  // `lastVideoPlayheadRef` não distinguiria mais "o vídeo moveu" de "o usuário
+  // moveu", e a seleção de segmento entraria em laço.
+  // ───────────────────────────────────────────────────────────────────────────
+  const compareTargetMs = useMemo(() => {
+    if (!compareEnabled) return null;
+    const dayStartMs = startOfDay(new Date(`${selectedDate}T00:00:00`)).getTime();
+    return dayStartMs + playhead * 60_000;
+  }, [compareEnabled, playhead, selectedDate]);
+
+  // `speed` é rótulo de UI ('1x', '2x'…); o player precisa do número, e a
+  // correção de sincronia MULTIPLICA este valor (nunca o substitui).
+  const compareUserSpeed = useMemo(() => {
+    const parsed = Number(speed.replace('x', ''));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  }, [speed]);
+
+  const fetchComparePlaylist = useCallback(async (cameraId: string) => {
+    const range = localDayRange(selectedDate);
+    const { data } = await client.get('/recordings/vod.m3u8', {
+      params: { cameraId, from: range.from, to: range.to, format: 'json' },
+      timeout: API_TIMEOUT_MS,
+    });
+    return data;
+  }, [client, selectedDate]);
 
   const compareRows = useMemo(() => compareCameraItems.map((camera) => {
     const items = compareRecordingsByCamera[camera.id] ?? (camera.id === selectedCamId ? recordings : []);
@@ -2509,8 +2551,18 @@ export default function PlaybackPage() {
         <div className="hidden">
           <input value={jumpTime} onChange={(event) => setJumpTime(event.target.value)} placeholder="HH:mm:ss" />
           <button type="button" onClick={jumpToExactTime}>Ir para hora</button>
-          <button type="button" onClick={() => setCompareEnabled((value) => !value)}>Multi-câmera</button>
         </div>
+        {/* Estava dentro do bloco oculto acima: o modo multi-câmera existia, com
+            estado e réguas, mas sem forma de o operador chegar nele. */}
+        <Button
+          type="button"
+          variant={compareEnabled ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => setCompareEnabled((value) => !value)}
+          title="Compara até 4 câmeras no mesmo instante"
+        >
+          Multi-câmera
+        </Button>
       </div>
 
       {compareEnabled && (
@@ -2548,6 +2600,19 @@ export default function PlaybackPage() {
                     <div className="text-[10px] text-[hsl(var(--muted-foreground))]">{current ? `${format(new Date(current.startedAt), 'HH:mm:ss')} - ${current.endedAt ? format(new Date(current.endedAt), 'HH:mm:ss') : '--'}` : 'Sem gravação neste horário'}</div>
                   </div>
                   <span className={`rounded px-2 py-1 text-[10px] ${current ? 'bg-[hsl(var(--status-online)_/_0.1)] text-[hsl(var(--status-online))]' : 'bg-white/5 text-[hsl(var(--muted-foreground))]'}`}>{current ? 'Disponível' : 'Vazio'}</span>
+                </div>
+                {/* O vídeo de cada câmera segue o mesmo instante do playhead. */}
+                <div className="mb-2 aspect-video">
+                  <SyncedCameraPlayer
+                    cameraId={camera.id}
+                    cameraName={camera.name}
+                    targetAbsoluteMs={compareTargetMs}
+                    masterPaused={!playing}
+                    userSpeed={compareUserSpeed}
+                    fetchPlaylist={fetchComparePlaylist}
+                    apiUrl={API_URL}
+                    forceDirect={BROWSER_PLAYS_HEVC}
+                  />
                 </div>
                 <div className="relative h-8 overflow-hidden rounded bg-[hsl(var(--muted))]" onClick={(event) => onTimelineClick(event.clientX, event.currentTarget.getBoundingClientRect())}>
                   {sliceVisibleSpans(segments, { start: viewStart, end: viewEnd }).items.map((segment, index) => {
