@@ -152,6 +152,10 @@ export class AiManagerService implements OnModuleInit {
   // Auto-recuperação de processadores degradados: exige 2 ciclos seguidos
   // "degraded" antes de agir (evita transientes) e respeita cooldown por câmera.
   private readonly degradedStrikes = new Map<string, number>();
+  // Contagem de ticks em que um processador apareceu ÓRFÃO (ativo para câmera
+  // não armada). Só paramos no 2º tick seguido: um teste manual rápido de IA
+  // não pode morrer no meio por azar de timing do watchdog.
+  private readonly strayStrikes = new Map<string, number>();
   private readonly lastDegradedRecoveryAt = new Map<string, number>();
   private degradedWatchdogTimer: NodeJS.Timeout | null = null;
 
@@ -213,6 +217,46 @@ export class AiManagerService implements OnModuleInit {
             await this.startCamera(cam.id).catch((error) => {
               this.logger.warn(`Falha ao religar análise de ${cam.name}: ${(error as Error).message}`);
             });
+          }
+
+          // RECONCILIAÇÃO REVERSA: processador rodando para câmera NÃO armada é
+          // ÓRFÃO — sobrou de um desarme, de um teste ou de uma época em que a
+          // câmera gravava por movimento. O ai-service sobrevive a restarts da
+          // API, então ninguém nunca mandava esses pararem: em produção
+          // acumularam 9 processadores com UMA câmera armada. O custo é duplo e
+          // invisível: CPU de análise E o transcode da grade preso ligado 24/7
+          // (a IA é um leitor permanente do path _grid), deixando o live mais
+          // lento para todo mundo — com o operador jurando que a IA estava
+          // desligada, porque na Central ela ESTAVA.
+          //
+          // "Legítimo" = EXATAMENTE o conjunto que o auto-start ligaria
+          // (câmera habilitada com o toggle de detecção `aiEnabled` ligado).
+          // Usar um critério diferente do auto-start aqui vira CABO DE GUERRA:
+          // a primeira versão desta reconciliação considerava legítima só quem
+          // grava por movimento — e ficou parando processadores que o
+          // auto-start religava um tick depois, para sempre. Quem decide se
+          // uma câmera tem detecção é o toggle dela; o papel desta limpeza é
+          // só matar o que NINGUÉM ligaria hoje (câmera desabilitada, toggle
+          // desligado, sobra de teste).
+          const legitimas = new Set(
+            (await this.prisma.camera.findMany({
+              where: { enabled: { not: false }, aiEnabled: { not: false } },
+              select: { id: true },
+            })).map((cam) => cam.id),
+          );
+          for (const cameraId of active) {
+            if (legitimas.has(cameraId)) {
+              this.strayStrikes.delete(cameraId);
+              continue;
+            }
+            const strikes = (this.strayStrikes.get(cameraId) ?? 0) + 1;
+            this.strayStrikes.set(cameraId, strikes);
+            if (strikes < 2) continue;
+            this.strayStrikes.delete(cameraId);
+            this.logger.warn(
+              `Processador de IA ÓRFÃO (câmera ${cameraId} não está armada) — parando análise e liberando o transcode da grade.`,
+            );
+            await this.aiService.stopAnalysis(cameraId).catch(() => undefined);
           }
         }
       }

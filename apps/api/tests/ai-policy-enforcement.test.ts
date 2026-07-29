@@ -171,3 +171,73 @@ test('startCamera: falha ao consultar a política não pode derrubar o movimento
 
   assert.deepEqual(calls, ['start:cam-1:motion'], 'central inacessível não pode significar "pare de gravar"');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RECONCILIAÇÃO REVERSA do watchdog: processador ÓRFÃO é parado.
+//
+// O watchdog sempre soube RELIGAR processador ausente de câmera armada, mas
+// nunca fez o caminho de volta. Como o ai-service sobrevive a restarts da API,
+// processador de câmera DESARMADA rodava para sempre: produção acumulou 9
+// ativos com UMA câmera armada. Custo duplo: CPU de análise e o transcode da
+// grade preso 24/7 (a IA é leitor permanente do path _grid) — o live ficou
+// lento "do nada" e o operador via IA em câmera que a Central dizia desligada.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function watchdogFake(opts: { active: string[]; armadas: string[] }) {
+  const stopped: string[] = [];
+  const started: string[] = [];
+  const mgr: any = Object.create(AiManagerService.prototype);
+  mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
+  mgr.degradedStrikes = new Map();
+  mgr.strayStrikes = new Map();
+  mgr.lastDegradedRecoveryAt = new Map();
+  mgr.getSettings = async () => ({ enabled: true, mode: 'motion' });
+  mgr.aiService = {
+    getHealth: async () => ({ status: 'online', active_processors: opts.active, degraded_processors: [] }),
+    stopAnalysis: async (id: string) => { stopped.push(id); },
+  };
+  mgr.startCamera = async (id: string) => { started.push(id); return { status: 'started' }; };
+  mgr.prisma = {
+    camera: {
+      findMany: async (args: any) => {
+        // A query de religar filtra motionTrigger=SYSTEM; a de órfãos, não.
+        const ids = opts.armadas.map((id) => ({ id, name: id }));
+        return args?.where?.motionTrigger === 'SYSTEM' ? ids : ids;
+      },
+    },
+  };
+  return { mgr, stopped, started };
+}
+
+test('watchdog: processador de câmera DESARMADA é parado no 2º tick (não no 1º)', async () => {
+  const { mgr, stopped } = watchdogFake({ active: ['cam-orfa', 'cam-armada'], armadas: ['cam-armada'] });
+
+  await mgr.recoverDegradedProcessors();
+  assert.deepEqual(stopped, [], '1º tick só marca: teste manual rápido não pode morrer no meio');
+
+  await mgr.recoverDegradedProcessors();
+  assert.deepEqual(stopped, ['cam-orfa'], '2º tick seguido para o órfão');
+});
+
+test('watchdog: câmera que REARMA no meio zera a contagem de órfão', async () => {
+  const cen = watchdogFake({ active: ['cam-x'], armadas: [] });
+  await cen.mgr.recoverDegradedProcessors(); // strike 1 como órfã
+
+  // Operador rearma a câmera entre os ticks: ela vira legítima.
+  cen.mgr.prisma.camera.findMany = async () => [{ id: 'cam-x', name: 'cam-x' }];
+  await cen.mgr.recoverDegradedProcessors();
+  assert.deepEqual(cen.stopped, [], 'rearmar limpa o strike — o processador fica');
+
+  // E mesmo que desarme de novo, a contagem recomeça do zero.
+  cen.mgr.prisma.camera.findMany = async () => [];
+  await cen.mgr.recoverDegradedProcessors();
+  assert.deepEqual(cen.stopped, [], 'strike recomeçou: 1º tick de novo, ainda não para');
+});
+
+test('watchdog: processador de câmera ARMADA nunca é tocado pela reconciliação', async () => {
+  const { mgr, stopped } = watchdogFake({ active: ['cam-armada'], armadas: ['cam-armada'] });
+  await mgr.recoverDegradedProcessors();
+  await mgr.recoverDegradedProcessors();
+  await mgr.recoverDegradedProcessors();
+  assert.deepEqual(stopped, [], 'a reconciliação reversa só existe para órfãos');
+});
