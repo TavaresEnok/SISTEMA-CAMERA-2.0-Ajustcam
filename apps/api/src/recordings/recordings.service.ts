@@ -3064,7 +3064,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     let dbResult: { clipsDeleted: number; recordingsDeleted: number };
     try {
       dbResult = await this.prisma.$transaction(async (tx) => {
-        await tx.$queryRawUnsafe(
+        // $executeRawUnsafe: pg_advisory_xact_lock devolve `void` e o Prisma
+        // levanta P2010 tentando desserializar. Ver retention.service.ts.
+        await tx.$executeRawUnsafe(
           "SELECT pg_advisory_xact_lock(hashtext('drac:recordings:file-delete'))",
         );
         staged = await stageFileDeletion(

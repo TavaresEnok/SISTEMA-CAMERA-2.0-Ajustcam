@@ -10,6 +10,7 @@
     "test:e2e": "tsx tests/operational-e2e.e2e.ts",
     "test:e2e:rtsp": "node --import tsx --test tests/rtsp-pipeline.e2e.ts",
     "test:e2e:pg": "node --import tsx --test tests/access-control-postgres.e2e.ts",
+    "test:e2e:pg-lock": "node --import tsx --test tests/retention-advisory-lock.e2e.ts",
     "prisma": "prisma",
     "import:legacy-camera": "ts-node --transpile-only scripts/import-legacy-camera.ts"
   },

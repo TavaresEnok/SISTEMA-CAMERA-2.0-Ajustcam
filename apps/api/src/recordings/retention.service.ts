@@ -405,7 +405,14 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       const result = await this.prisma.$transaction(async (tx) => {
         // Uma única exclusão DB↔FS por instalação. O lock também coordena duas
         // instâncias da API apontando para o mesmo PostgreSQL/storage.
-        await tx.$queryRawUnsafe(
+        // $executeRawUnsafe, NÃO $queryRawUnsafe: pg_advisory_xact_lock devolve
+        // `void`, e o Prisma não sabe desserializar essa coluna — levantava
+        // P2010 ("Failed to deserialize column of type 'void'") em TODA
+        // exclusão. O efeito era mudo e caro: o guardião de disco varria as
+        // gravações mais antigas, falhava uma a uma e registrava
+        // "0 removida(s)", enquanto o disco subia até 92% sem que a retenção
+        // jamais tivesse apagado um único arquivo.
+        await tx.$executeRawUnsafe(
           "SELECT pg_advisory_xact_lock(hashtext('drac:recordings:file-delete'))",
         );
         staged = await stageFileDeletion(root, paths, guards);

@@ -305,6 +305,9 @@ function buildHarness(options: HarnessOptions) {
   };
   (prisma as any).$transaction = async (callback: (tx: any) => unknown) => callback({
     ...prisma,
+    // Ver retention-advisory-lock.e2e.ts: o lock usa $executeRawUnsafe porque
+    // pg_advisory_xact_lock devolve `void` e o Prisma real não desserializa.
+    $executeRawUnsafe: async () => 1,
     $queryRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
   });
 

@@ -2205,6 +2205,18 @@
           event.stopPropagation();
           openAppEdit(btn.dataset.editapp);
         }));
+        // Clicar na linha abre a instalação, igual à tabela de Operação.
+        //
+        // Os botões acima já chamavam stopPropagation() desde sempre — ou seja,
+        // este handler era esperado e nunca existiu. O sintoma para quem usa:
+        // clicar no nome do cliente aqui não fazia absolutamente nada, e a
+        // conclusão natural é "a Central está quebrada". Quem clicava na aba
+        // Operação via a página abrir; quem clicava em Clientes, não.
+        els.inventoryRows.querySelectorAll('tr[data-id]').forEach(row => row.addEventListener('click', () => {
+          state.selectedId = row.dataset.id;
+          localStorage.setItem('drac-central-selected', state.selectedId);
+          openInstallationDetail(state.selectedId);
+        }));
       }
       function renderContractBoard() {
         const item = selectedItem();

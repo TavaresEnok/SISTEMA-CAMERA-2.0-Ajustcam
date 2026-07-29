@@ -275,6 +275,13 @@ function buildHarness(seed: SeedRecording[], options: HarnessOptions = {}): Harn
   };
   (prisma as any).$transaction = async (callback: (tx: any) => unknown) => callback({
     ...prisma,
+    // O lock consultivo é pego com $executeRawUnsafe, não $queryRawUnsafe:
+    // pg_advisory_xact_lock devolve `void` e o Prisma REAL levanta P2010 ao
+    // tentar desserializar. Este fake respondia só ao $queryRawUnsafe e por
+    // isso deixou o bug passar verde por semanas, enquanto em produção a
+    // retenção não apagava nada e o disco chegou a 92%.
+    // A prova contra banco de verdade está em retention-advisory-lock.e2e.ts.
+    $executeRawUnsafe: async () => 1,
     $queryRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
   });
 
