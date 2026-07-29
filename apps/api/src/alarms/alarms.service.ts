@@ -187,9 +187,25 @@ export class AlarmsService {
     // fecham alarmes antigos normalmente).
     const cameraAlarmConfig = await this.prisma.camera.findUnique({
       where: { id: input.cameraId },
-      select: { alarmsEnabled: true },
+      select: { alarmsEnabled: true, recordingMode: true, enabled: true },
     });
     if (cameraAlarmConfig && cameraAlarmConfig.alarmsEnabled === false) return null;
+
+    // Alarme de MOVIMENTO só para câmera ARMADA (gravação por movimento).
+    //
+    // O escutador ONVIF registra MOTION_DETECTED para toda câmera que reporta
+    // movimento nativo — é prova de vida da detecção e alimenta a timeline.
+    // Mas ABRIR ALARME com isso virava ruído real no app: uma única câmera
+    // armada e o operador recebendo alerta de movimento das outras 5 com ONVIF
+    // (Cam-02, 03, 13...), que ele nunca pediu para vigiar. Alarme é chamado à
+    // ação; movimento em câmera desarmada não pede ação nenhuma. O evento
+    // continua na timeline da câmera para diagnóstico — só não vira alarme.
+    if (input.type === 'MOTION_DETECTED') {
+      const armada = cameraAlarmConfig
+        && cameraAlarmConfig.enabled !== false
+        && cameraAlarmConfig.recordingMode === 'motion';
+      if (!armada) return null;
+    }
 
     const rule = await this.getRule(source, input.type);
     // Regra explícita é obrigatória para abrir alarme operacional real.

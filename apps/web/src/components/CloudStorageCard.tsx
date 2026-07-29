@@ -142,9 +142,12 @@ export function CloudStorageCard({ apiUrl, accessToken }: { apiUrl: string; acce
               {status.provider} · {status.bucket}
             </div>
             <div className="text-xs text-muted-foreground">
+              {/* "antes de enviar" MENTIA: o envio acontece assim que o segmento
+                  fecha (job a cada 15min); a janela controla por quanto tempo a
+                  cópia local sobrevive DEPOIS do upload confirmado. */}
               {status.mode === 'tier'
-                ? `Camada — mantém ${status.localWindowHours}h no disco local antes de enviar`
-                : 'Modo direto — a gravação é escrita no bucket'}
+                ? `Camada — envia ao fechar e mantém ${status.localWindowHours}h no disco local`
+                : 'Direto — envia ao fechar e apaga o local assim que confirma'}
             </div>
           </div>
         </div>

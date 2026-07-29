@@ -581,6 +581,58 @@ test('arquivos: bloqueia prefixo parecido fora da raiz de gravações', () => {
   );
 });
 
+test('alarmes: movimento em câmera DESARMADA não abre alarme (mas armada abre)', async () => {
+  // Bug real de produção: 1 câmera armada (gravação por movimento) e o app
+  // recebendo alerta de movimento das OUTRAS (Cam-02, 03, 13...) — todas com
+  // ONVIF, nenhuma vigiada. O escutador ONVIF registra MOTION_DETECTED como
+  // prova de vida da detecção nativa em QUALQUER câmera; isso pode ir para a
+  // timeline, mas alarme é chamado à ação e só cabe para quem está ARMADA.
+  const fabricaPrisma = (cam: { recordingMode: string; enabled: boolean }) => {
+    const criados: any[] = [];
+    return {
+      criados,
+      alarmRule: {
+        // Regra de MOTION habilitada: se o gate não segurar, o alarme SAI.
+        findUnique: async () => ({ id: 'r1', isEnabled: true, dedupWindowSeconds: 60, priority: 'P3' }),
+      },
+      camera: {
+        findUnique: async () => ({ alarmsEnabled: true, ...cam }),
+      },
+      alarmInstance: {
+        updateMany: async () => ({ count: 0 }),
+        findFirst: async () => null,
+        create: async (args: any) => { criados.push(args); return { id: 'a1', ...args.data }; },
+      },
+    };
+  };
+  const mute = { isRuleMuted: async () => false, isCameraEventMuted: async () => false };
+  const notifica = { onAlarmOpened: async () => undefined, notifyAlarmOpened: async () => undefined };
+  const evento = {
+    eventId: 'ev-1', cameraId: 'cam-x', type: 'MOTION_DETECTED', severity: 'INFO',
+    message: 'Movimento detectado pela própria câmera (ONVIF).', occurredAt: new Date(),
+  };
+
+  // Desarmada (modo manual): o gate TEM que devolver null sem criar nada.
+  const desarmada = fabricaPrisma({ recordingMode: 'manual', enabled: true });
+  const s1 = new AlarmsService(desarmada as any, {} as any, notifica as any, mute as any);
+  assert.equal(await s1.processEvent(evento), null, 'câmera desarmada não pode abrir alarme de movimento');
+  assert.equal(desarmada.criados.length, 0);
+
+  // Câmera desabilitada conta como desarmada, mesmo em modo motion.
+  const desabilitada = fabricaPrisma({ recordingMode: 'motion', enabled: false });
+  const s2 = new AlarmsService(desabilitada as any, {} as any, notifica as any, mute as any);
+  assert.equal(await s2.processEvent(evento), null);
+  assert.equal(desabilitada.criados.length, 0);
+
+  // Armada: o MESMO evento passa o gate e abre alarme — sem este contraste,
+  // um gate que bloqueasse tudo também passaria no teste.
+  const armada = fabricaPrisma({ recordingMode: 'motion', enabled: true });
+  const s3 = new AlarmsService(armada as any, {} as any, notifica as any, mute as any);
+  const aberto = await s3.processEvent(evento);
+  assert.ok(aberto, 'câmera armada continua alarmando');
+  assert.equal(armada.criados.length, 1);
+});
+
 test('alarmes: movimento aberto é auto-resolvido após período sem ocorrências', async () => {
   let updateArgs: any = null;
   const prisma = {

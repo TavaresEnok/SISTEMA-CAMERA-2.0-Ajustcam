@@ -58,6 +58,10 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   }>();
   private readonly pathEnsureInFlight = new Map<string, Promise<EnsuredCameraPath>>();
   private readonly pathEnsureCache = new Map<string, { value: EnsuredCameraPath; at: number }>();
+  // Última autocura da grade por câmera: impede que um path genuinamente
+  // quebrado (câmera que aceita sessão e não envia mídia) vire tempestade de
+  // re-probe a cada request da grade.
+  private readonly gridHealAt = new Map<string, number>();
   private static readonly LIVE_CODEC_TTL_MS = 30 * 60 * 1000;
   private static readonly PATH_ENSURE_TTL_MS = 30 * 1000;
 
@@ -745,7 +749,28 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     const cacheKey = `grid:${cameraId}:${updatedAt}`;
 
     // Cache: devolve a decisão pronta (url do sub OU null = usar o main).
-    const cached = this.gridSourceCache.get(cacheKey);
+    //
+    // COM AUTOCURA: uma decisão cacheada pode estar MORTA na prática — visto em
+    // produção com câmeras OEM (Cam-03/09): o endpoint "alternativo" responde ao
+    // ffprobe na hora da escolha, mas na sessão contínua do MediaMTX aceita o
+    // RTSP e nunca envia mídia (path ready sem NENHUMA faixa). Sem esta
+    // verificação, o tile fica em 0 fps até o TTL do cache expirar, e o
+    // operador lê como "a grade travou". Se o path da grade está comprovadamente
+    // sem mídia, a decisão é descartada e re-sondada AGORA (com cooldown por
+    // câmera para não virar tempestade de probe contra câmera doente).
+    let cached = this.gridSourceCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < MediamtxProxyService.LIVE_CODEC_TTL_MS) {
+      const healCooldownMs = 60_000;
+      const lastHeal = this.gridHealAt.get(cameraId) ?? 0;
+      if (Date.now() - lastHeal > healCooldownMs && await this.gridPathLooksDead(cameraId)) {
+        this.gridHealAt.set(cameraId, Date.now());
+        this.gridSourceCache.delete(cacheKey);
+        cached = undefined;
+        this.logger.warn(
+          `Grade de ${cameraId}: fonte cacheada sem mídia (sessão aceita, nenhuma faixa) — descartando decisão e re-sondando.`,
+        );
+      }
+    }
     if (cached && Date.now() - cached.at < MediamtxProxyService.LIVE_CODEC_TTL_MS) {
       if (cached.url) {
         return {
@@ -956,6 +981,35 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       sourceOnDemandCloseAfter?: string;
       rtspTransport?: string;
     };
+  }
+
+  /**
+   * O path da GRADE está comprovadamente sem mídia?
+   *
+   * Só responde `true` nos dois estados que NUNCA são um cold start saudável:
+   *  · fonte conectada (`ready`) e SEM nenhuma faixa — a câmera aceitou o RTSP
+   *    e não descreveu mídia (OEM que amarra protocolo a stream faz isso);
+   *  · há leitor esperando, a fonte não ficou pronta e nada foi recebido — a
+   *    demanda existe há tempo suficiente para ter chegado ao menos 1 byte.
+   * Path inexistente (404) é on-demand frio: saudável, não mexe. Qualquer erro
+   * de consulta também devolve `false` — autocura nunca pode DERRUBAR uma
+   * decisão válida por falha de leitura do estado.
+   */
+  private async gridPathLooksDead(cameraId: string): Promise<boolean> {
+    if (!this.isEnabled()) return false;
+    try {
+      const pathName = this.pathNameFromCameraId(cameraId, 'grid');
+      const text = await this.apiRequest('GET', `/v3/paths/get/${encodeURIComponent(pathName)}`);
+      const data = JSON.parse(text) as Record<string, any>;
+      const tracks = Array.isArray(data.tracks) ? data.tracks : [];
+      const readers = Array.isArray(data.readers) ? data.readers : [];
+      const bytes = Number(data.bytesReceived ?? 0);
+      if (data.ready === true && tracks.length === 0) return true;
+      if (data.ready !== true && readers.length > 0 && bytes === 0) return true;
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   async getPathRuntimeSummaryForCamera(cameraId: string) {
