@@ -188,19 +188,77 @@ if (!configurado) {
     assert.equal(segunda.uploaded, 0, 'o que já subiu não sobe de novo');
   });
 
-  test('modo mount não faz offload (lá o ffmpeg já escreve no bucket)', async () => {
+  /** Serviço no modo DIRETO ("mount"): sobe e apaga o local na hora. */
+  function buildServiceDireto() {
     const svc = buildService(24);
     svc.cloudConnector = {
       getCloudStorageConfig: async () => ({
         enabled: true, mode: 'mount', provider: 'minio',
         endpoint: S3.endpoint, region: S3.region, bucket: S3.bucket, prefix,
         accessKeyId: S3.accessKeyId, secretAccessKey: S3.secretAccessKey,
+        // Janela de 24h DE PROPÓSITO: o modo Direto tem que ignorá-la. Se ela
+        // fosse respeitada, o teste passaria por acidente com a janela em 0.
         localWindowHours: 24, forcePathStyle: true, updatedAt: null,
       }),
     };
-    const r = await svc.runOnce();
-    assert.equal(r.skipped, true);
-    assert.match(String(r.reason), /mount/);
+    return svc;
+  }
+
+  test('modo DIRETO sobe e apaga o local na mesma passada (janela ignorada)', async () => {
+    // Este modo já existiu como opção MORTA na interface: era selecionável,
+    // dizia "grava no bucket montado" e não fazia absolutamente nada — o
+    // offload desistia com `skipped`, então o vídeo ficava só no disco e nada
+    // chegava na nuvem, sem erro nenhum na tela. Pior que ausente.
+    await limpar();
+    const conteudo = Buffer.from('video-modo-direto-'.repeat(50));
+    // Gravação RECENTE (1h): com a janela de 24h do modo Camada ela NÃO seria
+    // apagada. É exatamente isso que separa os dois modos.
+    const abs = await semear(`${TAG}-direto`, { idadeHoras: 1, conteudo });
+
+    const r = await buildServiceDireto().runOnce();
+    assert.equal(r.skipped, false, 'o modo Direto TEM que rodar o offload');
+    assert.equal(r.uploaded, 1);
+    assert.equal(r.deletedLocal, 1, 'no Direto o local sai assim que o upload é confirmado');
+    assert.equal(existsSync(abs), false, 'o arquivo local não pode sobreviver');
+
+    const row = await prisma.recording.findUnique({ where: { id: `${TAG}-direto` } });
+    assert.ok(row?.cloudKey && row?.cloudUploadedAt, 'a gravação continua existindo — na nuvem');
+    assert.ok(row?.localDeletedAt, 'e marcada como sem cópia local');
+  });
+
+  test('modo CAMADA mantém a mesma gravação recente no disco (o contraste)', async () => {
+    // Sem este par, o teste acima passaria mesmo que os dois modos fizessem a
+    // mesma coisa — e a escolha do operador não teria efeito algum.
+    await limpar();
+    const abs = await semear(`${TAG}-camada`, { idadeHoras: 1, conteudo: Buffer.from('video-camada') });
+
+    const r = await buildService(24).runOnce();
+    assert.equal(r.uploaded, 1, 'sobe igual');
+    assert.equal(r.deletedLocal, 0, 'mas NÃO apaga: 1h ainda está dentro da janela de 24h');
+    assert.equal(existsSync(abs), true);
+  });
+
+  test('DIRETO vence keepLocalCopy (senão o modo volta a ser um no-op mudo)', async () => {
+    // keepLocalCopy é "use a nuvem como backup, mantenha o local". O modo
+    // Direto é a escolha oposta e mais específica, feita no cadastro do
+    // storage. Se keepLocalCopy vencesse, escolher Direto não faria nada
+    // visível — que é o defeito original com outra roupa.
+    await limpar();
+    await prisma.systemSetting.upsert({
+      where: { key: 'storage.policy' },
+      create: {
+        key: 'storage.policy',
+        value: JSON.stringify({ enabled: true, keepLocalCopy: true, triggerModes: { continuous: true, motion: true, manual: true } }),
+      },
+      update: {
+        value: JSON.stringify({ enabled: true, keepLocalCopy: true, triggerModes: { continuous: true, motion: true, manual: true } }),
+      },
+    });
+    const abs = await semear(`${TAG}-conflito`, { idadeHoras: 1, conteudo: Buffer.from('conflito') });
+
+    const r = await buildServiceDireto().runOnce();
+    assert.equal(r.uploaded, 1);
+    assert.equal(existsSync(abs), false, 'Direto apaga o local mesmo com keepLocalCopy ligado');
   });
 
   test('sem storage provisionado o offload não faz nada', async () => {

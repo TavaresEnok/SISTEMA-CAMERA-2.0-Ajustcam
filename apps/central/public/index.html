@@ -1784,14 +1784,21 @@
               <label>Secret Access Key
                 <input id="cloud-secret" type="password" placeholder="${c.hasSecret ? 'deixe em branco para manter a atual' : 'obrigatório para habilitar'}"/>
               </label>
-              <label>Janela local antes de enviar (horas)
+              <!-- O rótulo antigo era "Janela local ANTES de enviar", e mentia:
+                   o upload acontece assim que o segmento fecha, não depois da
+                   janela. O que a janela controla é por quanto tempo a cópia
+                   local SOBREVIVE depois de já ter subido. Quem lia o rótulo
+                   antigo imaginava que nada ia para a nuvem por 24h. -->
+              <label>Manter no disco local depois de enviar (horas)
                 <input id="cloud-window" type="number" min="1" max="720" value="${Number(c.localWindowHours) || 24}"/>
+                <small class="subtext">Só vale no modo Camada. O playback desse período vem do disco, que é mais rápido; passado o prazo, o arquivo fica só na nuvem.</small>
               </label>
               <label>Modo de operação
                 <select id="cloud-mode">
-                  <option value="tier" ${c.mode !== 'mount' ? 'selected' : ''}>Camada — grava local e envia (recomendado)</option>
-                  <option value="mount" ${c.mode === 'mount' ? 'selected' : ''}>Direto — grava no bucket montado (risco)</option>
+                  <option value="tier" ${c.mode !== 'mount' ? 'selected' : ''}>Camada — mantém no disco pelo prazo acima (recomendado)</option>
+                  <option value="mount" ${c.mode === 'mount' ? 'selected' : ''}>Direto — apaga o local assim que confirma o envio</option>
                 </select>
+                <small class="subtext">Direto é para quem não quer vídeo acumulando no servidor: o segmento em gravação passa pelo disco (o ffmpeg precisa disso para fechar um MP4 válido) e sai assim que o envio é confirmado.</small>
               </label>
               <label>Estilo de URL
                 <select id="cloud-pathstyle">
@@ -2010,6 +2017,32 @@
       }
 
       function renderDetail() {
+        // NÃO redesenhe por cima de quem está DIGITANDO.
+        //
+        // O painel recarrega tudo a cada 30s (setInterval(load, 30000) → render
+        // → renderDetail), e esta função reescreve o innerHTML do detalhe
+        // inteiro — o que recria os formulários do zero e APAGA o que o
+        // operador digitou. O formulário de storage tem 7 campos, dois deles
+        // chaves longas coladas com cuidado: ninguém termina em 30s. Na
+        // prática, cadastrar nuvem pela interface era IMPOSSÍVEL, e a tela não
+        // dava nenhuma pista — o texto simplesmente sumia.
+        //
+        // Dois sinais seguram o redesenho, e qualquer um basta:
+        //  · um formulário do detalhe está aberto (state.cloudEditing);
+        //  · o foco está num campo dentro do detalhe (cobre IA, escala e
+        //    qualquer formulário futuro sem precisar de flag própria).
+        // O resto do painel (tabelas, gráficos, métricas) continua atualizando
+        // normalmente — só o painel em edição fica intacto. Salvar/cancelar
+        // zera o cloudEditing e solta o foco, então o próximo ciclo volta a
+        // atualizar sozinho.
+        const foco = document.activeElement;
+        const digitandoNoDetalhe = Boolean(
+          foco
+          && els.detail
+          && els.detail.contains(foco)
+          && /^(INPUT|SELECT|TEXTAREA)$/.test(foco.tagName),
+        );
+        if (state.cloudEditing || digitandoNoDetalhe) return;
         const item = selectedItem();
         if (!item) {
           els.detail.innerHTML = state.installations.length
@@ -2375,6 +2408,10 @@
       }
 
       function openInstallationDetail(installationId) {
+        // Abrir OUTRA instalação abandona a edição em curso. Sem isto, a
+        // guarda anti-redesenho de renderDetail (que protege formulário aberto)
+        // seguraria o DOM da instalação ANTERIOR na tela nova.
+        if (state.selectedId !== installationId) state.cloudEditing = null;
         state.selectedId = installationId;
         localStorage.setItem('drac-central-selected', installationId);
         setView('detalhe');

@@ -35,8 +35,17 @@ const POLICY_SETTING_KEY = 'storage.policy';
 // processo morrer em qualquer ponto, o pior resultado é um objeto órfão no
 // bucket (barato, e a próxima passada reaproveita), nunca uma gravação perdida.
 //
-// O modo `mount` não passa por aqui: lá o ffmpeg já escreve direto no bucket
-// montado, e não há o que offloadar.
+// OS DOIS MODOS passam por aqui; muda só a janela local:
+//   tier  ("Camada") — sobe e mantém o local por `localWindowHours`, para que o
+//                      playback recente (o mais consultado) venha do disco.
+//   mount ("Direto") — janela ZERO: confirmou o upload, apaga o local. É a
+//                      resposta a "não quero vídeo acumulando no servidor".
+//
+// O nome `mount` é herança de quando o plano era montar o bucket como pasta e
+// deixar o ffmpeg escrever nele. Isso NÃO se sustenta: o ffmpeg precisa de um
+// sistema de arquivos real para fechar um MP4 válido, e bucket montado trava,
+// corrompe segmento e cobra por requisição. Enquanto o modo não fez nada, ele
+// era pior que ausente — a tela dizia "configurado" e nenhum byte subia.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Teto de arquivos por ciclo: evita monopolizar rede/CPU do host de gravação. */
@@ -136,7 +145,6 @@ export class CloudOffloadService {
 
     const cfg = await this.cloudConnector.getCloudStorageConfig();
     if (!cfg) return { ...vazio, reason: 'sem storage em nuvem provisionado' };
-    if (cfg.mode !== 'tier') return { ...vazio, reason: `modo ${cfg.mode} não usa offload` };
 
     this.running = true;
     try {
@@ -269,10 +277,25 @@ export class CloudOffloadService {
     // `keepLocalCopy` = nuvem como BACKUP: sobe e mantém o arquivo local. Quem
     // escolheu isso não quer economizar disco, quer cópia externa — apagar o
     // local seria fazer o oposto do pedido.
+    //
+    // O modo DIRETO é a escolha oposta e mais específica ("não quero vídeo
+    // acumulando no disco"), feita no cadastro do storage. Ele vence o
+    // keepLocalCopy: aceitar os dois ao mesmo tempo faria o modo virar um
+    // no-op silencioso — exatamente o defeito que ele existia para ter.
     const policy = await this.getPolicy();
-    if (policy.keepLocalCopy) return 0;
+    const direto = cfg.mode === 'mount';
+    if (policy.keepLocalCopy && !direto) return 0;
 
-    const corte = new Date(Date.now() - cfg.localWindowHours * 3600_000);
+    // Direto = janela ZERO: assim que o upload é CONFIRMADO, o local sai.
+    //
+    // O segmento em escrita continua indo para o disco, e isso não é um
+    // detalhe que dê para contornar: o ffmpeg precisa de um sistema de
+    // arquivos real para fechar um MP4 válido (índice no fim, seeks para
+    // trás). Escrever direto num bucket montado trava em rede ruim, gera
+    // objeto pela metade e cobra por requisição. O disco fica sendo só a mesa
+    // de trabalho dos poucos minutos correntes; o acervo mora na nuvem.
+    const janelaHoras = direto ? 0 : cfg.localWindowHours;
+    const corte = new Date(Date.now() - janelaHoras * 3600_000);
     const candidatas = await this.prisma.recording.findMany({
       where: {
         cloudKey: { not: null },
