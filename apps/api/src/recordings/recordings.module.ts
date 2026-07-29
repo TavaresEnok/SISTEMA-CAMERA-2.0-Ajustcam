@@ -1,4 +1,5 @@
 import { forwardRef, Module } from '@nestjs/common';
+import { CloudConnectorModule } from '../cloud-connector/cloud-connector.module';
 import { BullModule } from '@nestjs/bullmq';
 import { AccessControlModule } from '../access-control/access-control.module';
 import { AuditModule } from '../audit/audit.module';
@@ -16,6 +17,7 @@ import { RetentionService } from './retention.service';
 
 @Module({
   imports: [
+    CloudConnectorModule,
     forwardRef(() => CamerasModule),
     PrismaModule,
     AuthModule,

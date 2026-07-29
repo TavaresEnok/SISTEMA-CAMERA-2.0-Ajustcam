@@ -15,6 +15,9 @@ import { RecordingCleanupProcessor } from './processors/recording-cleanup.proces
 import { RecordingExportProcessor } from './processors/recording-export.processor';
 import { ThumbnailGenerationProcessor } from './processors/thumbnail-generation.processor';
 import { PushReceiptsProcessor } from './processors/push-receipts.processor';
+import { CloudOffloadProcessor } from './processors/cloud-offload.processor';
+import { CLOUD_OFFLOAD_QUEUE } from './queues/cloud-offload.queue';
+import { CloudStorageModule } from '../cloud-storage/cloud-storage.module';
 import { OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -82,14 +85,17 @@ export async function withStartupTimeout<T>(
       { name: EVIDENCE_EXPORT_QUEUE },
       { name: RECORDING_EXPORT_QUEUE },
       { name: PUSH_RECEIPTS_QUEUE },
+      { name: CLOUD_OFFLOAD_QUEUE },
     ),
+    CloudStorageModule,
   ],
-  providers: [AlarmNotificationProcessor, CameraHealthCheckProcessor, RecordingCleanupProcessor, ThumbnailGenerationProcessor, EvidenceExportProcessor, RecordingExportProcessor, PushReceiptsProcessor],
+  providers: [AlarmNotificationProcessor, CameraHealthCheckProcessor, RecordingCleanupProcessor, ThumbnailGenerationProcessor, EvidenceExportProcessor, RecordingExportProcessor, PushReceiptsProcessor, CloudOffloadProcessor],
 })
 export class JobsModule implements OnModuleInit {
   constructor(
     @InjectQueue(CAMERA_HEALTH_CHECK_QUEUE) private readonly healthCheckQueue: Queue,
     @InjectQueue(RECORDING_CLEANUP_QUEUE) private readonly cleanupQueue: Queue,
+    @InjectQueue(CLOUD_OFFLOAD_QUEUE) private readonly cloudOffloadQueue: Queue,
     @InjectQueue(EVIDENCE_EXPORT_QUEUE) private readonly evidenceExportQueue: Queue,
   ) {}
 
@@ -123,6 +129,24 @@ export class JobsModule implements OnModuleInit {
           removeOnFail: 50,
         },
       ), timeoutMs, 'Agendamento da retenção no Redis');
+    }
+
+    // Envio para a nuvem. Intervalo CURTO (padrão 15 min) porque é o que libera
+    // disco: um host que enche entre duas execuções perde gravação. A janela
+    // local já impede que algo suba cedo demais, então rodar com frequência
+    // encurta a fila sem antecipar nada.
+    {
+      const minutos = envNumber('CLOUD_OFFLOAD_INTERVAL_MINUTES', 15, { min: 1, max: 1440, integer: true });
+      await withStartupTimeout(this.cloudOffloadQueue.add(
+        'offload',
+        {},
+        {
+          jobId: 'cloud-offload-cron',
+          repeat: { pattern: `*/${minutos} * * * *` },
+          removeOnComplete: true,
+          removeOnFail: 50,
+        },
+      ), timeoutMs, 'Agendamento do envio para a nuvem no Redis');
     }
 
     // Reprocessar assinaturas pendentes de pacotes de evidência a cada 5 minutos

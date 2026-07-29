@@ -108,6 +108,13 @@ test('IA: dado do servidor escapado e estado recarregado do servidor', () => {
   const corpo = PANEL.slice(i, PANEL.indexOf('async function aiPolicyRequest('));
   assert.match(corpo, /escapeHtml\(cap\.nome\)/);
   assert.match(corpo, /escapeHtml\(cap\.desc\)/);
-  const req = PANEL.slice(PANEL.indexOf('async function aiPolicyRequest('), PANEL.indexOf('async function aiPolicyRequest(') + 800);
+  // Fatia até o FIM da função, não um número fixo de caracteres: a janela de
+  // 800 quebrava sempre que a função crescia (um comentário a mais bastava),
+  // escondendo a invariante que realmente importa.
+  const inicio = PANEL.indexOf('async function aiPolicyRequest(');
+  const proxima = PANEL.indexOf('\n      function ', inicio);
+  const req = PANEL.slice(inicio, proxima > inicio ? proxima : inicio + 2000);
   assert.match(req, /await load\(\)/, 'o teto da licença é aplicado no servidor: recarregue');
+  // A falha precisa ser VISÍVEL: silêncio aqui é lido como "o botão não funciona".
+  assert.match(req, /alert\(/, 'erro de política de IA tem que avisar o operador');
 });

@@ -5,6 +5,7 @@ import { useVmsDataStore } from '../store/vmsDataStore';
 import { useAuthStore } from '../store/authStore';
 import { getApiBaseUrl } from '../lib/api-base';
 import { toast } from '../hooks/use-toast';
+import { CloudStorageCard } from '../components/CloudStorageCard';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -80,6 +81,7 @@ export default function MonitoramentoPage() {
     health: true,
     volumes: true,
     cameras: true,
+    cloud: true,
   });
 
   const toggleStorageSection = (key: keyof typeof openStorageSections) => {
@@ -261,6 +263,10 @@ export default function MonitoramentoPage() {
           </tbody>
         </table>
       </StorageSection>
+      <StorageSection title="Armazenamento em nuvem" open={openStorageSections.cloud} onToggle={() => toggleStorageSection('cloud')}>
+        <CloudStorageCard apiUrl={API_URL} accessToken={accessToken} />
+      </StorageSection>
+
       <StorageSection title="Uso por câmera" open={openStorageSections.cameras} onToggle={() => toggleStorageSection('cameras')}>
         <div className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
           <div>

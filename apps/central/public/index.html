@@ -178,6 +178,26 @@
       .progress-fill.high { background: var(--red); }
 
       .detail { position: sticky; top: 86px; }
+      /* Na página interna o detalhe ocupa a largura toda — o motivo de ela
+         existir é justamente caber o que 420px não cabiam. */
+      #detalhe-view .detail { position: static; }
+      .detail-head { align-items: flex-start; }
+      .detail-head h1 { margin: 8px 0 2px; }
+      .detail-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
+      .detail-tabs button {
+        background: transparent; border: 0; border-bottom: 2px solid transparent;
+        padding: 10px 14px; color: var(--muted); font-weight: 700; cursor: pointer; font-size: 13px;
+      }
+      .detail-tabs button:hover { color: var(--text); }
+      .detail-tabs button.active { color: var(--text); border-bottom-color: var(--accent, #4f8cff); }
+      /* Só a aba escolhida aparece: empilhar tudo devolveria a rolagem infinita
+         que a página interna veio resolver. */
+      .detail-tab-panel { display: none; }
+      .detail-tab-panel.active { display: block; }
+      button.ghost { background: transparent; border: 1px solid var(--line-soft); color: var(--muted); border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+      button.ghost:hover { color: var(--text); }
+      /* A tabela de operação recupera a largura inteira. */
+      #operacao-view .workgrid { grid-template-columns: minmax(0, 1fr); }
       .detail-body { padding: 18px; }
       .empty { min-height: 360px; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 24px; }
       .detail-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
@@ -466,8 +486,35 @@
                 </table>
               </div>
             </section>
-            <aside id="detail-panel" class="panel detail"></aside>
           </div>
+        </section>
+
+        <!-- PÁGINA INTERNA DA INSTALAÇÃO.
+             Antes o detalhe vivia numa coluna lateral de 420px: clicar numa
+             linha trocava o conteúdo de um painel que JÁ estava preenchido (o
+             seletor cai na primeira instalação quando nada foi escolhido), e em
+             tela menor ele descia para baixo da tabela. O efeito prático era
+             "cliquei e não aconteceu nada".
+             Como a Central passou a configurar contrato, IA, nuvem e escala por
+             instalação, 420px deixaram de comportar o assunto. Vira página. -->
+        <section id="detalhe-view" class="view">
+          <div class="page-head detail-head">
+            <div>
+              <button id="detalhe-voltar" class="ghost">← Voltar para Operação</button>
+              <h1 id="detalhe-titulo">Instalação</h1>
+              <p id="detalhe-subtitulo"></p>
+            </div>
+            <div id="detalhe-status"></div>
+          </div>
+          <nav class="detail-tabs" id="detalhe-abas">
+            <button data-tab="visao" class="active">Visão geral</button>
+            <button data-tab="contrato">Contrato</button>
+            <button data-tab="ia">Inteligência artificial</button>
+            <button data-tab="nuvem">Armazenamento em nuvem</button>
+            <button data-tab="escala">Escala</button>
+            <button data-tab="manutencao">Manutenção</button>
+          </nav>
+          <div id="detail-panel" class="panel detail"></div>
         </section>
 
         <section id="clientes-view" class="view">
@@ -762,7 +809,16 @@
       const state = {
         installations: [],
         selectedId: localStorage.getItem('drac-central-selected') || '',
-        view: localStorage.getItem('drac-central-view') || 'operacao',
+        detailTab: 'visao',
+        // Qual instalação está com o formulário de storage aberto (null = nenhum).
+        cloudEditing: null,
+        // 'detalhe' só é restaurável se houver instalação selecionada — senão
+        // o operador recarrega a página e cai numa tela vazia sem saber por quê.
+        view: (() => {
+          const salva = localStorage.getItem('drac-central-view') || 'operacao';
+          if (salva === 'detalhe' && !localStorage.getItem('drac-central-selected')) return 'operacao';
+          return salva;
+        })(),
         user: null,
         pendingContract: null,
         auditEvents: [],
@@ -838,6 +894,12 @@
         adminAccess: 'Administração',
         cloudSupport: 'Suporte central',
         updates: 'Atualizações',
+        // As três capacidades de IA passaram a vir nas restrições quando a
+        // política por instalação foi criada, mas ninguém acrescentou o rótulo
+        // aqui — a tela renderizava "undefined" para cada uma.
+        aiMotion: 'IA · movimento',
+        aiObject: 'IA · objetos',
+        aiFace: 'IA · faces',
       };
       const platformLabels = {
         linux: 'Linux',
@@ -1487,8 +1549,12 @@
 
       function renderResources(status, item = null) {
         const map = restrictionMap(status, item);
+        // Blindagem: uma restrição NOVA sem rótulo aqui virava "undefined" na
+        // tela — foi o que aconteceu quando as capacidades de IA entraram. Sem
+        // rótulo, mostramos a própria chave (feio, mas informativo) em vez de
+        // uma palavra que não quer dizer nada para quem opera.
         return `<div class="resource-grid">${Object.entries(map).map(([key, allowed]) => `
-          <div class="resource ${allowed ? 'allowed' : 'blocked'}">${resources[key]}<br><strong>${allowed ? 'liberado' : 'bloqueado'}</strong></div>
+          <div class="resource ${allowed ? 'allowed' : 'blocked'}">${escapeHtml(resources[key] || key)}<br><strong>${allowed ? 'liberado' : 'bloqueado'}</strong></div>
         `).join('')}</div>`;
       }
       function renderMetrics(items) {
@@ -1554,7 +1620,10 @@
         els.rows.querySelectorAll('tr[data-id]').forEach(row => row.addEventListener('click', () => {
           state.selectedId = row.dataset.id;
           localStorage.setItem('drac-central-selected', state.selectedId);
-          render();
+          // NAVEGA para a página da instalação. Antes só trocava o conteúdo de
+          // um painel lateral que já estava preenchido — o clique não tinha
+          // resposta visível e parecia quebrado.
+          openInstallationDetail(state.selectedId);
         }));
       }
       // ── Inteligência artificial por instalação ─────────────────────────────
@@ -1620,11 +1689,211 @@
             body: JSON.stringify({ aiPolicy }),
           });
           if (!res.ok) throw new Error(String(res.status));
-        } catch {
-          /* o reload abaixo revela o estado verdadeiro */
+        } catch (error) {
+          // Silêncio aqui era lido como "o botão não funciona". O recarregamento
+          // abaixo mostra o estado verdadeiro, mas o operador precisa saber que
+          // a ação FALHOU — senão ele tenta de novo achando que não clicou.
+          alert('Não foi possível alterar a política de IA. O estado exibido abaixo é o real.');
         }
         await load().catch(() => undefined);
         renderDetail();
+      }
+
+      // ── Armazenamento em nuvem POR INSTALAÇÃO ──────────────────────────────
+      //
+      // Provisiona um bucket S3-compatível (MinIO, Backblaze, Eveo, AWS) para
+      // ESTA instalação. A config desce pelo mesmo canal da política de IA (a
+      // resposta do heartbeat), então não é preciso abrir porta na instalação —
+      // o que não funcionaria atrás de NAT, que é a maioria.
+      //
+      // O segredo NUNCA volta do servidor: o painel recebe apenas `hasSecret`.
+      // Campo em branco no save significa "mantenha o que já está lá".
+      //
+      // TODO dado digitado por humano passa por escapeHtml — o painel já sofreu
+      // XSS armazenado, e endpoint/bucket/prefixo são texto livre.
+      // ── Armazenamento em nuvem da instalação ───────────────────────────────
+      //
+      // A tela mostra o que ESTÁ configurado. Só abre o formulário quando o
+      // operador pede — antes, ela despejava dez campos vazios de uma vez, o
+      // que parecia erro e não dizia se havia ou não storage.
+      //
+      // NÃO existe seletor de provedor. MinIO, Backblaze, Eveo, Wasabi e AWS
+      // falam o mesmo protocolo S3; a única diferença que muda o código é o
+      // estilo de URL, que virou um interruptor técnico. O que o operador
+      // precisa é NOMEAR o storage dele.
+      function renderCloudSection(item) {
+        const body = document.getElementById('cloud-body');
+        if (!body) return;
+        const c = item.cloudStorage || {};
+        const configurado = Boolean(c.bucket && c.hasSecret);
+        const editando = state.cloudEditing === item.id;
+
+        const cartao = !configurado ? `
+          <div class="empty" style="min-height:120px">
+            <div>
+              <strong>Nenhum armazenamento em nuvem nesta instalação</strong>
+              <div style="margin-top:6px;color:var(--muted)">As gravações ficam apenas no disco local.</div>
+            </div>
+          </div>
+        ` : `
+          <div class="resource ${c.enabled ? 'allowed' : 'blocked'}" style="text-align:left;padding:14px">
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+              <div style="min-width:0">
+                <div style="font-weight:800">${escapeHtml(c.displayName || c.bucket)}</div>
+                <div style="color:var(--muted);font-size:12px;margin-top:2px">${escapeHtml(c.endpoint || '')}</div>
+                <div style="color:var(--muted);font-size:12px">bucket <b>${escapeHtml(c.bucket || '')}</b>${c.prefix ? ' · prefixo <b>' + escapeHtml(c.prefix) + '</b>' : ''}</div>
+              </div>
+              <div style="text-align:right;white-space:nowrap">
+                <span class="badge ${c.enabled ? 'ok' : 'neutral'}">${c.enabled ? 'Habilitado' : 'Desabilitado'}</span>
+                ${c.lastTestOk === true ? '<span class="badge ok">Conexão OK</span>' : c.lastTestOk === false ? '<span class="badge warn">Conexão falhou</span>' : ''}
+              </div>
+            </div>
+            <div style="margin-top:10px;color:var(--muted);font-size:12px">
+              ${c.mode === 'mount' ? 'Modo direto — grava no bucket montado' : `Camada — mantém ${Number(c.localWindowHours) || 24}h no disco local antes de enviar`}
+            </div>
+            <div class="license-actions" style="margin-top:10px">
+              <button id="cloud-edit" class="primary">Editar</button>
+              <button id="cloud-test" class="primary">Testar conexão</button>
+              <span id="cloud-feedback" style="margin-left:8px"></span>
+            </div>
+          </div>
+        `;
+
+        const formulario = !editando ? '' : `
+          <div class="section" style="margin-top:12px">
+            <div class="section-title">${configurado ? 'Editar armazenamento' : 'Novo armazenamento'}</div>
+            <div class="ai-caps">
+              <label>Nome do storage
+                <input id="cloud-name" placeholder="ex.: MinIO do escritório" value="${escapeHtml(c.name || '')}"/>
+              </label>
+              <label>Endpoint
+                <input id="cloud-endpoint" placeholder="http://ip:9000 ou https://s3.provedor.com" value="${escapeHtml(c.endpoint || '')}"/>
+              </label>
+              <label>Região
+                <input id="cloud-region" placeholder="us-east-1" value="${escapeHtml(c.region || 'us-east-1')}"/>
+              </label>
+              <label>Bucket
+                <input id="cloud-bucket" placeholder="meu-storage" value="${escapeHtml(c.bucket || '')}"/>
+              </label>
+              <label>Prefixo (isola instalações que dividem o mesmo bucket)
+                <input id="cloud-prefix" placeholder="${escapeHtml(item.id || '')}" value="${escapeHtml(c.prefix || '')}"/>
+              </label>
+              <label>Access Key ID
+                <input id="cloud-access-key" value="${escapeHtml(c.accessKeyId || '')}"/>
+              </label>
+              <label>Secret Access Key
+                <input id="cloud-secret" type="password" placeholder="${c.hasSecret ? 'deixe em branco para manter a atual' : 'obrigatório para habilitar'}"/>
+              </label>
+              <label>Janela local antes de enviar (horas)
+                <input id="cloud-window" type="number" min="1" max="720" value="${Number(c.localWindowHours) || 24}"/>
+              </label>
+              <label>Modo de operação
+                <select id="cloud-mode">
+                  <option value="tier" ${c.mode !== 'mount' ? 'selected' : ''}>Camada — grava local e envia (recomendado)</option>
+                  <option value="mount" ${c.mode === 'mount' ? 'selected' : ''}>Direto — grava no bucket montado (risco)</option>
+                </select>
+              </label>
+              <label>Estilo de URL
+                <select id="cloud-pathstyle">
+                  <option value="true" ${c.forcePathStyle !== false ? 'selected' : ''}>Caminho — endpoint/bucket (MinIO, Backblaze, Eveo, Wasabi)</option>
+                  <option value="false" ${c.forcePathStyle === false ? 'selected' : ''}>Subdomínio — bucket.endpoint (Amazon S3)</option>
+                </select>
+              </label>
+              <label><input type="checkbox" id="cloud-enabled" ${c.enabled ? 'checked' : ''}/> Habilitado nesta instalação</label>
+            </div>
+            <div id="cloud-mode-warning" style="margin-top:8px"></div>
+            <div class="license-actions" style="margin-top:10px">
+              <button id="cloud-save" class="primary">Salvar</button>
+              <button id="cloud-cancel">Cancelar</button>
+              <span id="cloud-form-feedback" style="margin-left:8px"></span>
+            </div>
+          </div>
+        `;
+
+        body.innerHTML = `
+          ${cartao}
+          ${!editando ? `<div class="license-actions" style="margin-top:10px"><button id="cloud-add" class="primary">+ ${configurado ? 'Trocar armazenamento' : 'Adicionar armazenamento'}</button></div>` : ''}
+          ${formulario}
+        `;
+
+        body.querySelector('#cloud-add')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
+        body.querySelector('#cloud-edit')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
+        body.querySelector('#cloud-cancel')?.addEventListener('click', () => { state.cloudEditing = null; renderCloudSection(item); });
+        body.querySelector('#cloud-test')?.addEventListener('click', () => testCloudStorage(item.id, body));
+        body.querySelector('#cloud-save')?.addEventListener('click', () => saveCloudStorage(item.id, body));
+
+        // O risco do modo direto aparece NA HORA da escolha, não escondido em
+        // documentação: escrever segmento direto no bucket trava, gera arquivo
+        // parcial e cobra por requisição.
+        const modeSel = body.querySelector('#cloud-mode');
+        if (modeSel) {
+          const warn = body.querySelector('#cloud-mode-warning');
+          const pintar = () => {
+            warn.innerHTML = modeSel.value === 'mount'
+              ? '<div class="alert-item"><span class="badge warn">Risco</span><div style="margin-top:6px">No modo direto o ffmpeg escreve cada segmento no bucket montado. Isso pode travar a gravação, gerar arquivo parcial e gera cobrança por requisição.</div></div>'
+              : '';
+          };
+          pintar();
+          modeSel.addEventListener('change', pintar);
+        }
+      }
+
+      function cloudFormValues(body) {
+        return {
+          enabled: body.querySelector('#cloud-enabled').checked,
+          name: body.querySelector('#cloud-name').value.trim(),
+          endpoint: body.querySelector('#cloud-endpoint').value.trim(),
+          region: body.querySelector('#cloud-region').value.trim(),
+          bucket: body.querySelector('#cloud-bucket').value.trim(),
+          prefix: body.querySelector('#cloud-prefix').value.trim(),
+          accessKeyId: body.querySelector('#cloud-access-key').value.trim(),
+          // Em branco = manter a credencial já salva (o servidor entende).
+          secretAccessKey: body.querySelector('#cloud-secret').value,
+          mode: body.querySelector('#cloud-mode').value,
+          localWindowHours: Number(body.querySelector('#cloud-window').value) || 24,
+          forcePathStyle: body.querySelector('#cloud-pathstyle').value === 'true',
+        };
+      }
+
+      async function saveCloudStorage(installationId, body) {
+        const feedback = body.querySelector('#cloud-form-feedback') || body.querySelector('#cloud-feedback');
+        feedback.textContent = 'Salvando…';
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage`), {
+            method: 'PATCH', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cloudStorage: cloudFormValues(body) }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            // Erro de validação vira texto acionável, não "erro 400".
+            const detalhes = Array.isArray(data.details) ? data.details.join('; ') : (data.message || `erro ${res.status}`);
+            feedback.innerHTML = `<span class="badge warn">${escapeHtml(detalhes)}</span>`;
+            return;
+          }
+          feedback.innerHTML = '<span class="badge ok">Salvo</span>';
+          state.cloudEditing = null;
+        } catch (error) {
+          feedback.innerHTML = '<span class="badge warn">Falha ao salvar</span>';
+        }
+        await load().catch(() => undefined);
+        renderDetail();
+      }
+
+      async function testCloudStorage(installationId, body) {
+        const feedback = body.querySelector('#cloud-feedback');
+        feedback.textContent = 'Testando (grava e apaga um objeto)…';
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/test`), {
+            method: 'POST', credentials: 'include',
+          });
+          const data = await res.json().catch(() => ({}));
+          feedback.innerHTML = data.ok
+            ? '<span class="badge ok">Conexão OK — leitura e escrita confirmadas</span>'
+            : `<span class="badge warn">${escapeHtml(String(data.error || `erro ${res.status}`))}</span>`;
+        } catch (error) {
+          feedback.innerHTML = '<span class="badge warn">Falha ao testar</span>';
+        }
       }
 
       // ── Escala · nós de computação (Fase 4) ────────────────────────────────
@@ -1760,6 +2029,7 @@
             <span class="badge ${item.status === 'ONLINE' ? 'ok' : item.status === 'PENDING_INSTALL' ? 'neutral' : 'bad'}">${communicationLabel(item)}</span>
           </div>
           <div class="detail-body">
+            <div class="detail-tab-panel active" data-tab-panel="visao">
             ${item.policyPending ? '<div class="alert-item"><span class="badge warn">Aguardando sincronização</span><div style="margin-top:8px">A política foi alterada na central e será aplicada quando a instalação enviar o próximo sinal.</div></div>' : ''}
             <div class="quick-stats">
               <div class="quick-stat"><label>Câmeras</label><strong>${metric(item, 'cameraOnline', 0)}/${metric(item, 'cameraTotal', 0)}</strong></div>
@@ -1803,6 +2073,9 @@
                 <div>Armazenamento</div><div>${item.storage?.disk ? `${bytes(item.storage.disk.usedBytes)} / ${bytes(item.storage.disk.totalBytes)}` : '-'}</div>
               </div>
             </div>
+            </div><!-- /visao -->
+
+            <div class="detail-tab-panel" data-tab-panel="contrato">
             <div class="section">
               <div class="section-title">Recursos permitidos</div>
               ${renderResources(item.licenseStatus || 'ACTIVE', item)}
@@ -1820,6 +2093,9 @@
                 </div>
               </div>
             </div>
+            </div><!-- /contrato -->
+
+            <div class="detail-tab-panel" data-tab-panel="manutencao">
             ${item.status === 'PENDING_INSTALL' ? `
               <div class="section">
                 <div class="section-title">Provisionamento</div>
@@ -1842,17 +2118,59 @@
                 </div>
               </div>
             `}
+            </div><!-- /manutencao -->
+
+            <div class="detail-tab-panel" data-tab-panel="ia">
             <div class="section" id="ai-section">
               <div class="section-title">Inteligência artificial</div>
               <div id="ai-body"><div class="empty">Carregando…</div></div>
             </div>
+            </div><!-- /ia -->
+
+            <div class="detail-tab-panel" data-tab-panel="nuvem">
+            <div class="section" id="cloud-section">
+              <div class="section-title">Armazenamento em nuvem</div>
+              <div id="cloud-body"><div class="empty">Carregando…</div></div>
+            </div>
+            </div><!-- /nuvem -->
+
+            <div class="detail-tab-panel" data-tab-panel="escala">
             <div class="section" id="scale-section">
               <div class="section-title">Escala · nós de computação</div>
               <div id="scale-body"><div class="empty">Carregando…</div></div>
             </div>
+            </div><!-- /escala -->
           </div>`;
         renderAiSection(item);
+        renderCloudSection(item);
         renderScaleSection(item.id);
+        // O innerHTML acima recriou os painéis; sem reaplicar, a aba escolhida
+        // some e o operador volta para "Visão geral" a cada atualização.
+        setDetailTab(state.detailTab || 'visao');
+        // Cabeçalho da página interna acompanha a instalação aberta.
+        const titulo = document.getElementById('detalhe-titulo');
+        if (titulo) titulo.textContent = displayName(item);
+        const sub = document.getElementById('detalhe-subtitulo');
+        if (sub) sub.textContent = item.id;
+        const st = document.getElementById('detalhe-status');
+        if (st) {
+          // Comunicação E entrega de configuração são coisas DIFERENTES: uma
+          // instalação pode estar online e mesmo assim não ter aplicado o que
+          // foi configurado aqui. Mostrar as duas evita a leitura errada de
+          // "está online, então está configurado".
+          const d = item.configDelivery || {};
+          let entrega = '';
+          if (d.status === 'FAILED') {
+            entrega = `<span class="badge bad" title="${escapeHtml(d.error || '')}">Falha ao aplicar (rev ${d.desiredRevision})</span>`;
+          } else if (d.status === 'UNSUPPORTED') {
+            entrega = '<span class="badge warn" title="Esta versão da instalação não confirma aplicação de configuração.">Versão sem confirmação</span>';
+          } else if (d.desiredRevision > 0 && d.appliedRevision < d.desiredRevision) {
+            entrega = `<span class="badge warn">Aguardando aplicar (rev ${d.appliedRevision} → ${d.desiredRevision})</span>`;
+          } else if (d.desiredRevision > 0) {
+            entrega = `<span class="badge ok">Configuração aplicada (rev ${d.appliedRevision})</span>`;
+          }
+          st.innerHTML = `<span class="badge ${item.status === 'ONLINE' ? 'ok' : item.status === 'PENDING_INSTALL' ? 'neutral' : 'bad'}">${escapeHtml(communicationLabel(item))}</span> ${entrega}`;
+        }
         els.detail.querySelector('#save-license').addEventListener('click', () => requestContractChange(item.id, els.detail.querySelector('#license-select').value, els.detail.querySelector('#license-message').value.trim()));
         els.detail.querySelector('#suspend-license').addEventListener('click', () => requestContractChange(item.id, 'SUSPENDED', els.detail.querySelector('#license-message').value.trim() || 'Suspensão administrativa.'));
         els.detail.querySelector('#copy-selected-diagnostics')?.addEventListener('click', () => copyDiagnosticsFor(item.id));
@@ -2031,6 +2349,37 @@
         document.querySelectorAll('.view').forEach(viewNode => viewNode.classList.remove('active'));
         document.querySelector(`#${view}-view`)?.classList.add('active');
       }
+      // ── Navegação da página da instalação ─────────────────────────────────
+      // A aba escolhida é lembrada por sessão: ao voltar de outra instalação, o
+      // operador cai onde estava trabalhando, não sempre em "Visão geral".
+      function setDetailTab(tab) {
+        state.detailTab = tab;
+        document.querySelectorAll('#detalhe-abas button').forEach((b) => {
+          b.classList.toggle('active', b.dataset.tab === tab);
+        });
+        document.querySelectorAll('#detalhe-view [data-tab-panel]').forEach((panel) => {
+          panel.classList.toggle('active', panel.dataset.tabPanel === tab);
+        });
+      }
+
+      function openInstallationDetail(installationId) {
+        state.selectedId = installationId;
+        localStorage.setItem('drac-central-selected', installationId);
+        setView('detalhe');
+        render();
+        setDetailTab(state.detailTab || 'visao');
+      }
+
+      function wireDetailNavigation() {
+        document.getElementById('detalhe-voltar')?.addEventListener('click', () => {
+          setView('operacao');
+          render();
+        });
+        document.querySelectorAll('#detalhe-abas button').forEach((btn) => {
+          btn.addEventListener('click', () => setDetailTab(btn.dataset.tab));
+        });
+      }
+
       function render() {
         setView(state.view);
         const items = filteredItems();
@@ -2274,6 +2623,7 @@
         state.installations = [];
         setAuthenticated(null);
       });
+      wireDetailNavigation();
       document.querySelectorAll('[data-view-button]').forEach(button => button.addEventListener('click', () => {
         setView(button.dataset.viewButton);
         if (state.view === 'auditoria') void load();

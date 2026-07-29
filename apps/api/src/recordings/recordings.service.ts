@@ -1,9 +1,9 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { createReadStream, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { rename, rm, stat } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { type Response } from 'express';
 import { execFile } from 'node:child_process';
@@ -13,6 +13,8 @@ import { RecordingSource, UserRole } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { AccessControlService } from '../access-control/access-control.service';
+import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
+import { S3Client } from '../cloud-storage/s3-client';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
@@ -104,6 +106,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     private readonly accessControlService: AccessControlService,
     @InjectQueue(THUMBNAIL_GENERATION_QUEUE) private readonly thumbnailQueue: Queue,
     @InjectQueue(RECORDING_EXPORT_QUEUE) private readonly rangeExportQueue: Queue,
+    private readonly cloudConnector: CloudConnectorService,
   ) {}
 
   async onModuleInit() {
@@ -349,12 +352,200 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /**
+   * Garante um ARQUIVO LOCAL para operações que precisam de um caminho real.
+   *
+   * Transcode de compatibilidade, snapshot de frame e geração de thumbnail
+   * chamam ffmpeg/ffprobe apontando para um caminho — eles não sabem ler de
+   * bucket. Sem isto, uma gravação já offloadada ficava assistível (o streaming
+   * faz pass-through) mas não transcodável: câmera H.265 em navegador sem HEVC
+   * simplesmente não abria.
+   *
+   * O objeto é baixado UMA vez para um cache local e reusado. O cache é
+   * podado por idade — sem poda, "liberar disco" na nuvem seria desfeito
+   * silenciosamente pelo próprio cache.
+   *
+   * Devolve `null` quando não há cópia na nuvem: quem chamou mantém o 404.
+   */
+  private async materializeFromCloud(
+    recording: { id: string; filePath: string; cloudKey?: string | null },
+  ): Promise<string | null> {
+    const cloudKey = recording.cloudKey;
+    if (!cloudKey) return null;
+
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const cacheDir = join(recordingsRoot, '.cloud-cache');
+    const extensao = extname(recording.filePath) || '.mp4';
+    const destino = join(cacheDir, `${recording.id}${extensao}`);
+
+    // Já em cache de uma chamada anterior.
+    if (existsSync(destino) && statSync(destino).size > 0) return destino;
+
+    const config = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
+    if (!config) return null;
+
+    const client = new S3Client({
+      endpoint: config.endpoint,
+      region: config.region,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      prefix: config.prefix,
+      forcePathStyle: config.forcePathStyle,
+    });
+    const semPrefixo = config.prefix && cloudKey.startsWith(`${config.prefix}/`)
+      ? cloudKey.slice(config.prefix.length + 1)
+      : cloudKey;
+
+    mkdirSync(cacheDir, { recursive: true });
+    const parcial = `${destino}.partial`;
+    try {
+      const conteudo = await client.getObject(semPrefixo);
+      // Escreve em arquivo temporário e renomeia: um processo que morra no meio
+      // do download não pode deixar um arquivo truncado que a próxima chamada
+      // trataria como cache válido — e que o ffmpeg leria como vídeo corrompido.
+      writeFileSync(parcial, conteudo);
+      renameSync(parcial, destino);
+    } catch (error) {
+      try { rmSync(parcial, { force: true }); } catch { /* já não existe */ }
+      this.logger.warn(`Falha ao materializar gravação ${recording.id} da nuvem: ${sanitizeSensitiveText(error)}`);
+      return null;
+    }
+
+    void this.pruneCloudCache(cacheDir);
+    return destino;
+  }
+
+  /**
+   * Poda o cache de gravações trazidas da nuvem.
+   *
+   * Sem isto o cache cresceria para sempre e desfaria, na prática, o objetivo
+   * do offload (liberar disco). A janela é curta de propósito: o cache existe
+   * para atender uma sessão de transcode/investigação, não para virar acervo.
+   */
+  private async pruneCloudCache(cacheDir: string) {
+    const horas = envNumber('CLOUD_CACHE_TTL_HOURS', 6, {
+      min: 1,
+      max: 168,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    });
+    const corte = Date.now() - horas * 3600_000;
+    try {
+      for (const nome of readdirSync(cacheDir)) {
+        const caminho = join(cacheDir, nome);
+        try {
+          if (statSync(caminho).mtimeMs < corte) rmSync(caminho, { force: true });
+        } catch { /* corrida com outra poda: ignorar */ }
+      }
+    } catch { /* diretório ainda não existe */ }
+  }
+
+  /**
+   * Serve uma gravação que já saiu do disco e vive no bucket.
+   *
+   * PROXY, não redirecionamento para URL pré-assinada. Três razões, nesta ordem:
+   *   1. o bucket costuma ser MinIO em rede local — o navegador de um operador
+   *      remoto simplesmente não o alcança;
+   *   2. o token de play e o gate de permissão continuam valendo, porque o byte
+   *      passa por aqui; um redirecionamento entregaria o conteúdo fora do gate;
+   *   3. nem a credencial nem a URL do bucket vazam para o cliente.
+   * O custo é banda dobrada (bucket → API → navegador) — aceitável para acervo
+   * antigo, que é justamente o que vai para a nuvem.
+   *
+   * O Range do navegador é REPASSADO ao S3 em vez de recalculado: quem conhece
+   * o tamanho real do objeto é o bucket, e recomputar offset aqui introduziria
+   * erro de um byte no seek. O 206/`Content-Range` do S3 é devolvido como veio.
+   *
+   * Devolve `false` quando a gravação não tem cópia na nuvem — aí quem chamou
+   * mantém o 404 de sempre.
+   */
+  private async streamFromCloudIfAvailable(
+    recording: { id: string; filePath: string; cloudKey?: string | null },
+    res: Response,
+    options?: { download?: boolean },
+  ): Promise<boolean> {
+    const cloudKey = recording.cloudKey;
+    if (!cloudKey) return false;
+
+    const config = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
+    if (!config) {
+      // A gravação diz estar na nuvem, mas o storage foi removido do painel.
+      // Sinalizar é melhor que devolver "não encontrado", que mandaria o
+      // operador procurar no disco um arquivo que está no bucket.
+      throw new NotFoundException(
+        'Esta gravação foi arquivada na nuvem, mas o armazenamento em nuvem não está configurado nesta instalação.',
+      );
+    }
+
+    const client = new S3Client({
+      endpoint: config.endpoint,
+      region: config.region,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      prefix: config.prefix,
+      forcePathStyle: config.forcePathStyle,
+    });
+
+    // A chave gravada no banco já inclui o prefixo; o cliente o aplicaria de
+    // novo, então o removemos antes de pedir.
+    const semPrefixo = config.prefix && cloudKey.startsWith(`${config.prefix}/`)
+      ? cloudKey.slice(config.prefix.length + 1)
+      : cloudKey;
+
+    const range = res.req.headers.range;
+    const objeto = await client.getObjectStream(semPrefixo, range);
+
+    res.status(objeto.status === 206 ? 206 : 200);
+    res.setHeader('Content-Type', objeto.contentType || 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (objeto.contentLength) res.setHeader('Content-Length', objeto.contentLength);
+    if (objeto.contentRange) res.setHeader('Content-Range', objeto.contentRange);
+    if (options?.download) {
+      res.setHeader('Content-Disposition', `attachment; filename="${basename(recording.filePath)}"`);
+    }
+
+    if (!objeto.body) {
+      res.end();
+      return true;
+    }
+
+    // Stream, não Buffer: um segmento pode ter centenas de MB, e materializá-lo
+    // na memória por requisição derrubaria a API com poucos operadores
+    // assistindo ao mesmo tempo.
+    const reader = objeto.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!res.write(Buffer.from(value))) {
+          // Backpressure: o navegador não está consumindo tão rápido quanto o
+          // bucket entrega. Sem isto, a memória da API cresce sem limite.
+          await new Promise((resolve) => res.once('drain', resolve));
+        }
+      }
+      res.end();
+    } catch (error) {
+      // Cliente desconectou no meio (fechou a aba, trocou de câmera): não é
+      // erro de servidor, e insistir só desperdiça banda do bucket.
+      reader.cancel().catch(() => undefined);
+      if (!res.writableEnded) res.end();
+    }
+    return true;
+  }
+
   async streamRecording(recordingId: string, res: Response, options?: { allowAutoCompat?: boolean }) {
     const recording = await this.ensureRecordingExists(recordingId);
 
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
     if (!existsSync(filePath)) {
+      // Não está no disco — mas pode estar na NUVEM. Este era o ponto em que uma
+      // gravação já offloadada virava 404: prova salva no bucket que o operador
+      // não conseguia assistir.
+      const daNuvem = await this.streamFromCloudIfAvailable(recording, res);
+      if (daNuvem) return;
       throw new NotFoundException('Arquivo de gravação não encontrado no disco.');
     }
 
@@ -422,7 +613,15 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   private async generateCompatibleFile(recordingId: string) {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
-    const inputPath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+    let inputPath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+    if (!existsSync(inputPath)) {
+      // Gravação já offloadada: o ffmpeg precisa de um caminho real, então a
+      // trazemos da nuvem para o cache local. Sem isto, câmera H.265 em
+      // navegador sem HEVC ficava sem transcode — assistível na teoria,
+      // impossível na prática.
+      const local = await this.materializeFromCloud(recording);
+      if (local) inputPath = local;
+    }
     if (!existsSync(inputPath)) {
       throw new NotFoundException('Arquivo de gravação não encontrado no disco.');
     }
@@ -613,6 +812,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
     if (!existsSync(filePath)) {
+      // Mesma regra do playback: gravação offloadada continua baixável.
+      const daNuvem = await this.streamFromCloudIfAvailable(recording, res, { download: true });
+      if (daNuvem) return;
       throw new NotFoundException('Arquivo de gravação não encontrado no disco.');
     }
 
@@ -1879,7 +2081,12 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   async streamSnapshotFrame(recordingId: string, seconds: number, res: Response) {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
-    const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+    let filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+    if (!existsSync(filePath)) {
+      // ffmpeg precisa de um caminho real: traz da nuvem para o cache local.
+      const local = await this.materializeFromCloud(recording);
+      if (local) filePath = local;
+    }
     if (!existsSync(filePath)) {
       throw new NotFoundException('Arquivo de gravação não encontrado no disco.');
     }

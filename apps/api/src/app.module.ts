@@ -29,6 +29,7 @@ import { SettingsModule } from './settings/settings.module';
 import { GpuModule } from './gpu/gpu.module';
 import { RolePermissionsModule } from './role-permissions/role-permissions.module';
 import { CloudConnectorModule } from './cloud-connector/cloud-connector.module';
+import { CloudStorageModule } from './cloud-storage/cloud-storage.module';
 import { CommercialPolicyModule } from './commercial-policy/commercial-policy.module';
 import { AppBuilderModule } from './app-builder/app-builder.module';
 import { LiveLayoutsModule } from './live-layouts/live-layouts.module';
@@ -57,6 +58,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     GpuModule,
     RolePermissionsModule,
     CloudConnectorModule,
+    CloudStorageModule,
     MetricsModule,
     HealthModule,
     AuthModule,

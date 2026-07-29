@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import { statfs, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { AiService } from '../ai/ai.service';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
 import { StreamResourceAdvisorService } from '../camera-stream/stream-resource-advisor.service';
@@ -19,6 +20,26 @@ import {
 
 type LicenseStatus = 'UNKNOWN' | 'ACTIVE' | 'GRACE' | 'RESTRICTED' | 'SUSPENDED';
 
+/**
+ * Storage em nuvem provisionado pela Central. Carrega a credencial porque é a
+ * instalação que fala com o bucket — a Central só a repassa.
+ */
+export type CloudStorageConfig = {
+  enabled: true;
+  /** `tier` = grava local e envia; `mount` = grava direto no bucket montado. */
+  mode: 'tier' | 'mount';
+  provider: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  localWindowHours: number;
+  forcePathStyle: boolean;
+  updatedAt: string | null;
+};
+
 const SETTING_KEYS = [
   'cloud.lastSyncAt',
   'cloud.lastError',
@@ -26,6 +47,17 @@ const SETTING_KEYS = [
   'cloud.licenseMessage',
   'cloud.restrictions',
   'cloud.lastPayloadSummary',
+  // Storage em nuvem provisionado pela Central. Guardado como setting (e não em
+  // variável de ambiente) justamente para poder mudar sem recriar container —
+  // que é o ponto do provisionamento remoto.
+  'cloud.storage',
+  // CONFIRMAÇÃO DE APLICAÇÃO. Sem isto, a Central só sabe que a instalação
+  // esteve online depois da mudança — não que ela APLICOU a mudança. Uma
+  // instalação antiga que ignore um campo desconhecido sumiria da lista de
+  // pendências sem nunca ter aplicado nada.
+  'cloud.appliedConfigRevision',
+  'cloud.configApplyStatus',
+  'cloud.configApplyError',
 ];
 
 @Injectable()
@@ -92,21 +124,51 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       const restrictions = this.applyStatusCaps(licenseStatus, response.data?.restrictions ?? {});
       const licenseMessage = String(response.data?.licenseMessage ?? '');
 
+      // Storage em nuvem: a Central manda `null` quando não há nada configurado
+      // (ou quando a instalação está suspensa). `null` DESLIGA — é assim que o
+      // operador remove o storage sem precisar entrar na instalação.
+      const cloudStorage = this.normalizeCloudStorage(response.data?.cloudStorage);
+
+      // Revisão que a Central diz ser a desejada. Guardamos DEPOIS de aplicar,
+      // e só se aplicar der certo: marcar antes transformaria uma falha em
+      // "aplicado" e a Central passaria a mentir.
+      const desiredRevision = Number(response.data?.configRevision ?? 0) || 0;
+      let applyStatus = 'APPLIED';
+      let applyError = '';
+
+      try {
+        await Promise.all([
+          this.writeSetting('cloud.lastSyncAt', new Date().toISOString()),
+          this.writeSetting('cloud.lastError', ''),
+          this.writeSetting('cloud.licenseStatus', licenseStatus),
+          this.writeSetting('cloud.licenseMessage', licenseMessage),
+          this.writeSetting('cloud.restrictions', JSON.stringify(restrictions)),
+          this.writeSetting('cloud.lastPayloadSummary', JSON.stringify(payload.summary)),
+          this.writeSetting('cloud.storage', cloudStorage ? JSON.stringify(cloudStorage) : ''),
+        ]);
+        await this.enforceRuntimeRestrictions(restrictions);
+      } catch (applyFailure) {
+        applyStatus = 'FAILED';
+        applyError = sanitizeSensitiveText(applyFailure).slice(0, 500);
+        this.logger.error(`Falha ao APLICAR configuração da Central: ${applyError}`);
+      }
+
+      // A Central recebe isto no próximo heartbeat e para de adivinhar por data.
       await Promise.all([
-        this.writeSetting('cloud.lastSyncAt', new Date().toISOString()),
-        this.writeSetting('cloud.lastError', ''),
-        this.writeSetting('cloud.licenseStatus', licenseStatus),
-        this.writeSetting('cloud.licenseMessage', licenseMessage),
-        this.writeSetting('cloud.restrictions', JSON.stringify(restrictions)),
-        this.writeSetting('cloud.lastPayloadSummary', JSON.stringify(payload.summary)),
+        this.writeSetting('cloud.configApplyStatus', applyStatus),
+        this.writeSetting('cloud.configApplyError', applyError),
+        ...(applyStatus === 'APPLIED'
+          ? [this.writeSetting('cloud.appliedConfigRevision', String(desiredRevision))]
+          : []),
       ]);
-      await this.enforceRuntimeRestrictions(restrictions);
 
       return {
         skipped: false,
         synced: true,
         licenseStatus,
         restrictions,
+        configRevision: desiredRevision,
+        applyStatus,
         central: {
           acknowledged: Boolean(response.data?.ok ?? response.data?.accepted),
         },
@@ -313,12 +375,27 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         ? 'attention'
         : 'ready';
 
+    // Estado de aplicação, defensivo: se a leitura falhar (banco em recuperação,
+    // tabela ausente numa instalação antiga), o heartbeat SEGUE. Ele é a linha
+    // de vida com a Central — deixar de reportar por causa de um setting seria
+    // trocar um problema pequeno por perder a visibilidade da instalação.
+    const applied = await this.readSettings().catch(() => ({} as Record<string, string>));
     return {
       installation: {
         id: process.env.CLOUD_INSTALLATION_ID,
         customerName: process.env.CLOUD_CUSTOMER_NAME || os.hostname(),
         version: process.env.DRAC_VERSION || process.env.npm_package_version || 'local',
         launchProfile,
+      },
+      // O que ESTA instalação de fato aplicou. É o que permite a Central dizer
+      // a verdade ("aplicou a revisão 42") em vez de inferir por data.
+      configState: {
+        appliedRevision: Number(applied['cloud.appliedConfigRevision'] ?? 0) || 0,
+        applyStatus: applied['cloud.configApplyStatus'] || 'UNKNOWN',
+        applyError: applied['cloud.configApplyError'] || null,
+        // Campos que ESTA versão entende. A Central usa isto para não marcar
+        // como "pendente para sempre" uma config que a instalação nem conhece.
+        supports: ['licenseStatus', 'restrictions', 'aiPolicy', 'cloudStorage'],
       },
       summary: {
         status: appReadinessStatus === 'blocked' ? 'blocked' : appReadinessStatus === 'attention' ? 'attention' : 'ok',
@@ -659,6 +736,61 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
   private normalizeLicenseStatus(value: unknown): LicenseStatus {
     if (value === 'ACTIVE' || value === 'GRACE' || value === 'RESTRICTED' || value === 'SUSPENDED') return value;
     return 'UNKNOWN';
+  }
+
+  /**
+   * Valida o storage vindo da Central antes de persistir.
+   *
+   * Config pela metade é tratada como AUSENTE: aceitar um bucket sem credencial
+   * (ou sem endpoint) faria a instalação tentar subir gravação para lugar
+   * nenhum, falhando em laço e enchendo o log — enquanto o operador acha que
+   * provisionou. Melhor não ligar do que ligar quebrado.
+   */
+  private normalizeCloudStorage(raw: unknown): CloudStorageConfig | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const source = raw as Record<string, unknown>;
+    if (source.enabled !== true) return null;
+
+    const text = (key: string) => String(source[key] ?? '').trim();
+    const endpoint = text('endpoint');
+    const bucket = text('bucket');
+    const accessKeyId = text('accessKeyId');
+    const secretAccessKey = text('secretAccessKey');
+    if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return null;
+    if (!/^https?:\/\//i.test(endpoint)) return null;
+
+    const mode = source.mode === 'mount' ? 'mount' : 'tier';
+    const windowHours = Number(source.localWindowHours);
+    return {
+      enabled: true,
+      mode,
+      provider: text('provider') || 's3',
+      endpoint,
+      region: text('region') || 'us-east-1',
+      bucket,
+      prefix: text('prefix'),
+      accessKeyId,
+      secretAccessKey,
+      localWindowHours: Number.isFinite(windowHours) && windowHours >= 1 && windowHours <= 720
+        ? Math.round(windowHours)
+        : 24,
+      forcePathStyle: source.forcePathStyle !== false,
+      updatedAt: text('updatedAt') || null,
+    };
+  }
+
+  /** Config vigente, para quem precisa falar com o bucket. */
+  async getCloudStorageConfig(): Promise<CloudStorageConfig | null> {
+    const settings = await this.readSettings();
+    const raw = settings['cloud.storage'];
+    if (!raw) return null;
+    try {
+      return this.normalizeCloudStorage(JSON.parse(raw));
+    } catch {
+      // Setting corrompido não pode derrubar quem consulta: tratar como
+      // "sem storage" é o comportamento seguro.
+      return null;
+    }
   }
 
   private async enforceRuntimeRestrictions(restrictions: Record<string, unknown>) {

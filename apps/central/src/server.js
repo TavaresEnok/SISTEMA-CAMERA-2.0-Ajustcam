@@ -6,6 +6,14 @@ const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
 const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
 const { normalizeAiPolicy, validateAiPolicy, applyAiPolicyToRestrictions, describeAiPolicy } = require('./ai-policy');
+const {
+  normalizeCloudStorage,
+  validateCloudStorage,
+  describeCloudStorage,
+  buildInstallationPayload: buildCloudStoragePayload,
+  decryptSecret: decryptStorageSecret,
+} = require('./cloud-storage');
+const { testS3Access } = require('./s3-probe');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
 const {
@@ -760,7 +768,20 @@ function publicInstallation(item) {
   const lastHeartbeatAt = item.lastHeartbeatAt ? new Date(item.lastHeartbeatAt).getTime() : 0;
   const updatedAt = item.updatedAt ? new Date(item.updatedAt).getTime() : 0;
   const ageSeconds = lastHeartbeatAt ? Math.round((Date.now() - lastHeartbeatAt) / 1000) : null;
-  const policyPending = Boolean(updatedAt && lastHeartbeatAt && updatedAt > lastHeartbeatAt);
+  // PENDÊNCIA REAL: a revisão desejada ainda não foi confirmada como aplicada.
+  //
+  // A regra anterior (`updatedAt > lastHeartbeatAt`) só provava que a instalação
+  // esteve online depois da mudança. Agora comparamos revisões, e o caso
+  // perigoso — instalação que não reporta estado — fica VISÍVEL como
+  // 'UNSUPPORTED' em vez de sumir da lista de pendências.
+  const desiredRevision = Number(item.configRevision || 0) || 0;
+  const appliedRevision = Number(item.appliedConfigRevision || 0) || 0;
+  const applyStatus = item.configApplyStatus || 'UNKNOWN';
+  const policyPending = desiredRevision > 0
+    ? (appliedRevision < desiredRevision || applyStatus === 'FAILED')
+    // Sem revisão emitida ainda: mantém o critério antigo para não mudar o
+    // comportamento de instalações que nunca receberam configuração nova.
+    : Boolean(updatedAt && lastHeartbeatAt && updatedAt > lastHeartbeatAt);
   const status = ageSeconds == null ? 'PENDING_INSTALL' : ageSeconds <= ONLINE_THRESHOLD_SECONDS ? 'ONLINE' : 'OFFLINE';
   // Nós de computação (item 3.2): campo OMITIDO quando não há nós definidos, para
   // preservar exatamente a saída atual das instalações single-primary (retrocompat).
@@ -799,6 +820,20 @@ function publicInstallation(item) {
     // Política de IA sempre presente (normalizada) para a tela desenhar os
     // interruptores sem adivinhar o que "ausente" significa.
     aiPolicy: normalizeAiPolicy(item.aiPolicy),
+    // Storage em nuvem SEM a credencial: `describeCloudStorage` remove o
+    // segredo e devolve só `hasSecret`. O painel nunca precisa da chave; quem
+    // precisa dela é a instalação, e ela a recebe pelo heartbeat.
+    cloudStorage: describeCloudStorage(item.cloudStorage),
+    // Estado de entrega da configuração, para a tela dizer a verdade em vez de
+    // "pendente/não pendente" sem explicação.
+    configDelivery: {
+      desiredRevision,
+      appliedRevision,
+      status: applyStatus,
+      error: item.configApplyError || null,
+      at: item.configApplyAt || null,
+      supports: Array.isArray(item.supportedConfigKeys) ? item.supportedConfigKeys : null,
+    },
   };
 }
 
@@ -1069,11 +1104,23 @@ function licenseResponse(item) {
     localPlayback: true,
     localRecording: status !== 'SUSPENDED',
   };
+  // Storage em nuvem provisionado pelo painel. Desce no MESMO canal da política
+  // de IA — a instalação já sabe consumir a resposta do heartbeat, então não é
+  // preciso abrir porta nela nem inverter o sentido da conexão (o que
+  // funcionaria mal atrás de NAT, que é a maioria das instalações).
+  //
+  // Instalação SUSPENSA não recebe credencial: além de não gravar localmente,
+  // não deve continuar consumindo bucket de um contrato interrompido.
+  const cloudStorage = status === 'SUSPENDED' ? null : buildCloudStoragePayload(item.cloudStorage);
+
   return {
     licenseStatus: status,
     licenseMessage: item.licenseMessage || null,
     // A política de IA do painel restringe ABAIXO do teto da licença (nunca acima).
     restrictions: applyAiPolicyToRestrictions(restrictions, item.aiPolicy),
+    cloudStorage,
+    // Revisão DESEJADA. A instalação devolve a que aplicou no próximo heartbeat.
+    configRevision: Number(item.configRevision || 0) || 0,
   };
 }
 
@@ -1107,6 +1154,31 @@ async function handleHeartbeat(req, res) {
 
   const now = new Date().toISOString();
   const metrics = body.summary || body.metrics || {};
+
+  // ── CONFIRMAÇÃO DE APLICAÇÃO ────────────────────────────────────────────────
+  // A instalação reporta o que de fato aplicou. É isto que substitui a
+  // inferência por data: antes, `policyPending` só comparava `updatedAt` com o
+  // último heartbeat, o que prova apenas que a instalação esteve ONLINE depois
+  // da mudança — não que ela aplicou. Uma instalação antiga que ignorasse um
+  // campo desconhecido saía da lista de pendências sem ter aplicado nada.
+  const configState = body.configState && typeof body.configState === 'object' ? body.configState : null;
+  if (configState) {
+    existing.appliedConfigRevision = Number(configState.appliedRevision || 0) || 0;
+    existing.configApplyStatus = String(configState.applyStatus || 'UNKNOWN');
+    existing.configApplyError = configState.applyError ? String(configState.applyError).slice(0, 500) : null;
+    existing.configApplyAt = now;
+    // O que ESTA versão da instalação entende. Sem isto, a Central marcaria
+    // como "pendente para sempre" uma configuração que a instalação sequer
+    // conhece — e o operador ficaria tentando reaplicar algo impossível.
+    existing.supportedConfigKeys = Array.isArray(configState.supports)
+      ? configState.supports.map((k) => String(k)).slice(0, 50)
+      : null;
+  } else {
+    // Instalação ANTIGA (não reporta estado): registramos isso explicitamente
+    // em vez de fingir que aplicou.
+    existing.configApplyStatus = 'UNSUPPORTED';
+    existing.supportedConfigKeys = null;
+  }
   const alerts = Array.isArray(metrics.alerts) ? metrics.alerts : Array.isArray(body.alerts) ? body.alerts : [];
   const memoryUsagePercent = body.server?.totalMemoryBytes
     ? Math.round(((Number(body.server.totalMemoryBytes) - Number(body.server.freeMemoryBytes || 0)) / Number(body.server.totalMemoryBytes)) * 100)
@@ -1702,6 +1774,7 @@ async function handlePatchAiPolicy(req, res, db, actor, installationId) {
   const next = normalizeAiPolicy({ ...previous, ...payload });
   item.aiPolicy = next;
   item.updatedAt = new Date().toISOString();
+  bumpConfigRevision(item);
   addAuditEvent(db, req, {
     type: 'installation.ai_policy_changed',
     actor: actor.email,
@@ -1712,6 +1785,132 @@ async function handlePatchAiPolicy(req, res, db, actor, installationId) {
   });
   await saveDb(db);
   return json(req, res, 200, publicInstallation(item));
+}
+
+/**
+ * Configura o storage em nuvem DESTA instalação.
+ *
+ * O segredo nunca volta para o navegador: se o corpo vier sem
+ * `secretAccessKey`, mantemos o que já estava salvo (a tela mostra apenas
+ * "credencial salva"). Isso permite ajustar bucket/janela sem recolar a chave.
+ *
+ * A auditoria registra a mudança SEM a credencial — quem lê a trilha precisa
+ * saber que mudou e para onde aponta, não a chave do cliente.
+ */
+/**
+ * Marca que a configuração DESEJADA mudou.
+ *
+ * A revisão é um contador imutável por instalação. É ela que permite a Central
+ * afirmar "a instalação aplicou a revisão 42" em vez de inferir por data —
+ * inferência que falha justamente no caso perigoso: uma instalação antiga que
+ * recebe um campo que não entende, ignora, manda outro heartbeat e some da
+ * lista de pendências sem nunca ter aplicado nada.
+ */
+function bumpConfigRevision(item) {
+  const atual = Number(item.configRevision || 0) || 0;
+  item.configRevision = atual + 1;
+  item.configRevisionAt = new Date().toISOString();
+  return item.configRevision;
+}
+
+async function handlePatchCloudStorage(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+  const body = await readBody(req);
+  const payload = body && typeof body === 'object' ? body.cloudStorage : null;
+
+  const previous = normalizeCloudStorage(item.cloudStorage);
+  let existingSecret = '';
+  try {
+    existingSecret = decryptStorageSecret(previous.secretAccessKeyEncrypted);
+  } catch {
+    existingSecret = '';
+  }
+
+  let validation;
+  try {
+    validation = validateCloudStorage({ ...previous, ...payload }, { existingSecret });
+  } catch (error) {
+    // CENTRAL_STORAGE_SECRET ausente/fraco: a Central não pode guardar
+    // credencial de cliente sem chave decente, e falhar alto é melhor que
+    // salvar mal protegido.
+    return json(req, res, 500, { error: 'storage_secret_unavailable', message: String(error.message || error) });
+  }
+  if (!validation.ok) {
+    return json(req, res, 400, { error: 'invalid_cloud_storage', details: validation.errors });
+  }
+
+  item.cloudStorage = validation.value;
+  item.updatedAt = new Date().toISOString();
+  bumpConfigRevision(item);
+  addAuditEvent(db, req, {
+    type: 'installation.cloud_storage_changed',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    from: describeCloudStorage(previous),
+    to: describeCloudStorage(validation.value),
+  });
+  await saveDb(db);
+  return json(req, res, 200, { cloudStorage: describeCloudStorage(validation.value) });
+}
+
+/**
+ * Testa a credencial CONTRA O BUCKET, a partir da Central.
+ *
+ * Testar aqui (e não só na instalação) é deliberado: o operador está no painel
+ * configurando, e descobrir que a chave está errada só quando a instalação
+ * tentar subir a primeira gravação é tarde demais — já se perdeu vídeo.
+ *
+ * O teste faz LIST **e** PUT+DELETE: credencial somente-leitura passaria num
+ * teste de listagem e falharia na primeira gravação.
+ */
+async function handleTestCloudStorage(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const config = normalizeCloudStorage(item.cloudStorage);
+  let secret = '';
+  try {
+    secret = decryptStorageSecret(config.secretAccessKeyEncrypted);
+  } catch {
+    secret = '';
+  }
+  if (!config.endpoint || !config.bucket || !config.accessKeyId || !secret) {
+    return json(req, res, 400, { error: 'cloud_storage_incomplete' });
+  }
+
+  const started = Date.now();
+  const result = await testS3Access({
+    endpoint: config.endpoint,
+    region: config.region,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: secret,
+    forcePathStyle: config.forcePathStyle,
+  });
+
+  item.cloudStorage = {
+    ...config,
+    lastTestAt: new Date().toISOString(),
+    lastTestOk: result.ok,
+  };
+  addAuditEvent(db, req, {
+    type: 'installation.cloud_storage_tested',
+    actor: actor.email,
+    result: result.ok ? 'accepted' : 'rejected',
+    installationId,
+    detail: result.ok ? 'ok' : result.error,
+  });
+  await saveDb(db);
+
+  return json(req, res, result.ok ? 200 : 400, {
+    ok: result.ok,
+    error: result.ok ? null : result.error,
+    canWrite: result.canWrite ?? false,
+    elapsedMs: Date.now() - started,
+  });
 }
 
 async function handleGetSchedulerPlan(req, res, db, installationId) {
@@ -2282,6 +2481,14 @@ async function route(req, res) {
       }
 
       // ── Nós de computação por instalação (item 3.2) ────────────────────────
+      const cloudStorageMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage$/);
+      if (req.method === 'PATCH' && cloudStorageMatch) {
+        return handlePatchCloudStorage(req, res, db, actor, decodeURIComponent(cloudStorageMatch[1]));
+      }
+      const cloudTestMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/test$/);
+      if (req.method === 'POST' && cloudTestMatch) {
+        return handleTestCloudStorage(req, res, db, actor, decodeURIComponent(cloudTestMatch[1]));
+      }
       const aiPolicyMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/ai-policy$/);
       if (req.method === 'PATCH' && aiPolicyMatch) {
         return handlePatchAiPolicy(req, res, db, actor, decodeURIComponent(aiPolicyMatch[1]));
