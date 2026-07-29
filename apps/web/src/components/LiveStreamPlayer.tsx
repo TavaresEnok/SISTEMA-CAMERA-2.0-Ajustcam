@@ -1864,6 +1864,14 @@ export function LiveStreamPlayer({
       </div>
 
       {aiOverlayEnabled && detections.map((detection) => {
+        // MOVIMENTO NUNCA desenha caixa. O MOG2 existe para ARMAR a gravação,
+        // não para virar overlay: a "confiança" dele é a área alterada
+        // (satura em 100% com qualquer mudança grande — luz, IR, pessoa
+        // perto), então a caixa "motion 100%" cobria a tela e parecia uma IA
+        // avançada alucinando. Pedido explícito do dono: detector segue
+        // funcionando, quadrado não aparece em câmera nenhuma. Caixas de
+        // OBJETO/FACE (quando habilitadas) continuam passando por aqui.
+        if (detection.label === 'motion' || detection.type.startsWith('MOTION')) return null;
         const [x1, y1, x2, y2] = detection.bbox;
         const fallbackVideoWidth = videoRef.current?.videoWidth || 320;
         const fallbackVideoHeight = videoRef.current?.videoHeight || 180;

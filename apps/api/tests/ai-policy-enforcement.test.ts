@@ -107,7 +107,7 @@ test('sync: aiMotion é feature comercial reconhecida (senão o default seria ne
 
 import { AiManagerService } from '../src/ai/ai-manager.service';
 
-function managerFake(opts: { mode?: string; allowed: Record<string, boolean> }) {
+function managerFake(opts: { mode?: string; allowed: Record<string, boolean>; camera?: Record<string, unknown> }) {
   const calls: string[] = [];
   const mgr: any = Object.create(AiManagerService.prototype);
   mgr.logger = { warn() {}, log() {}, debug() {}, error() {} };
@@ -116,7 +116,11 @@ function managerFake(opts: { mode?: string; allowed: Record<string, boolean> }) 
   };
   mgr.getSettings = async () => ({ enabled: true, mode: opts.mode ?? 'motion' });
   mgr.camerasService = {
-    getCameraOrThrow: async () => ({ id: 'cam-1', name: 'Portaria', aiEnabled: true, motionTrigger: 'SYSTEM' }),
+    getCameraOrThrow: async () => ({
+      id: 'cam-1', name: 'Portaria', aiEnabled: true, motionTrigger: 'SYSTEM',
+      recordingMode: 'motion',
+      ...(opts.camera ?? {}),
+    }),
   };
   mgr.buildAiSource = async () => ({ rtspUrl: 'rtsp://x/grid', info: {} });
   mgr.aiService = {
@@ -240,4 +244,62 @@ test('watchdog: processador de câmera ARMADA nunca é tocado pela reconciliaç�
   await mgr.recoverDegradedProcessors();
   await mgr.recoverDegradedProcessors();
   assert.deepEqual(stopped, [], 'a reconciliação reversa só existe para órfãos');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ABRIR O LIVE não semeia processador em câmera desarmada.
+//
+// Os três endpoints de live-view do controller auto-iniciam a IA quando não há
+// processador. O processador criado assim é PERSISTENTE: fechar o live só
+// derruba a lease, e restart da API não o toca (mora no ai-service). Era a
+// FÁBRICA dos órfãos: cada tile aberto em câmera com o toggle ligado semeava
+// um MOG2 eterno — 9 processadores com uma câmera armada, live degradado, e a
+// reconciliação enxugando gelo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('liveAutoStart: câmera DESARMADA não ganha processador ao abrir o live', async () => {
+  const { mgr, calls } = managerFake({
+    mode: 'motion',
+    allowed: { aiMotion: true, aiAdvanced: false },
+    camera: { recordingMode: 'manual' },
+  });
+  const result = await mgr.startCamera('cam-1', { liveAutoStart: true });
+  assert.deepEqual(calls, [], 'abrir tile não pode semear MOG2 persistente');
+  assert.equal((result as any).status, 'disabled');
+  assert.equal((result as any).reason, 'not_armed');
+});
+
+test('liveAutoStart: câmera ARMADA continua ganhando processador pelo live', async () => {
+  const { mgr, calls } = managerFake({
+    mode: 'motion',
+    allowed: { aiMotion: true, aiAdvanced: false },
+    camera: { recordingMode: 'motion' },
+  });
+  const result = await mgr.startCamera('cam-1', { liveAutoStart: true });
+  assert.deepEqual(calls, ['start:cam-1:motion'], 'a armada é exatamente quem PRECISA da análise');
+  assert.notEqual((result as any)?.status, 'disabled');
+});
+
+test('liveAutoStart: modo AVANÇADO (objeto/face licenciado) segue permitido pelo live', async () => {
+  // No modo avançado o overlay é real (caixa de objeto/face); o gate é só do
+  // modo movimento, onde IA de câmera desarmada não produz nada visível.
+  const { mgr, calls } = managerFake({
+    mode: 'object',
+    allowed: { aiMotion: true, aiAdvanced: true },
+    camera: { recordingMode: 'manual' },
+  });
+  await mgr.startCamera('cam-1', { liveAutoStart: true });
+  assert.deepEqual(calls, ['start:cam-1:object']);
+});
+
+test('start SEM origem live (watchdog/boot) não é afetado pelo gate', async () => {
+  const { mgr, calls } = managerFake({
+    mode: 'motion',
+    allowed: { aiMotion: true, aiAdvanced: false },
+    camera: { recordingMode: 'manual' },
+  });
+  // O watchdog/boot decide por conta própria QUEM ligar; o gate é específico
+  // do caminho "espectador abriu um tile".
+  await mgr.startCamera('cam-1');
+  assert.deepEqual(calls, ['start:cam-1:motion']);
 });

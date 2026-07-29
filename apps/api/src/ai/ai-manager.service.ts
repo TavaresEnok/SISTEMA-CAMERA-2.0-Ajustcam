@@ -377,7 +377,7 @@ export class AiManagerService implements OnModuleInit {
     return this.syncAll();
   }
 
-  async startCamera(cameraId: string, options?: { allowCameraTrigger?: boolean }) {
+  async startCamera(cameraId: string, options?: { allowCameraTrigger?: boolean; liveAutoStart?: boolean }) {
     const settings = await this.getSettings();
     if (!settings.enabled) {
       return { status: 'disabled', cameraId };
@@ -407,6 +407,17 @@ export class AiManagerService implements OnModuleInit {
     const cam = await this.camerasService.getCameraOrThrow(cameraId);
     if (cam.aiEnabled === false || !isCameraAllowedByAiEnv(cam)) {
       return { status: 'camera_disabled', cameraId };
+    }
+    // ABRIR O LIVE não pode criar processador PERSISTENTE em câmera que não
+    // grava por movimento. O processador sobrevive ao fechar do live (só a
+    // lease morre) e ao restart da API (mora no ai-service) — foi exatamente
+    // assim que produção acumulou 9 processadores com UMA câmera armada:
+    // cada tile aberto semeava um MOG2 eterno. No modo movimento, IA de
+    // câmera desarmada não arma gravação nenhuma e não desenha nada (o
+    // overlay de movimento foi removido de vez): é só custo. Objeto/face
+    // (modo avançado) seguem podendo nascer do live — lá o overlay é real.
+    if (options?.liveAutoStart && settings.mode === 'motion' && cam.recordingMode !== 'motion') {
+      return { status: 'disabled', cameraId, reason: 'not_armed' };
     }
     // No modo 'motion', câmeras com detecção própria (motionTrigger='CAMERA')
     // usam o evento ONVIF (OnvifEventsService) e NÃO consomem nossa CPU.

@@ -163,7 +163,7 @@ export class AiController {
     const snapshot = await this.aiService.getLatestDetections(cameraId, resolvedMaxAgeMs, resolvedLimit);
     if (snapshot?.status === 'not_running') {
       // Tenta auto-start quando a câmera participa da IA.
-      const startResult = await this.aiManagerService.startCamera(cameraId).catch(() => ({ status: 'error' }));
+      const startResult = await this.aiManagerService.startCamera(cameraId, { liveAutoStart: true }).catch(() => ({ status: 'error' }));
       if (startResult?.status === 'disabled') {
         return { status: 'not_running', camera_id: cameraId, detections: [], reason: startResult.status };
       }
@@ -185,7 +185,7 @@ export class AiController {
     const lease = await this.aiService.startLiveViewSession(cameraId, sessionId, ttlSeconds, viewMode);
     if (lease?.status !== 'not_running') return lease;
 
-    const startResult = await this.aiManagerService.startCamera(cameraId).catch(() => ({ status: 'error' }));
+    const startResult = await this.aiManagerService.startCamera(cameraId, { liveAutoStart: true }).catch(() => ({ status: 'error' }));
     if (startResult?.status === 'disabled') {
       return { status: 'not_running', camera_id: cameraId, session_id: sessionId, reason: startResult.status };
     }
@@ -205,7 +205,7 @@ export class AiController {
     const lease = await this.aiService.heartbeatLiveViewSession(cameraId, sessionId, ttlSeconds, viewMode);
     if (lease?.status !== 'not_running') return lease;
 
-    const startResult = await this.aiManagerService.startCamera(cameraId).catch(() => ({ status: 'error' }));
+    const startResult = await this.aiManagerService.startCamera(cameraId, { liveAutoStart: true }).catch(() => ({ status: 'error' }));
     if (startResult?.status === 'disabled') {
       return { status: 'not_running', camera_id: cameraId, session_id: sessionId, reason: startResult.status };
     }
