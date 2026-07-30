@@ -959,6 +959,14 @@ export function LiveStreamPlayer({
             element.load();
           }
 
+          // Segunda barreira contra sessão órfã: se por qualquer caminho ainda
+          // houver um `pc` na ref, ele é fechado ANTES de ser substituído.
+          // Perder a referência sem fechar deixa a conexão viva no navegador e
+          // o leitor vivo no servidor — foi assim que um tile acumulou três
+          // sessões da mesma câmera.
+          if (webrtcPcRef.current) {
+            try { webrtcPcRef.current.close(); } catch { /* já encerrado */ }
+          }
           const pc = new RTCPeerConnection({
             bundlePolicy: 'max-bundle',
             rtcpMuxPolicy: 'require',
@@ -1160,10 +1168,36 @@ export function LiveStreamPlayer({
                   throw new Error(`Falha ao conectar WebRTC (${response.status}).`);
                 }
 
+                // VAZAMENTO DE SESSÃO (medido em produção): um tile chegou a ter
+                // TRÊS sessões WebRTC vivas para a MESMA câmera. Cada uma baixa e
+                // decodifica o mesmo vídeo, competindo entre si — o MediaMTX
+                // registrava "reader is too slow, discarding N frames" e o
+                // operador via fps baixo e travamento, com o SERVIDOR ocioso.
+                //
+                // A causa: a URL da sessão ia direto para uma ref COMPARTILHADA
+                // entre tentativas. Quando esta tentativa já tinha sido
+                // superada (timeout → retry criou outro `pc`), ela sobrescrevia
+                // a URL da tentativa nova e o `pc` antigo ficava sem dono: nunca
+                // fechado, sessão nunca deletada, leitor eterno no servidor.
+                //
+                // Agora a URL é LOCAL da tentativa. Só vira a oficial se esta
+                // tentativa ainda for a corrente; caso contrário ela mesma se
+                // encerra — fecha o `pc` e apaga a sessão no servidor.
                 const location = response.headers.get('location');
-                if (location) {
-                  webrtcSessionUrlRef.current = new URL(location, whepUrl).toString();
+                const sessionUrl = location ? new URL(location, whepUrl).toString() : null;
+                const superada = cancelled || webrtcPcRef.current !== pc || abortController.signal.aborted;
+                if (superada) {
+                  try { pc.close(); } catch { /* já encerrado */ }
+                  if (sessionUrl) {
+                    void fetch(sessionUrl, {
+                      method: 'DELETE',
+                      mode: 'cors',
+                      headers: { Authorization: `Bearer ${mediaAuthTokenRef.current}` },
+                    }).catch(() => undefined);
+                  }
+                  throw new Error('Inicialização WebRTC cancelada.');
                 }
+                if (sessionUrl) webrtcSessionUrlRef.current = sessionUrl;
 
                 const remoteSdp = await response.text();
                 if (cancelled || webrtcPcRef.current !== pc || abortController.signal.aborted) {
