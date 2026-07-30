@@ -147,3 +147,44 @@ test('falha ao consultar o MediaMTX nunca vira "morto" (não derruba live saudá
   });
   assert.equal(await mgr.gridPathLooksDead(CAM), false);
 });
+
+// ── 3. FAIXA DE METADADOS VISTA PELO MEDIAMTX ────────────────────────────────
+//
+// O probe contra a câmera volta SEM a faixa (medido na Cam-01), mas a sessão
+// contínua do MediaMTX a recebe e registra "unknown payload type" 30x/min. A
+// decisão de sanitizar tem de aprender com quem realmente vê.
+
+test('faixa Generic reportada pelo MediaMTX ensina a decisão a sanitizar', () => {
+  const invalidated: string[] = [];
+  const mgr = makeProxy({ invalidateMainCodecCache: (id: string) => invalidated.push(id) });
+
+  mgr.noteGenericTrack(`cam_${HASH}_grid`, true, ['H264', 'G711', 'Generic']);
+
+  assert.equal(mgr.gridHasGenericTrack.has(CAM), true, 'a câmera precisa ficar marcada');
+  assert.deepEqual(invalidated, [CAM], 'a decisão antiga precisa ser descartada para o remux subir');
+});
+
+test('sem faixa Generic nada muda (passthrough continua de graça)', () => {
+  const invalidated: string[] = [];
+  const mgr = makeProxy({ invalidateMainCodecCache: (id: string) => invalidated.push(id) });
+  mgr.noteGenericTrack(`cam_${HASH}_grid`, true, ['H264']);
+  assert.equal(mgr.gridHasGenericTrack.size, 0);
+  assert.deepEqual(invalidated, [], 'não pode invalidar cache de câmera saudável');
+});
+
+test('marcação é de mão única — não invalida cache a cada tick (senão a live pisca)', () => {
+  const invalidated: string[] = [];
+  const mgr = makeProxy({ invalidateMainCodecCache: (id: string) => invalidated.push(id) });
+  for (let i = 0; i < 5; i += 1) {
+    mgr.noteGenericTrack(`cam_${HASH}_grid`, true, ['H264', 'Generic']);
+  }
+  assert.equal(invalidated.length, 1, `esperava 1 invalidação, houve ${invalidated.length}`);
+});
+
+test('path não pronto ou fora da grade não ensina nada', () => {
+  const mgr = makeProxy({ invalidateMainCodecCache: () => {} });
+  mgr.noteGenericTrack(`cam_${HASH}_grid`, false, ['H264', 'Generic']);   // não pronto
+  mgr.noteGenericTrack(`cam_${HASH}_orig`, true, ['H265', 'Generic']);    // não é grade
+  mgr.noteGenericTrack('mtx-scratch', true, ['Generic']);                 // nem é câmera
+  assert.equal(mgr.gridHasGenericTrack.size, 0);
+});

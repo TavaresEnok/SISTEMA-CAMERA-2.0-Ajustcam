@@ -73,6 +73,9 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // quebrado (câmera que aceita sessão e não envia mídia) vire tempestade de
   // re-probe a cada request da grade.
   private readonly gridHealAt = new Map<string, number>();
+  // Câmeras cuja GRADE comprovadamente emite faixa de metadados (visto pelo
+  // MediaMTX, não pelo ffprobe). Alimenta a decisão de sanitização.
+  private readonly gridHasGenericTrack = new Set<string>();
   // TETO GLOBAL de `ffprobe` simultâneos (ver probeStreamVideoMetadata). Sem ele,
   // uma grade de 21 tiles com cache frio dispara até 105 sondas contra o mesmo
   // DVR e derruba a fonte que estava tentando descobrir. Ajustável por env para
@@ -372,6 +375,17 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       const readers = Array.isArray(item?.readers) ? item.readers.length : Number(item?.readers ?? 0);
       const bytes = Number(item?.bytesReceived ?? 0);
 
+      // Faixa de metadados: quem enxerga é o MediaMTX, não o ffprobe.
+      //
+      // A sanitização decidia pelo `hasDataTrack` do probe contra a câmera — e
+      // MEDIDO em produção: na Cam-01 esse probe volta SEM a faixa, enquanto o
+      // MediaMTX, na sessão contínua, reporta `Generic` e registra "unknown
+      // payload type" 30 vezes por minuto. A decisão ficava presa em passthrough
+      // e o log seguia inundado (afogando erro real numa investigação).
+      // O laço do watchdog já lê a lista inteira de paths a cada tick: aproveita
+      // o dado autoritativo daqui e ensina a decisão para o próximo ensure.
+      this.noteGenericTrack(name, ready, Array.isArray(item?.tracks) ? item.tracks : []);
+
       // Sem espectador → nada a vigiar (cold close é normal).
       if (readers <= 0) {
         this.watchdogState.delete(name);
@@ -477,6 +491,29 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   /** Path provado saudável (ou inexistente): zera janela E escalonamento. */
   private clearRecoveryBrake(pathName: string): void {
     this.recoveryBrake.delete(pathName);
+  }
+
+  /**
+   * Registra que a GRADE desta câmera carrega faixa de metadados.
+   *
+   * Só marca a partir do que o MediaMTX de fato recebeu (path pronto), nunca de
+   * palpite. É de mão única: uma vez sabido que a câmera emite a faixa, a
+   * decisão seguinte já nasce sanitizando — sem ficar alternando entre
+   * passthrough e remux a cada tick, que faria a live piscar.
+   */
+  private noteGenericTrack(pathName: string, ready: boolean, tracks: unknown[]) {
+    if (!ready || !pathName.endsWith('_grid')) return;
+    const parsed = this.cameraIdFromPathName(pathName);
+    if (!parsed) return;
+    const hasGeneric = tracks.some((t) => /generic/i.test(String(t)));
+    if (!hasGeneric || this.gridHasGenericTrack.has(parsed.cameraId)) return;
+    this.gridHasGenericTrack.add(parsed.cameraId);
+    // Descoberta nova: descarta a decisão antiga para que o próximo ensure já
+    // suba o remux que descarta a faixa.
+    this.invalidateMainCodecCache(parsed.cameraId);
+    this.logger.log(
+      `Grade de ${parsed.cameraId}: faixa de metadados detectada pelo MediaMTX — passará a ser descartada no remux.`,
+    );
   }
 
   private async recoverStuckPaths(stuck: Array<{ name: string; ready: boolean; readers: number }>) {
@@ -1173,7 +1210,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       // ruído afoga erro de verdade quando se investiga um incidente.
       // O sinal confiável é a faixa detectada, não o formato da URL: quem tem
       // faixa de dados precisa do remux que a descarta, venha ela de onde vier.
-      const requiresSanitization = chosen.hasDataTrack;
+      const requiresSanitization = chosen.hasDataTrack || this.gridHasGenericTrack.has(cameraId);
       this.gridSourceCache.set(cacheKey, {
         url: chosen.url,
         codec: chosen.codec,
