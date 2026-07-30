@@ -452,9 +452,19 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   ) {
     const sourcePathName = this.privateSourcePathName(pathName);
     const encoded = encodeURIComponent(sourcePathName);
+    // A REGRESSÃO DO "PRIMEIRO ACESSO LENTO" morava aqui: `sourceOnDemand: true`
+    // CRAVADO, ignorando MEDIAMTX_SOURCE_ON_DEMAND — que nesta instalação é
+    // `false` de propósito. Antes do Source Gateway (24/07) a fonte da grade
+    // ficava SEMPRE conectada à câmera: abrir um tile era só negociar o WebRTC
+    // (~2s). Com o on-demand cravado, cada tile frio passou a pagar a conexão
+    // WAN inteira (até 6s) + probe + keyframe — os ~30s reclamados em produção.
+    // O sub consome ~550 kbps/câmera; mantê-lo quente é a troca deliberada
+    // banda→latência que o operador já tinha feito ao setar a env. Quem quer
+    // economizar banda seta MEDIAMTX_SOURCE_ON_DEMAND=true e aceita o frio.
+    const sourceOnDemand = this.configService.get<boolean>('mediaMtxSourceOnDemand') ?? false;
     const desired = {
       source: sourceUrl,
-      sourceOnDemand: true,
+      sourceOnDemand,
       sourceOnDemandStartTimeout,
       sourceOnDemandCloseAfter,
       rtspTransport,
@@ -463,7 +473,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       const current: any = await this.getPath(sourcePathName);
       if (
         current.source === desired.source
-        && current.sourceOnDemand === true
+        && current.sourceOnDemand === desired.sourceOnDemand
         && current.rtspTransport === desired.rtspTransport
         && this.sameDuration(
           current.sourceOnDemandStartTimeout,
