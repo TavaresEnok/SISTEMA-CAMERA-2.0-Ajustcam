@@ -189,3 +189,20 @@ test('grade: câmera com sub 1 já em H.264 continua custando UM probe (escada p
   await mgr.chooseGridSource('cam-h264', gridCamera(), 'senha', 'tcp');
   assert.equal(probes, 1, 'sub 1 H.264 encontrado → nenhum degrau extra é sondado');
 });
+
+test('grade: /media/videoN (streams reais das OEM) está na escada de busca', async () => {
+  // Descoberto em produção via ONVIF GetProfiles: a câmera declara
+  // "perfil 2: H264 640x360 -> /media/video2", endpoint que NENHUM degrau
+  // antigo sondava. O operador tinha configurado exatamente esse stream para
+  // o live e a busca não o encontrava — transcode eterno com o H.264 do lado.
+  const mgr = makeProxy();
+  mgr.isEnabled = () => true;
+  mgr.gridPathLooksDead = async () => false;
+  mgr.probeStreamVideoMetadata = async (url: string) => {
+    if (url.includes('/media/video2')) return { codec: 'h264', width: 640, height: 360, hasDataTrack: false };
+    return { codec: 'h265', width: 640, height: 360, hasDataTrack: false };
+  };
+  const r = await mgr.chooseGridSource('cam-media', gridCamera(), 'senha', 'tcp');
+  assert.match(r.sourceUrl, /\/media\/video2/, 'o H.264 real da câmera tem que ser encontrado');
+  assert.equal(r.isHevc, false);
+});

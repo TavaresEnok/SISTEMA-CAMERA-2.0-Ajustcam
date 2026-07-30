@@ -1021,6 +1021,14 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // H.264, então câmera bem comportada continua custando UM probe.
     if (!has264()) {
       const sub2Candidates = [
+        // COMPROVADO NESTA FROTA via ONVIF GetProfiles: câmeras OEM que servem
+        // /Streaming/Channels/101 declaram os streams REAIS em /media/videoN
+        // (perfil 2 = /media/video2, 640x360 — o "stream 2 em H.264 para o
+        // live" que o operador configurou à mão). A busca antiga nunca sondava
+        // este endpoint e condenava a família inteira a transcode, com o
+        // stream certo do lado. Os caminhos subtype=2/N03 cobrem Dahua e
+        // Hikvision de 3 streams.
+        `/media/video${subProfile.channel + 1}`,
         `/cam/realmonitor?channel=${subProfile.channel}&subtype=2`,
         `/Streaming/Channels/${subProfile.channel}03`,
       ];
