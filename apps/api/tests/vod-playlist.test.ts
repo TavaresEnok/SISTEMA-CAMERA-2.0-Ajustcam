@@ -378,13 +378,17 @@ test('vod service: playlist aponta para o endpoint de arquivo EXISTENTE com toke
   });
 
   assert.equal(result.segmentCount, 2);
-  assert.ok(result.playlist.includes('/recordings/rec-1/play.mp4?token=jwt-rec-1'));
-  assert.ok(result.playlist.includes('/recordings/rec-2/play.mp4?token=jwt-rec-2'));
+  // URL RELATIVA: a playlist é servida sob um prefixo que a API não enxerga
+  // (`/api/` reescrito pelo nginx). Absoluta (`/recordings/...`) mandava VLC e
+  // ffmpeg para a raiz do domínio — ou seja, para a SPA em vez da API.
+  assert.ok(result.playlist.includes('rec-1/play.mp4?token=jwt-rec-1'));
+  assert.ok(result.playlist.includes('rec-2/play.mp4?token=jwt-rec-2'));
+  assert.ok(!/^\/recordings\//m.test(result.playlist), 'nenhuma URL de segmento pode ser absoluta');
   assert.deepEqual(fx.tokenCalls, [
     { userId: 'u-viewer', recordingId: 'rec-1' },
     { userId: 'u-viewer', recordingId: 'rec-2' },
   ], 'usa createPlaybackToken (mecanismo atual), um token por segmento do dono da sessão');
-  assert.equal(result.segments[0].playUrl, '/recordings/rec-1/play.mp4?token=jwt-rec-1');
+  assert.equal(result.segments[0].playUrl, 'rec-1/play.mp4?token=jwt-rec-1');
 });
 
 test('vod service: URL do segmento termina em .mp4 ANTES da query', async (t) => {

@@ -320,18 +320,36 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         const extension = extname(absolutePath);
         const thumbnailBase = extension ? absolutePath.slice(0, -extension.length) : absolutePath;
         const thumbnailPath = `${thumbnailBase}.thumb.jpg`;
-        const fileExists = existsSync(absolutePath);
+        const localExists = existsSync(absolutePath);
+        // GRAVAÇÃO QUE JÁ SUBIU PARA A NUVEM CONTINUA EXISTINDO.
+        //
+        // O offload apaga a cópia local depois de CONFIRMAR o upload — é o
+        // objetivo do produto de nuvem. Mas a listagem media existência só por
+        // `existsSync`, então toda gravação migrada aparecia como arquivo
+        // perdido e a tela se recusava a reproduzi-la. O endpoint individual
+        // sempre soube buscar do bucket; a interface nunca chegava a chamá-lo.
+        // Efeito prático: ligar a nuvem fazia o acervo "sumir" do playback.
+        const cloudAvailable = Boolean(item.cloudKey && item.cloudUploadedAt);
+        const fileExists = localExists || cloudAvailable;
         const thumbnailExists = existsSync(thumbnailPath) && statSync(thumbnailPath).size > 0;
-        const actualSizeBytes = fileExists ? statSync(absolutePath).size : 0;
+        const actualSizeBytes = localExists ? statSync(absolutePath).size : 0;
         // Uma miniatura bem-sucedida também é uma prova barata de que o MP4 é
         // decodificável. Segmentos interrompidos podem ter vários MB, mas não
         // possuem o átomo `moov`; antes eram oferecidos como reproduzíveis e o
         // app acabava numa tela cinza/erro. O backfill continua tentando gerar
         // a miniatura; quando conseguir, o item passa a utilizável sozinho.
-        const fileUsable = fileExists && actualSizeBytes > 1024 && thumbnailExists;
+        // Na nuvem, as provas locais de integridade (tamanho do arquivo e
+        // miniatura) não se aplicam: o arquivo não está aqui. O upload só é
+        // marcado no banco APÓS confirmação por HEAD com conferência de
+        // tamanho, então `cloudUploadedAt` já é a prova de integridade
+        // equivalente — exigir miniatura aqui reprovaria o acervo inteiro.
+        const fileUsable = cloudAvailable
+          || (localExists && actualSizeBytes > 1024 && thumbnailExists);
         return {
           fileExists,
           fileUsable,
+          cloudAvailable,
+          localExists,
           thumbnailExists,
           actualSizeBytes,
           compatibleCached: existsSync(join(recordingsRoot, '.playback-compatible', item.cameraId, `${item.id}.mp4`)),
@@ -858,8 +876,16 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const usedNames = new Set<string>();
     for (const id of uniqueIds) {
       const recording = await this.ensureRecordingExists(id);
-      const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
-      if (!existsSync(filePath) || statSync(filePath).size === 0) continue;
+      let filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
+      if (!existsSync(filePath) || statSync(filePath).size === 0) {
+        // Gravação já offloadada: baixa do bucket para o cache antes de
+        // empacotar. Sem isto o ZIP pulava o item EM SILÊNCIO — o operador
+        // pedia 20 gravações, recebia 3 e não tinha como saber por quê. O
+        // download individual já tratava a nuvem; o lote não.
+        const materializado = await this.materializeFromCloud(recording).catch(() => null);
+        if (!materializado) continue;
+        filePath = materializado;
+      }
       const cameraLabel = (recording.camera?.name || 'camera')
         .replace(/[^\p{L}\p{N}_-]+/gu, '-')
         .replace(/^-+|-+$/g, '') || 'camera';
@@ -1942,8 +1968,15 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     // `.mp4` ANTES da query não é enfeite: player baseado em ffmpeg >= 7 recusa
     // segmento de HLS sem extensão de mídia na URL (allowed_segment_extensions).
     // O alias `/recordings/:id/play.mp4` cai no MESMO handler de `/play`.
+    // URL RELATIVA, não absoluta. A playlist é servida em
+    // `<prefixo>/recordings/vod.m3u8`, e externamente esse prefixo é `/api`
+    // (o nginx reescreve antes de chegar aqui, então a API não o enxerga).
+    // Com `/recordings/...` absoluto, VLC e ffmpeg pediam à raiz do domínio e
+    // caíam na SPA em vez da API — a playlist só funcionava por acidente
+    // dentro do próprio player web. Relativo resolve contra a URL da playlist
+    // e fica correto nos dois casos, sem a API precisar adivinhar o prefixo.
     const buildSegmentUrl = (segment: { recordingId: string }) =>
-      `/recordings/${segment.recordingId}/play.mp4?token=${encodeURIComponent(tokenByRecording.get(segment.recordingId) ?? '')}`;
+      `${segment.recordingId}/play.mp4?token=${encodeURIComponent(tokenByRecording.get(segment.recordingId) ?? '')}`;
 
     return {
       cameraId,

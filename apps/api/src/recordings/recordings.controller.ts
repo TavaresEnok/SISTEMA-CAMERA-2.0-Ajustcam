@@ -436,7 +436,18 @@ export class RecordingsController {
       httpOnly: true,
       sameSite: 'lax',
       secure,
-      path: '/recordings',
+      // O PATH TEM QUE CASAR COM O QUE O NAVEGADOR VÊ, não com a rota interna.
+      //
+      // Externamente o nginx serve a API sob `/api/` e reescreve para `/` antes
+      // de chegar aqui — então o browser enxerga `/api/recordings/...` e um
+      // cookie com `Path=/recordings` NUNCA era enviado. O cookie HttpOnly
+      // (que existe justamente para o token não passar por JavaScript nem por
+      // URL) ficava inerte, e o playback só funcionava pelo `?token=` da query
+      // string — que aparece em log de acesso, histórico e Referer.
+      //
+      // `/` é o correto para o caso comum (API atrás de prefixo); instalações
+      // que sirvam a API na raiz podem estreitar com PLAYBACK_COOKIE_PATH.
+      path: process.env.PLAYBACK_COOKIE_PATH || '/',
       maxAge: maxAgeMs,
     });
     await this.auditService.log(user.id, 'playback.token.create', 'Recording', recordingId, null, req);

@@ -311,6 +311,9 @@ if (!configurado) {
     // Object.create não roda inicializadores de campo: o logger real é criado
     // na construção da classe, então precisa ser fornecido aqui.
     svc.logger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    // `list()` fala com o banco e lê a raiz de gravações do ambiente.
+    svc.prisma = prisma;
+    process.env.RECORDINGS_ROOT = raiz;
     svc.cloudConnector = {
       getCloudStorageConfig: async () => ({
         enabled: true, mode: 'tier', provider: 'minio',
@@ -367,6 +370,35 @@ if (!configurado) {
     const { res, headers } = fakeRes();
     await svc.streamFromCloudIfAvailable(row, res, { download: true });
     assert.match(headers['content-disposition'] ?? '', /attachment; filename=/);
+  });
+
+  test('LISTAGEM: gravação na nuvem aparece REPRODUZÍVEL (não como arquivo perdido)', async () => {
+    // O bug que fazia o produto de nuvem se anular: o offload apaga o local
+    // depois de confirmar o upload — que é o objetivo — mas a listagem media
+    // existência só por existsSync. Toda gravação migrada virava "arquivo
+    // perdido" e a tela recusava reproduzir, mesmo com o endpoint individual
+    // sabendo buscar do bucket. Ligar a nuvem fazia o acervo sumir do playback.
+    await limpar();
+    const arquivo = await semear(`${TAG}-lista`, { idadeHoras: 72, conteudo: Buffer.from('VIDEO-'.repeat(2000)) });
+
+    const off = buildService(1);
+    await off.runOnce();
+    await prisma.recording.update({
+      where: { id: `${TAG}-lista` },
+      data: { cloudUploadedAt: new Date(Date.now() - 48 * 3600_000) },
+    });
+    await off.runOnce();
+    assert.equal(existsSync(arquivo), false, 'pré-condição: só existe na nuvem');
+
+    const svc = buildRecordingsService();
+    const lista: any = await svc.list({ cameraId: `${TAG}-cam`, limit: 50 } as any);
+    const item = lista.items.find((i: any) => i.id === `${TAG}-lista`);
+
+    assert.ok(item, 'a gravação tem que continuar listada');
+    assert.equal(item.fileExists, true, 'existe — na nuvem');
+    assert.equal(item.fileUsable, true, 'e é reproduzível (a tela gateia por aqui)');
+    assert.equal(item.cloudAvailable, true);
+    assert.equal(item.localExists, false, 'sem mentir sobre o disco: o local saiu mesmo');
   });
 
   test('gravação sem cópia na nuvem devolve false (mantém o 404 de sempre)', async () => {
