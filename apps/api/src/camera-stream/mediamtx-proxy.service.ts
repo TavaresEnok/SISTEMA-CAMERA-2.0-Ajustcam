@@ -481,7 +481,15 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   }
 
   private async recoverStuckPath(pathName: string, ready: boolean, readers: number) {
-    const parsed = this.cameraIdFromPathName(pathName);
+    // Os paths PRIVADOS (`..._source`) são justamente os que seguram a conexão
+    // RTSP com a câmera; o público que depende deles seca junto quando um trava.
+    // O scan já os coletava (filtra só por `cam_`), mas o parser só conhece o
+    // nome público e devolvia null — então o watchdog DESISTIA em silêncio de
+    // recuperar exatamente o path que importa. Tira o sufixo para descobrir a
+    // câmera: o DELETE abaixo continua removendo o path travado de verdade
+    // (`pathName`), e recuperar o público recria o privado (ensurePrivateSourcePath
+    // cria quando ausente, e invalidateMainCodecCache já limpou o pathEnsureCache).
+    const parsed = this.cameraIdFromPathName(pathName.replace(/_source$/, ''));
     if (!parsed) return;
     // Guard POR-PATH: evita recuperar o MESMO path duas vezes em paralelo (entre
     // ticks). Paths DIFERENTES recuperam concorrentemente (ver recoverStuckPaths).
