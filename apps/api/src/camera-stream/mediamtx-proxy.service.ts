@@ -76,6 +76,18 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // Câmeras cuja GRADE comprovadamente emite faixa de metadados (visto pelo
   // MediaMTX, não pelo ffprobe). Alimenta a decisão de sanitização.
   private readonly gridHasGenericTrack = new Set<string>();
+  // AUTOCURA DA GRADE: DESLIGADA por padrão (restaura o comportamento de 21/07).
+  //
+  // Ela existe por um motivo real: Cam-03/09 aceitam o RTSP e nunca enviam mídia,
+  // e sem ela o tile fica em 0 fps até o cache expirar (30 min). Mas o preço é
+  // mexer na fonte COM O OPERADOR ASSISTINDO: se a re-sondagem decidir uma URL
+  // diferente da atual, o path sofre delete+add e TODO leitor ativo cai na hora
+  // — piscada em tile que estava perfeito. O sistema estável de 21/07 escolhia
+  // o endpoint uma vez e não mexia mais.
+  // Protege 2 câmeras e arrisca as outras 19: enquanto a oscilação não estiver
+  // explicada, o padrão é não mexer. MEDIAMTX_GRID_AUTOHEAL=true religa.
+  private readonly gridAutoHealEnabled =
+    String(process.env.MEDIAMTX_GRID_AUTOHEAL ?? 'false').trim().toLowerCase() === 'true';
   // Salto privado (`_source`) entre a câmera e o FFmpeg. DESLIGADO por padrão:
   // protegia a credencial no `ps aux`, mas o repasse extra custou FPS e tiles
   // pretos em produção. Ver o comentário em ensurePathForCamera.
@@ -1393,6 +1405,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   }
 
   private async gridPathLooksDead(cameraId: string): Promise<boolean> {
+    if (!this.gridAutoHealEnabled) return false;
     if (!this.isEnabled()) return false;
     try {
       const pathName = this.pathNameFromCameraId(cameraId, 'grid');

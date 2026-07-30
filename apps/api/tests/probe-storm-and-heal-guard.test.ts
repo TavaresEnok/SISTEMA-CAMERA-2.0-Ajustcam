@@ -99,7 +99,10 @@ function pathListWith(muteOthers: number, healthyOthers: number) {
 }
 
 function proxyForHeal(list: string) {
+  // Estes casos exercitam a LÓGICA da autocura, então ligam o interruptor de
+  // propósito — o padrão de produção é desligado (ver seção 4).
   return makeProxy({
+    gridAutoHealEnabled: true,
     isEnabled: () => true,
     apiRequest: async (_m: string, url: string) =>
       url.includes('/paths/list')
@@ -131,6 +134,7 @@ test('amostra pequena mantém o comportamento antigo (não inventa conclusão)',
 
 test('path pronto e sem faixa nenhuma segue sendo curado, chova ou faça sol', async () => {
   const mgr = makeProxy({
+    gridAutoHealEnabled: true,
     isEnabled: () => true,
     apiRequest: async (_m: string, url: string) =>
       url.includes('/paths/list')
@@ -142,6 +146,7 @@ test('path pronto e sem faixa nenhuma segue sendo curado, chova ou faça sol', a
 
 test('falha ao consultar o MediaMTX nunca vira "morto" (não derruba live saudável)', async () => {
   const mgr = makeProxy({
+    gridAutoHealEnabled: true,
     isEnabled: () => true,
     apiRequest: async () => { throw new Error('API fora'); },
   });
@@ -187,4 +192,28 @@ test('path não pronto ou fora da grade não ensina nada', () => {
   mgr.noteGenericTrack(`cam_${HASH}_orig`, true, ['H265', 'Generic']);    // não é grade
   mgr.noteGenericTrack('mtx-scratch', true, ['Generic']);                 // nem é câmera
   assert.equal(mgr.gridHasGenericTrack.size, 0);
+});
+
+// ── 4. INTERRUPTOR DA AUTOCURA ───────────────────────────────────────────────
+//
+// Ela protege 2 câmeras (Cam-03/09, que aceitam RTSP e não enviam mídia) e
+// arrisca as outras 19: ao re-sondar com o operador assistindo, se a decisão
+// mudar de URL o path sofre delete+add e derruba todo leitor ativo. Enquanto a
+// oscilação não estiver explicada, o padrão é NÃO MEXER (comportamento 21/07).
+
+test('desligada (padrão): nunca declara path morto, nem consulta o MediaMTX', async () => {
+  let consultas = 0;
+  const mgr = makeProxy({
+    gridAutoHealEnabled: false,
+    isEnabled: () => true,
+    apiRequest: async () => { consultas += 1; return '{}'; },
+  });
+  assert.equal(await mgr.gridPathLooksDead(CAM), false);
+  assert.equal(consultas, 0, 'desligada não pode nem gerar tráfego de consulta');
+});
+
+test('ligada por env: volta a curar câmera muda isolada', async () => {
+  const mgr = proxyForHeal(pathListWith(0, 6));
+  mgr.gridAutoHealEnabled = true;
+  assert.equal(await mgr.gridPathLooksDead(CAM), true);
 });

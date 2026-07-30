@@ -101,6 +101,9 @@ const gridCamera = () => ({
 
 test('grade: gridPathLooksDead reconhece os DOIS estados de morte e nada mais', async () => {
   const mgr = makeProxy();
+  // Exercita a LÓGICA da autocura; em produção ela nasce DESLIGADA (restaura o
+  // comportamento de 21/07, que não mexia na fonte com o operador assistindo).
+  mgr.gridAutoHealEnabled = true;
   mgr.isEnabled = () => true;
   const respostas = new Map<string, any>();
   mgr.apiRequest = async (_m: string, url: string) => {
