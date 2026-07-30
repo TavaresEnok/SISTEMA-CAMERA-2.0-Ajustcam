@@ -458,10 +458,20 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // ficava SEMPRE conectada à câmera: abrir um tile era só negociar o WebRTC
     // (~2s). Com o on-demand cravado, cada tile frio passou a pagar a conexão
     // WAN inteira (até 6s) + probe + keyframe — os ~30s reclamados em produção.
-    // O sub consome ~550 kbps/câmera; mantê-lo quente é a troca deliberada
-    // banda→latência que o operador já tinha feito ao setar a env. Quem quer
-    // economizar banda seta MEDIAMTX_SOURCE_ON_DEMAND=true e aceita o frio.
-    const sourceOnDemand = this.configService.get<boolean>('mediaMtxSourceOnDemand') ?? false;
+    //
+    // SÓ A GRADE fica quente, e isso não é detalhe: a primeira versão desta
+    // correção aplicava a env a TODAS as fontes privadas, incluindo as de
+    // tela-cheia — que puxam o STREAM PRINCIPAL (~2,1 Mbps cada). Bastou o
+    // operador ter aberto duas câmeras em tela cheia uma vez para 4,2 Mbps de
+    // mains ficarem pendurados SEM espectador, somando-se aos ~5,4 Mbps dos
+    // subs e saturando o uplink do DVR do cliente — tiles caíam para 1 fps e
+    // ficavam pretos ~1 min depois de abrir. O sub é barato (~550 kbps) e a
+    // grade é a primeira tela do operador: quente. O main é caro e tela-cheia
+    // é ocasional: sob demanda, sempre.
+    const isGridSource = pathName.endsWith('_grid');
+    const sourceOnDemand = isGridSource
+      ? (this.configService.get<boolean>('mediaMtxSourceOnDemand') ?? false)
+      : true;
     const desired = {
       source: sourceUrl,
       sourceOnDemand,
