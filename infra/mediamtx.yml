@@ -42,7 +42,6 @@ webrtcIPsFromInterfaces: no
 # 2 de cada 3 morriam em "deadline exceeded while waiting connection", e cada
 # tile sobrevivente reconectava ~12 vezes. O sintoma para quem assiste não é
 # "erro de rede", é grade em 0–3 fps e "o sistema desconecta sozinho".
-webrtcLocalTCPAddress: :8189
 
 # Tempo esperando o path entregar as faixas antes de desistir da sessão.
 #
