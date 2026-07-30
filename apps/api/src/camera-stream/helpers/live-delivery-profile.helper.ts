@@ -1,3 +1,5 @@
+import { envNumber } from '../../common/config/env-number.helper';
+
 // 'original' = "máxima qualidade": serve o stream PRINCIPAL da câmera em
 // PASSTHROUGH (sem transcode, inclusive H.265) via HLS. Custo ~0 de CPU no
 // servidor; o celular decodifica o HEVC no hardware. Latência maior que WebRTC.
@@ -17,11 +19,40 @@ export type LiveViewMode = 'selected' | 'grid' | 'original';
 // com folga em H.264. A conta do mosaico cai de ~38 Mbps para ~15 Mbps, e
 // quem abre uma câmera em tela cheia continua recebendo o perfil grande
 // (`selected`), que não passa por aqui.
-export const GRID_LIVE_MAX_WIDTH = 640;
-export const GRID_LIVE_MAX_HEIGHT = 360;
-export const GRID_LIVE_TARGET_FPS = 15;
+// FLUIDEZ x BANDA: por que o FPS voltou a 20 e a resolução NÃO.
+//
+// A redução acima foi feita quando o mosaico congelava. Só que a congestão
+// tinha outra causa, corrigida depois: cada tile abria até 4 sessões WebRTC da
+// MESMA câmera (ver "sessão WebRTC órfã"), multiplicando a descida por 4. Com
+// aquilo de pé, nenhum valor aqui seria suficiente; com aquilo resolvido, o
+// orçamento sobrou.
+//
+// O operador percebe FLUIDEZ, não pixel: num tile de ~300×200 a diferença
+// entre 640 e 1280 de largura é invisível (o navegador descarta no downscale),
+// mas 15 fps contra 20 aparece como movimento "picotado". FPS também é o
+// parâmetro mais BARATO em banda — subir 15→20 pede ~1/3 a mais de bitrate na
+// mesma resolução, enquanto dobrar a largura pediria ~4×.
+//
+// Daí a escolha: devolve os 20 fps (o que foi notado em produção), mantém
+// 640×360 (o que de fato cortou os ~38 Mbps para o navegador) e acompanha o
+// bitrate para sustentar a taxa. Mosaico de 21 tiles ≈ 19 Mbps — metade do
+// que causava o "reader is too slow", com a fluidez de volta.
+//
+// Tudo ajustável sem deploy: se o link de algum cliente não aguentar, baixe
+// GRID_LIVE_TARGET_FPS/GRID_LIVE_BITRATE_KBPS por env em vez de editar código.
+export const GRID_LIVE_MAX_WIDTH = envNumber('GRID_LIVE_MAX_WIDTH', 640, {
+  min: 320, max: 1920, integer: true,
+});
+export const GRID_LIVE_MAX_HEIGHT = envNumber('GRID_LIVE_MAX_HEIGHT', 360, {
+  min: 180, max: 1080, integer: true,
+});
+export const GRID_LIVE_TARGET_FPS = envNumber('GRID_LIVE_TARGET_FPS', 20, {
+  min: 5, max: 30, integer: true,
+});
 /** Bitrate do tile de mosaico, em kbps. Ver comentário acima. */
-export const GRID_LIVE_BITRATE_KBPS = 700;
+export const GRID_LIVE_BITRATE_KBPS = envNumber('GRID_LIVE_BITRATE_KBPS', 900, {
+  min: 200, max: 8000, integer: true,
+});
 
 export function normalizeLiveViewMode(value?: string | null): LiveViewMode {
   const v = String(value ?? '').trim().toLowerCase();
