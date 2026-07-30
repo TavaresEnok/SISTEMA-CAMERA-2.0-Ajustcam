@@ -76,6 +76,11 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // Câmeras cuja GRADE comprovadamente emite faixa de metadados (visto pelo
   // MediaMTX, não pelo ffprobe). Alimenta a decisão de sanitização.
   private readonly gridHasGenericTrack = new Set<string>();
+  // Salto privado (`_source`) entre a câmera e o FFmpeg. DESLIGADO por padrão:
+  // protegia a credencial no `ps aux`, mas o repasse extra custou FPS e tiles
+  // pretos em produção. Ver o comentário em ensurePathForCamera.
+  private readonly usePrivateSourceHop =
+    String(process.env.MEDIAMTX_PRIVATE_SOURCE_HOP ?? 'false').trim().toLowerCase() === 'true';
   // TETO GLOBAL de `ffprobe` simultâneos (ver probeStreamVideoMetadata). Sem ele,
   // uma grade de 21 tiles com cache frio dispara até 105 sondas contra o mesmo
   // DVR e derruba a fonte que estava tentando descobrir. Ajustável por env para
@@ -1654,15 +1659,31 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     };
 
     if (needsPublisher) {
-      const sourcePathName = await this.ensurePrivateSourcePath(
-        pathName,
-        sourceUrl,
-        rtspTransport,
-        sourceOnDemandStartTimeout,
-        sourceOnDemandCloseAfter,
-      );
-      const privateSourceUrl =
-        `rtsp://127.0.0.1:$RTSP_PORT/${sourcePathName}`;
+      // ENTRADA DO FFMPEG: DIRETO NA CÂMERA (padrão) ou pelo path privado.
+      //
+      // Em 28/07 o `-i` passou a apontar para um path privado do MediaMTX em vez
+      // da câmera, para tirar usuário e senha da linha de comando (elas apareciam
+      // em `ps aux`, no log e na config). A intenção era certa, mas inseriu um
+      // repasse RTSP inteiro no caminho do vídeo — e sob rede instável esse
+      // repasse republica H.265 com referências faltando, o que derruba o FPS e
+      // apaga o tile. Em produção o custo superou o ganho, e o dono decidiu pela
+      // estabilidade: o padrão volta a ser o caminho DIRETO de 21/07.
+      //
+      // O que NÃO se perdeu: a redação de credencial em log segue ativa
+      // (common/security/sensitive-text.helper). O que se perde: quem tiver
+      // shell no host volta a ver a senha em `ps aux` — mesmo modelo do Frigate,
+      // que também passa a credencial no comando e trata a exposição na saída.
+      //
+      // Reversível sem tocar em código: MEDIAMTX_PRIVATE_SOURCE_HOP=true.
+      const privateSourceUrl = this.usePrivateSourceHop
+        ? `rtsp://127.0.0.1:$RTSP_PORT/${await this.ensurePrivateSourcePath(
+          pathName,
+          sourceUrl,
+          rtspTransport,
+          sourceOnDemandStartTimeout,
+          sourceOnDemandCloseAfter,
+        )}`
+        : sourceUrl;
       // Navegadores não reproduzem H.265 via WebRTC/HLS, e WebRTC não aceita o AAC
       // vindo dessas câmeras neste pipeline. O source vira 'publisher' e runOnDemand
       // sobe um ffmpeg que publica H.264 + Opus quando áudio estiver habilitado.
