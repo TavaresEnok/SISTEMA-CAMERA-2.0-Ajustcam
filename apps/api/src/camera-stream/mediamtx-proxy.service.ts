@@ -73,6 +73,17 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // quebrado (câmera que aceita sessão e não envia mídia) vire tempestade de
   // re-probe a cada request da grade.
   private readonly gridHealAt = new Map<string, number>();
+  // TETO GLOBAL de `ffprobe` simultâneos (ver probeStreamVideoMetadata). Sem ele,
+  // uma grade de 21 tiles com cache frio dispara até 105 sondas contra o mesmo
+  // DVR e derruba a fonte que estava tentando descobrir. Ajustável por env para
+  // instalação com DVR mais robusto (ou mais frágil) que o padrão.
+  private readonly maxConcurrentProbes = envNumber('MEDIAMTX_MAX_CONCURRENT_PROBES', 4, {
+    min: 1,
+    max: 64,
+    integer: true,
+  });
+  private activeProbes = 0;
+  private readonly probeQueue: Array<() => void> = [];
   private static readonly LIVE_CODEC_TTL_MS = 30 * 60 * 1000;
   private static readonly PATH_ENSURE_TTL_MS = 30 * 1000;
 
@@ -741,7 +752,54 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     });
   }
 
+  /**
+   * Sonda com TETO GLOBAL de concorrência.
+   *
+   * A escada de descoberta do sub tem até 5 degraus SEQUENCIAIS por câmera. Numa
+   * grade de 21 tiles com cache frio isso vira até 105 `ffprobe` simultâneos
+   * contra o MESMO DVR — e o alvo é justamente o equipamento do cliente, com
+   * uplink limitado e limite de sessões RTSP. A tempestade não só demora: ela
+   * DERRUBA a fonte que estava tentando descobrir, e o resultado é a grade
+   * inteira em 0 fps.
+   *
+   * O teto não muda decisão nenhuma — apenas serializa o excedente numa fila.
+   * A descoberta continua idêntica (mesmos degraus, mesma preferência por
+   * H.264); só deixa de ser um ataque de negação de serviço contra o DVR.
+   */
   private probeStreamVideoMetadata(
+    sourceUrl: string,
+    transport: string,
+  ): Promise<{
+    codec: string | null;
+    width: number | null;
+    height: number | null;
+    hasDataTrack: boolean;
+  } | null> {
+    return this.withProbeSlot(() => this.runProbeStreamVideoMetadata(sourceUrl, transport));
+  }
+
+  /** Enfileira quando o teto de sondas simultâneas já está ocupado. */
+  private withProbeSlot<T>(task: () => Promise<T>): Promise<T> {
+    const limit = this.maxConcurrentProbes;
+    if (this.activeProbes < limit) {
+      this.activeProbes += 1;
+      return task().finally(() => this.releaseProbeSlot());
+    }
+    return new Promise<T>((resolve, reject) => {
+      this.probeQueue.push(() => {
+        this.activeProbes += 1;
+        task().then(resolve, reject).finally(() => this.releaseProbeSlot());
+      });
+    });
+  }
+
+  private releaseProbeSlot() {
+    this.activeProbes = Math.max(0, this.activeProbes - 1);
+    const next = this.probeQueue.shift();
+    if (next) next();
+  }
+
+  private runProbeStreamVideoMetadata(
     sourceUrl: string,
     transport: string,
   ): Promise<{
@@ -1107,8 +1165,15 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       // descrição RTP válida junto ao vídeo. O MediaMTX registra continuamente
       // "unknown payload type" ao receber essa faixa. Nesses casos isolados,
       // um remux FFmpeg com -map apenas de vídeo remove a faixa sem recodificar.
-      const requiresSanitization =
-        chosen.hasDataTrack && /\/Streaming\/Channels\//i.test(chosen.url);
+      // A faixa de metadados NÃO é exclusiva do endpoint /Streaming/Channels/.
+      // Medido nesta frota: o MediaMTX reporta faixa `Generic` em 15 das 19
+      // câmeras, incluindo caminhos /media/videoN e /cam/realmonitor — e cada
+      // uma delas registra "unknown payload type" continuamente (a Cam-01
+      // sozinha despejava 30 avisos por MINUTO). Além do log inflado, esse
+      // ruído afoga erro de verdade quando se investiga um incidente.
+      // O sinal confiável é a faixa detectada, não o formato da URL: quem tem
+      // faixa de dados precisa do remux que a descarta, venha ela de onde vier.
+      const requiresSanitization = chosen.hasDataTrack;
       this.gridSourceCache.set(cacheKey, {
         url: chosen.url,
         codec: chosen.codec,
@@ -1255,6 +1320,36 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
    * de consulta também devolve `false` — autocura nunca pode DERRUBAR uma
    * decisão válida por falha de leitura do estado.
    */
+  /**
+   * A frota inteira está muda? Então o problema NÃO é o endpoint de uma câmera.
+   *
+   * Distingue "escolhi o caminho errado nesta câmera" de "o link até o site
+   * caiu". Só o primeiro se resolve re-sondando; no segundo, sondar é jogar
+   * mais carga contra um DVR que já não responde. Uma única leitura da lista de
+   * paths responde a pergunta — sem custo de rede contra as câmeras.
+   */
+  private async fleetLooksOffline(exceptCameraId: string): Promise<boolean> {
+    try {
+      const text = await this.apiRequest('GET', '/v3/paths/list?itemsPerPage=1000');
+      const items = (JSON.parse(text) as { items?: Array<Record<string, any>> }).items ?? [];
+      const exceptHash = exceptCameraId.replace(/[^a-zA-Z0-9]/g, '');
+      let others = 0;
+      let mute = 0;
+      for (const item of items) {
+        const name = String(item?.name ?? '');
+        if (!name.startsWith('cam_') || name.includes(exceptHash)) continue;
+        others += 1;
+        if (item?.ready !== true && Number(item?.bytesReceived ?? 0) === 0) mute += 1;
+      }
+      // Poucos vizinhos para comparar: não há amostra que sustente a conclusão,
+      // então mantém o comportamento antigo (autocura ativa) em vez de inventar.
+      if (others < 3) return false;
+      return mute / others >= 0.6;
+    } catch {
+      return false;
+    }
+  }
+
   private async gridPathLooksDead(cameraId: string): Promise<boolean> {
     if (!this.isEnabled()) return false;
     try {
@@ -1264,8 +1359,22 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       const tracks = Array.isArray(data.tracks) ? data.tracks : [];
       const readers = Array.isArray(data.readers) ? data.readers : [];
       const bytes = Number(data.bytesReceived ?? 0);
+      // Sessão aceita, nenhuma faixa: o endpoint ESCOLHIDO está errado. Re-sondar
+      // resolve — é o caso que justificou a autocura.
       if (data.ready === true && tracks.length === 0) return true;
-      if (data.ready !== true && readers.length > 0 && bytes === 0) return true;
+      // "Não pronto, com espectador, zero byte" descreve DUAS situações opostas:
+      // o endpoint desta câmera está errado (re-sondar ajuda) OU a rede até o
+      // site caiu (re-sondar SÓ PIORA). Sem separar as duas, a queda de link
+      // virava realimentação: rede oscila → path sem mídia → cache descartado →
+      // até 5 sondas × N câmeras contra o DVR que já está sufocado → path segue
+      // morto → repete a cada 60s. Foi assim que uma instabilidade de rede
+      // virou colapso total da frota, enquanto a versão antiga (sem autocura)
+      // degradava suavemente.
+      // Critério: se VÁRIAS câmeras estão mudas ao mesmo tempo, o problema é
+      // comum a elas (link/roteador/DVR), não a escolha de endpoint de uma.
+      if (data.ready !== true && readers.length > 0 && bytes === 0) {
+        return !(await this.fleetLooksOffline(cameraId));
+      }
       return false;
     } catch {
       return false;

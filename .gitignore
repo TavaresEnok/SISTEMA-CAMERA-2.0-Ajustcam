@@ -74,3 +74,7 @@ package-lock.json
 /check_users.js
 /reset_admin.js
 /apps/api/reset_admin.js
+
+# Clone de referência do estado ESTÁVEL (21/07, DRAC.git @ 00e7f24) para
+# comparar contra a regressão de live/fps. Não é código do projeto.
+sistema antigo - drac/
