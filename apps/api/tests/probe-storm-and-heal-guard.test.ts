@@ -217,3 +217,24 @@ test('ligada por env: volta a curar câmera muda isolada', async () => {
   mgr.gridAutoHealEnabled = true;
   assert.equal(await mgr.gridPathLooksDead(CAM), true);
 });
+
+// ── 5. BUSCA PROFUNDA FORA DO CAMINHO QUENTE ─────────────────────────────────
+//
+// Medido em 30/07: as 16 grades configuradas usavam TODAS o degrau 1
+// (subtype=1). Nenhuma usava /media/videoN, subtype=2 ou N03 — e mesmo assim
+// toda câmera com sub H.265 percorria os 4 degraus extras (até 32s) para no
+// fim usar o H.265 mesmo. Custo real, benefício zero: o lugar da busca profunda
+// é o cadastro, que roda uma vez, não a abertura de cada tile.
+
+test('padrão de produção: busca profunda DESLIGADA na abertura do tile', () => {
+  const mgr = makeProxy();
+  assert.equal(
+    mgr.deepSubSearchEnabled,
+    false,
+    'ligada por padrão, toda câmera H.265 volta a pagar 4 sondas extras por abertura',
+  );
+});
+
+test('autocura também nasce desligada (não mexe na fonte com operador vendo)', () => {
+  assert.equal(makeProxy().gridAutoHealEnabled, false);
+});

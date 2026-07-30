@@ -168,6 +168,10 @@ test('grade: sub 2 em H.264 é encontrado quando sub 1 é H.265 (a busca não pa
   // câmera a transcode para sempre com o stream certo parado do lado.
   const mgr = makeProxy();
   mgr.isEnabled = () => true;
+  // A busca profunda hoje NASCE DESLIGADA na abertura do tile (medido: nesta
+  // frota nenhum degrau profundo era usado, e as câmeras H.265 pagavam os 4
+  // degraus extras à toa). Este caso exercita a LÓGICA, então liga o flag.
+  mgr.deepSubSearchEnabled = true;
   mgr.gridPathLooksDead = async () => false;
   const sondados: string[] = [];
   mgr.probeStreamVideoMetadata = async (url: string) => {
@@ -200,6 +204,10 @@ test('grade: /media/videoN (streams reais das OEM) está na escada de busca', as
   // o live e a busca não o encontrava — transcode eterno com o H.264 do lado.
   const mgr = makeProxy();
   mgr.isEnabled = () => true;
+  // A busca profunda hoje NASCE DESLIGADA na abertura do tile (medido: nesta
+  // frota nenhum degrau profundo era usado, e as câmeras H.265 pagavam os 4
+  // degraus extras à toa). Este caso exercita a LÓGICA, então liga o flag.
+  mgr.deepSubSearchEnabled = true;
   mgr.gridPathLooksDead = async () => false;
   mgr.probeStreamVideoMetadata = async (url: string) => {
     if (url.includes('/media/video2')) return { codec: 'h264', width: 640, height: 360, hasDataTrack: false };

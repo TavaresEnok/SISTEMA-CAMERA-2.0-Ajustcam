@@ -86,6 +86,11 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // o endpoint uma vez e não mexia mais.
   // Protege 2 câmeras e arrisca as outras 19: enquanto a oscilação não estiver
   // explicada, o padrão é não mexer. MEDIAMTX_GRID_AUTOHEAL=true religa.
+  // Busca profunda de sub (degraus /media/videoN, subtype=2, N03) na ABERTURA do
+  // tile. Desligada: o resultado é estável e pertence ao cadastro, não ao caminho
+  // quente. Ver o bloco em chooseGridSource.
+  private readonly deepSubSearchEnabled =
+    String(process.env.MEDIAMTX_DEEP_SUB_SEARCH ?? 'false').trim().toLowerCase() === 'true';
   private readonly gridAutoHealEnabled =
     String(process.env.MEDIAMTX_GRID_AUTOHEAL ?? 'false').trim().toLowerCase() === 'true';
   // Salto privado (`_source`) entre a câmera e o FFmpeg. DESLIGADO por padrão:
@@ -1175,7 +1180,22 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // a transcode para sempre, com o stream H.264 configurado à mão parado do
     // lado. Escada mantida: cada degrau só é sondado se o anterior não achou
     // H.264, então câmera bem comportada continua custando UM probe.
-    if (!has264()) {
+    // ESTE BLOCO NÃO RODA NA ABERTURA DO TILE POR PADRÃO.
+    //
+    // MEDIDO nesta frota (30/07): as 16 grades configuradas usam TODAS o degrau
+    // 1 (`subtype=1`). Nenhuma usa /media/videoN, subtype=2 ou N03 — os degraus
+    // profundos não encontraram nada aqui. E o custo cai justamente nas piores
+    // câmeras: quem tem sub H.265 não acha H.264 em degrau nenhum, então
+    // percorre os 4 restantes (até 32s de sonda) para no fim usar o H.265
+    // mesmo. As 10 câmeras que já precisam de transcode pagavam a busca inteira.
+    //
+    // A busca profunda NÃO é errada — uma investigação por ONVIF provou que há
+    // OEM que declara o stream real em /media/videoN. O erro é ONDE ela roda:
+    // procurar 5 endpoints no instante em que o operador abre um tile é caro, e
+    // o resultado não muda depois da primeira vez. Lugar dela é o cadastro/
+    // diagnóstico da câmera, que roda uma vez e persiste.
+    // MEDIAMTX_DEEP_SUB_SEARCH=true religa na live para instalação com OEM teimosa.
+    if (!has264() && this.deepSubSearchEnabled) {
       const sub2Candidates = [
         // COMPROVADO NESTA FROTA via ONVIF GetProfiles: câmeras OEM que servem
         // /Streaming/Channels/101 declaram os streams REAIS em /media/videoN
