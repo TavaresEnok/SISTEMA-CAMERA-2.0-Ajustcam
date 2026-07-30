@@ -266,8 +266,16 @@ function buildProtocolOrder(
   };
 
   if (smartOrder && smartOrder.length) {
-    for (const protocol of smartOrder) push(protocol);
+    // O QUE JÁ FUNCIONOU NESTA CÂMERA VEM PRIMEIRO.
+    //
+    // `smartOrder` é o palpite do servidor a partir do codec; `stored` é o
+    // protocolo que REALMENTE entregou vídeo aqui da última vez. Colocar o
+    // palpite antes do fato observado fazia toda montagem repetir a mesma
+    // tentativa fracassada — câmera que nunca fecha WebRTC pagava o timeout
+    // dele em cada abertura, em cada tile, para sempre. Fato observado ganha
+    // de heurística; o smartOrder continua logo atrás como plano B.
     push(stored);
+    for (const protocol of smartOrder) push(protocol);
     if (!order.includes('hls')) push('hls');
     if (!order.includes('webrtc')) push('webrtc');
     return order;

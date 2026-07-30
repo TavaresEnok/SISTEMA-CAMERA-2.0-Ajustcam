@@ -26,6 +26,7 @@ import { spawnWithSecretUrl } from '../common/process/secret-url-process.helper'
 // deste serviço) e sempre em try/catch — observabilidade não derruba stream.
 import { cameraMetrics } from '../observability/camera-metrics.service';
 import {
+  GRID_LIVE_BITRATE_KBPS,
   GRID_LIVE_MAX_HEIGHT,
   GRID_LIVE_MAX_WIDTH,
   GRID_LIVE_TARGET_FPS,
@@ -1540,15 +1541,17 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         : useNvenc
         ? (deliveryMode === 'grid'
           ? '-c:v h264_nvenc -preset p4 -tune ll -profile:v main -rc cbr ' +
-            '-b:v 1800k -maxrate 1800k -bufsize 3600k -pix_fmt yuv420p ' +
-            `-g 40 -bf 0 -vf "${gridScaleFilter}"`
+            `-b:v ${GRID_LIVE_BITRATE_KBPS}k -maxrate ${GRID_LIVE_BITRATE_KBPS}k ` +
+            `-bufsize ${GRID_LIVE_BITRATE_KBPS * 2}k -pix_fmt yuv420p ` +
+            `-g 30 -bf 0 -vf "${gridScaleFilter}"`
           : '-c:v h264_nvenc -preset p4 -tune ll -profile:v main -rc cbr ' +
             '-b:v 5000k -maxrate 5000k -bufsize 10000k -pix_fmt yuv420p ' +
             '-g 30 -bf 0')
         : (deliveryMode === 'grid'
-          ? '-threads 4 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v main ' +
-            '-b:v 1800k -maxrate 1800k -bufsize 3600k -pix_fmt yuv420p ' +
-            `-g 40 -keyint_min 20 -sc_threshold 0 -bf 0 -refs 1 -vf "${gridScaleFilter}"`
+          ? '-threads 2 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v main ' +
+            `-b:v ${GRID_LIVE_BITRATE_KBPS}k -maxrate ${GRID_LIVE_BITRATE_KBPS}k ` +
+            `-bufsize ${GRID_LIVE_BITRATE_KBPS * 2}k -pix_fmt yuv420p ` +
+            `-g 30 -keyint_min 15 -sc_threshold 0 -bf 0 -refs 1 -vf "${gridScaleFilter}"`
           : '-threads 4 -c:v libx264 -preset veryfast -tune zerolatency -profile:v high ' +
             '-b:v 6000k -maxrate 6000k -bufsize 12000k -pix_fmt yuv420p ' +
             '-g 30 -keyint_min 15 -sc_threshold 0 -bf 0 -refs 2');
