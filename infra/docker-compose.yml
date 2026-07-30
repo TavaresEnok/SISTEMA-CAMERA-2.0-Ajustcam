@@ -316,6 +316,12 @@ services:
       # ffprobe fechar metadados; matar cedo = câmera saudável marcada OFFLINE.
       - CAMERA_RTSP_PROBE_TIMEOUT_MS=${CAMERA_RTSP_PROBE_TIMEOUT_MS:-4500}
       - CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS=${CAMERA_RTSP_PROBE_KILL_TIMEOUT_MS:-5500}
+      # Fontes quentes da grade: por RELEVÂNCIA (últimas vistas), com teto.
+      # 64 cobre qualquer instalação pequena inteira; numa frota de 2.000 só as
+      # 64 câmeras realmente olhadas ficam conectadas — o resto liga sob
+      # demanda (~5s no primeiro acesso e entra no conjunto quente na hora).
+      - MEDIAMTX_HOT_GRID_SOURCES_MAX=${MEDIAMTX_HOT_GRID_SOURCES_MAX:-64}
+      - MEDIAMTX_HOT_GRID_WINDOW_HOURS=${MEDIAMTX_HOT_GRID_WINDOW_HOURS:-168}
       - FFMPEG_RTSP_FALLBACK_TRANSPORTS=tcp,udp
       - FFMPEG_RTSP_FALLBACK_PORTS=51488,51489,51490
       - FFMPEG_RTSP_ENABLE_PORT_FALLBACK=false

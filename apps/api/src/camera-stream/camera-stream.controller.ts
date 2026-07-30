@@ -309,6 +309,11 @@ export class CameraStreamController {
     let effectiveDeliveryProfile = resolveDeliveryRtspProfile(camera);
     if (this.mediamtxProxyService.isEnabled()) {
       try {
+        // Sinal de RELEVÂNCIA para o conjunto quente da grade: só a demanda de
+        // ESPECTADOR marca (este endpoint). Warm-up e watchdog chamam o ensure
+        // por dentro do serviço e não marcam — senão o boot "veria" a frota
+        // inteira e a política viraria "quente para sempre" de novo.
+        if (viewMode === 'grid') this.mediamtxProxyService.markGridViewed(cameraId);
         const ensured = await this.mediamtxProxyService.ensurePathForCamera(cameraId, viewMode);
         mediaBridge = this.mediamtxProxyService.buildPublicUrls(req, ensured.pathName, ensured.sourceUrl);
         measuredLiveCodec = ensured.sourceVideoCodec;

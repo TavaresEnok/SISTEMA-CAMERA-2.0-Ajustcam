@@ -8,8 +8,18 @@ import {
   resolveGridRtspProfile,
   resolveLiveRtspProfile,
 } from '../cameras/helpers/rtsp-url.helper';
+import { envNumber } from '../common/config/env-number.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
+import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import {
+  computeHotGridSet,
+  pruneHistory,
+  seedEmptyHistory,
+  DEFAULT_HOT_GRID_BUDGET,
+  DEFAULT_HOT_GRID_WINDOW_HOURS,
+  type GridViewEntry,
+} from './helpers/hot-grid-sources.helper';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { spawnWithSecretUrl } from '../common/process/secret-url-process.helper';
 // Métricas por câmera: singleton de módulo (sem DI, para não mexer no construtor
@@ -98,6 +108,19 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   private static readonly BRAKE_MAX_COOLDOWN_MS = 30 * 60_000;
   private readonly recoveryBrake = new Map<string, { attempts: number[]; cooldownUntil: number; level: number }>();
 
+  // ── Fontes quentes da grade (por relevância, com orçamento) ───────────────
+  // Visualizações de grade por câmera. Fonte da política computeHotGridSet:
+  // quente = as `budget` mais recentes dentro da janela. Persistido (debounced)
+  // em SystemSetting para sobreviver a restart — sem isso, todo deploy voltaria
+  // a grade fria e pareceria regressão.
+  private readonly gridViewAt = new Map<string, number>();
+  private gridViewDirtyAt = 0;
+  private gridViewPersistedAt = 0;
+  private hotReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly HOT_GRID_HISTORY_KEY = 'live.gridViewHistory';
+  private static readonly HOT_GRID_PERSIST_MIN_INTERVAL_MS = 60_000;
+  private static readonly HOT_GRID_RECONCILE_INTERVAL_MS = 5 * 60_000;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly camerasService: CamerasService,
@@ -107,16 +130,146 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // Sendo opcional, este serviço continua instanciável (inclusive nos testes que
     // o constroem à mão) sem conhecer o gateway.
     @Optional() private readonly sourceGateway?: SourceGatewayService,
+    // Opcional pelo mesmo motivo dos testes; em produção o PrismaModule é
+    // @Global e o Nest injeta. Sem ele, o histórico só não é persistido.
+    @Optional() private readonly prisma?: PrismaService,
   ) {}
+
+  private hotGridBudget(): number {
+    return envNumber('MEDIAMTX_HOT_GRID_SOURCES_MAX', DEFAULT_HOT_GRID_BUDGET, {
+      min: 0,
+      max: 4096,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    });
+  }
+
+  private hotGridWindowMs(): number {
+    return envNumber('MEDIAMTX_HOT_GRID_WINDOW_HOURS', DEFAULT_HOT_GRID_WINDOW_HOURS, {
+      min: 1,
+      max: 24 * 90,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    }) * 3600_000;
+  }
+
+  /** Registro de que um ESPECTADOR pediu a grade desta câmera agora. */
+  markGridViewed(cameraId: string) {
+    this.gridViewAt.set(cameraId, Date.now());
+    this.gridViewDirtyAt = Date.now();
+    void this.persistGridViewHistory().catch(() => undefined);
+  }
+
+  private isGridSourceHot(cameraId: string): boolean {
+    // Env explícita vence: operador que setou "tudo sob demanda" quis isso.
+    if (this.configService.get<boolean>('mediaMtxSourceOnDemand') === true) return false;
+    const hot = computeHotGridSet(
+      [...this.gridViewAt.entries()].map(([id, at]) => ({ cameraId: id, lastViewedAt: at })),
+      this.hotGridBudget(),
+      this.hotGridWindowMs(),
+      Date.now(),
+    );
+    return hot.has(cameraId);
+  }
+
+  private async loadGridViewHistory() {
+    if (!this.prisma) return;
+    try {
+      const row = await this.prisma.systemSetting.findUnique({
+        where: { key: MediamtxProxyService.HOT_GRID_HISTORY_KEY },
+      });
+      const parsed: GridViewEntry[] = row?.value ? JSON.parse(row.value) : [];
+      for (const e of pruneHistory(parsed, this.hotGridWindowMs(), Date.now())) {
+        this.gridViewAt.set(e.cameraId, e.lastViewedAt);
+      }
+    } catch {
+      // Histórico ilegível = começa vazio; a semente abaixo cobre.
+    }
+    if (this.gridViewAt.size === 0) {
+      // Primeiro boot com esta política: sem semente, a grade inteira nasceria
+      // fria e o operador leria a atualização como regressão. O orçamento corta
+      // no teto, então instalação gigante não aquece a frota toda.
+      try {
+        const cameras = (await this.camerasService.findAllInternal())
+          .filter((camera) => (camera as { enabled?: boolean }).enabled !== false);
+        for (const e of seedEmptyHistory(cameras.map((c) => c.id), Date.now())) {
+          this.gridViewAt.set(e.cameraId, e.lastViewedAt);
+        }
+      } catch {
+        // Sem câmeras legíveis não há o que semear.
+      }
+    }
+  }
+
+  private async persistGridViewHistory(force = false) {
+    if (!this.prisma) return;
+    const agora = Date.now();
+    if (!force && agora - this.gridViewPersistedAt < MediamtxProxyService.HOT_GRID_PERSIST_MIN_INTERVAL_MS) return;
+    if (this.gridViewDirtyAt <= this.gridViewPersistedAt) return;
+    this.gridViewPersistedAt = agora;
+    const podado = pruneHistory(
+      [...this.gridViewAt.entries()].map(([id, at]) => ({ cameraId: id, lastViewedAt: at })),
+      this.hotGridWindowMs(),
+      agora,
+    );
+    const value = JSON.stringify(podado);
+    await this.prisma.systemSetting.upsert({
+      where: { key: MediamtxProxyService.HOT_GRID_HISTORY_KEY },
+      create: { key: MediamtxProxyService.HOT_GRID_HISTORY_KEY, value },
+      update: { value },
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Reconciliação periódica quente↔frio.
+   *
+   * A decisão no ensure só vale para a câmera sendo aberta; quem ESFRIOU (saiu
+   * do orçamento ou da janela) precisa de alguém que desligue a fonte — senão
+   * o "quente por relevância" degenera de novo em "quente para sempre".
+   */
+  private async reconcileHotGridSources() {
+    if (!this.isEnabled()) return;
+    try {
+      const text = await this.apiRequest('GET', '/v3/config/paths/list?itemsPerPage=1000');
+      const items: any[] = JSON.parse(text)?.items ?? [];
+      for (const item of items) {
+        const name: string = item?.name ?? '';
+        if (!name.endsWith('_grid_source')) continue;
+        const parsed = this.cameraIdFromPathName(name.replace(/_source$/, ''));
+        if (!parsed) continue;
+        const desiredOnDemand = !this.isGridSourceHot(parsed.cameraId);
+        if (item.sourceOnDemand === desiredOnDemand) continue;
+        await this.apiRequest(
+          'PATCH',
+          `/v3/config/paths/patch/${encodeURIComponent(name)}`,
+          { sourceOnDemand: desiredOnDemand },
+        ).catch(() => undefined);
+        this.logger.log(
+          `Fonte da grade ${name} → ${desiredOnDemand ? 'sob demanda (esfriou)' : 'sempre conectada (aqueceu)'}.`,
+        );
+      }
+    } catch {
+      // Próximo ciclo tenta de novo; reconciliação nunca pode derrubar nada.
+    }
+  }
 
   onApplicationBootstrap() {
     if (!this.isEnabled()) return;
 
     this.assertStrongApiCredentials();
 
-    if (this.configService.get<boolean>('mediaMtxWarmPathsOnBoot') !== false) {
-      void this.warmCameraPaths();
-    }
+    // Histórico primeiro, aquecimento depois: o warm-up decide O QUE aquecer a
+    // partir do conjunto quente, que depende do histórico carregado.
+    void this.loadGridViewHistory().then(() => {
+      if (this.configService.get<boolean>('mediaMtxWarmPathsOnBoot') !== false) {
+        void this.warmCameraPaths();
+      }
+    });
+    this.hotReconcileTimer = setInterval(() => {
+      void this.reconcileHotGridSources();
+      void this.persistGridViewHistory().catch(() => undefined);
+    }, MediamtxProxyService.HOT_GRID_RECONCILE_INTERVAL_MS);
+    this.hotReconcileTimer.unref?.();
 
     // O watchdog é independente do warm-on-boot: queremos a vigilância sempre que
     // o MediaMTX está habilitado.
@@ -135,6 +288,13 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
     }
+    if (this.hotReconcileTimer) {
+      clearInterval(this.hotReconcileTimer);
+      this.hotReconcileTimer = null;
+    }
+    // Última chance de gravar o histórico: perder as visualizações da sessão
+    // faria a grade nascer meio fria no próximo boot.
+    void this.persistGridViewHistory(true).catch(() => undefined);
   }
 
   /**
@@ -459,19 +619,22 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // (~2s). Com o on-demand cravado, cada tile frio passou a pagar a conexão
     // WAN inteira (até 6s) + probe + keyframe — os ~30s reclamados em produção.
     //
-    // SÓ A GRADE fica quente, e isso não é detalhe: a primeira versão desta
-    // correção aplicava a env a TODAS as fontes privadas, incluindo as de
-    // tela-cheia — que puxam o STREAM PRINCIPAL (~2,1 Mbps cada). Bastou o
+    // SÓ A GRADE pode ficar quente, e isso não é detalhe: a primeira versão
+    // desta correção aplicava a env a TODAS as fontes privadas, incluindo as
+    // de tela-cheia — que puxam o STREAM PRINCIPAL (~2,1 Mbps cada). Bastou o
     // operador ter aberto duas câmeras em tela cheia uma vez para 4,2 Mbps de
     // mains ficarem pendurados SEM espectador, somando-se aos ~5,4 Mbps dos
     // subs e saturando o uplink do DVR do cliente — tiles caíam para 1 fps e
-    // ficavam pretos ~1 min depois de abrir. O sub é barato (~550 kbps) e a
-    // grade é a primeira tela do operador: quente. O main é caro e tela-cheia
-    // é ocasional: sob demanda, sempre.
+    // ficavam pretos ~1 min depois de abrir. O main é caro e tela-cheia é
+    // ocasional: sob demanda, sempre.
+    //
+    // E "quente" para a grade não é mais tudo-ou-nada: é POR RELEVÂNCIA, com
+    // orçamento (ver hot-grid-sources.helper.ts). Quente para todas as 21
+    // câmeras desta instalação cabe no orçamento default; quente para 2.000
+    // seria nós atacando os DVRs da própria frota.
     const isGridSource = pathName.endsWith('_grid');
-    const sourceOnDemand = isGridSource
-      ? (this.configService.get<boolean>('mediaMtxSourceOnDemand') ?? false)
-      : true;
+    const parsedForHot = isGridSource ? this.cameraIdFromPathName(pathName) : null;
+    const sourceOnDemand = !(isGridSource && parsedForHot && this.isGridSourceHot(parsedForHot.cameraId));
     const desired = {
       source: sourceUrl,
       sourceOnDemand,
@@ -956,7 +1119,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     return currentMs === desiredMs;
   }
 
-  private async apiRequest(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown) {
+  private async apiRequest(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown) {
     const base = this.configService.get<string>('mediaMtxApiBaseUrl') ?? 'http://mediamtx:9997';
     const apiUser = (this.configService.get<string>('mediaMtxApiUser') ?? '').trim();
     const apiPass = (this.configService.get<string>('mediaMtxApiPass') ?? '').trim();
@@ -1095,15 +1258,19 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
 
   private async warmCameraPaths() {
     try {
-      const cameras = (await this.camerasService.findAllInternal())
+      // Aquece SÓ o conjunto quente (relevância + orçamento), não a frota.
+      // Warm-up da frota inteira em 2.000 câmeras seria 2.000 probes e 2.000
+      // sessões RTSP na largada do boot — contra os DVRs dos clientes.
+      const todas = (await this.camerasService.findAllInternal())
         .filter((camera) => (camera as { enabled?: boolean }).enabled !== false);
+      const cameras = todas.filter((camera) => this.isGridSourceHot(camera.id));
       if (!cameras.length) return;
 
       const warmSelectedPaths = this.configService.get<boolean>('mediaMtxWarmSelectedPathsOnBoot') === true;
       this.logger.log(
         warmSelectedPaths
           ? `Aquecendo paths MediaMTX de grade e selected para ${cameras.length} câmera(s)...`
-          : `Aquecendo somente paths MediaMTX de grade para ${cameras.length} câmera(s)...`,
+          : `Aquecendo somente paths MediaMTX de grade para ${cameras.length} de ${todas.length} câmera(s) (conjunto quente)...`,
       );
       let nextIndex = 0;
       let warmed = 0;
