@@ -829,7 +829,6 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
 
   private async chooseLiveSource(cameraId: string, camera: any, password: string, transport: string) {
     const configuredProfile = resolveLiveRtspProfile(camera);
-    const updatedAt = camera.updatedAt instanceof Date ? camera.updatedAt.toISOString() : String(camera.updatedAt ?? '');
     const sourceUrl = buildRtspUrl({
       username: camera.username,
       password,
@@ -850,7 +849,12 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       ? this.alternateMainPath(camera.rtspPath, configuredProfile.channel)
       : null;
     if (alternatePath) {
-      const liveSourceCacheKey = `live-source:${cameraId}:${configuredProfile.channel}:${configuredProfile.subtype}:${updatedAt}`;
+      // Terceiro cache com o mesmo defeito de `updatedAt` (ver chooseGridSource):
+      // chave por configuração efetiva.
+      const liveSourceCacheKey = [
+        'live-source', cameraId, camera.ip, camera.rtspPort, camera.username,
+        camera.rtspPath ?? '', configuredProfile.channel, configuredProfile.subtype,
+      ].join('|');
       const cached = this.liveSourceCache.get(liveSourceCacheKey);
       if (cached && Date.now() - cached.at < MediamtxProxyService.LIVE_CODEC_TTL_MS) {
         chosenSourceUrl = cached.url;
@@ -885,7 +889,18 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         });
       }
     }
-    const cacheKey = `${cameraId}:${configuredProfile.channel}:${configuredProfile.subtype}:${updatedAt}`;
+    // Mesma correção da grade: configuração efetiva, NUNCA `updatedAt` (que o
+    // health check reescreve a cada ciclo e transformava este cache em lixo,
+    // forçando ffprobe de codec em toda abertura de câmera).
+    const cacheKey = [
+      cameraId,
+      camera.ip,
+      camera.rtspPort,
+      camera.username,
+      camera.rtspPath ?? '',
+      configuredProfile.channel,
+      configuredProfile.subtype,
+    ].join('|');
     // Passthrough vs transcode. Confiamos no rótulo detectado SÓ quando ele diz
     // HEVC: a decisão vira "transcodar" e, se o rótulo estiver errado (fonte já é
     // H.264), o pior caso é custo de CPU — nunca tela preta. Quando o rótulo diz
@@ -928,8 +943,28 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
 
   private async chooseGridSource(cameraId: string, camera: any, password: string, transport: string) {
     const subProfile = resolveGridRtspProfile(camera);
-    const updatedAt = camera.updatedAt instanceof Date ? camera.updatedAt.toISOString() : String(camera.updatedAt ?? '');
-    const cacheKey = `grid:${cameraId}:${updatedAt}`;
+    // A CHAVE É A CONFIGURAÇÃO EFETIVA, NUNCA `updatedAt`.
+    //
+    // Com `updatedAt` na chave, o cache era LIXO: o health check reescreve a
+    // linha da câmera a cada ciclo (rotação de ~10s por câmera nesta frota),
+    // então TODA abertura de tile invalidava a decisão e pagava a escada de
+    // ffprobes de novo — até 5 sondas de 8s em sequência. Era a causa direta
+    // do "primeiro acesso demora 30s" que sobreviveu a todas as outras
+    // correções: o cache de 30 minutos nunca chegava a 10 segundos de vida.
+    //
+    // O que DEVE invalidar a decisão é o que muda a URL: endereço, porta,
+    // credencial, caminho e canal. Mudou algum → chave nova → re-sonda. Health
+    // check tocando `lastSeenAt`/`status` não muda nada disso.
+    const cacheKey = [
+      'grid',
+      cameraId,
+      camera.ip,
+      camera.rtspPort,
+      camera.username,
+      camera.rtspPath ?? '',
+      subProfile.channel,
+      subProfile.subtype,
+    ].join('|');
 
     // Cache: devolve a decisão pronta (url do sub OU null = usar o main).
     //

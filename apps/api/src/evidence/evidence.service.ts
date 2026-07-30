@@ -62,16 +62,21 @@ export class EvidenceService {
         hashValid ? 'Hash SHA-256 válido.' : 'Hash SHA-256 inválido.',
         signatureValid ? 'Assinatura HMAC válida.' : 'Assinatura HMAC inválida ou ausente.',
       ],
+      // ORÁCULO DE ASSINATURA — removido de propósito.
+      //
+      // Este endpoint devolvia `expected.signature` com o HMAC CALCULADO para o
+      // conteúdo enviado. Qualquer usuário com acesso à verificação podia então
+      // forjar prova em dois passos: manda o pacote adulterado, lê a assinatura
+      // que o servidor diz esperar, cola no pacote e reenvia — a segunda
+      // verificação passa. Isso anula por completo o propósito do módulo, que é
+      // provar que a gravação NÃO foi alterada.
+      //
+      // A verificação continua respondendo o que o usuário legítimo precisa
+      // saber (é válido? o hash bate? a assinatura bate?) e o que ele mesmo
+      // enviou — nunca o segredo derivado da chave HMAC.
       expected: {
-        packageHash: {
-          algorithm: 'SHA-256',
-          value: computedHash,
-        },
-        signature: {
-          algorithm: 'HMAC-SHA-256',
-          value: computedSignature,
-          keyId: this.hmacKeyId,
-        },
+        packageHash: { algorithm: 'SHA-256' },
+        signature: { algorithm: 'HMAC-SHA-256', keyId: this.hmacKeyId },
       },
       provided: {
         packageHash: providedHash,

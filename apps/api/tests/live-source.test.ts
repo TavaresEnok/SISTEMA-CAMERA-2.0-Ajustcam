@@ -206,3 +206,55 @@ test('grade: /media/videoN (streams reais das OEM) está na escada de busca', as
   assert.match(r.sourceUrl, /\/media\/video2/, 'o H.264 real da câmera tem que ser encontrado');
   assert.equal(r.isHevc, false);
 });
+
+// ── A CHAVE DE CACHE NÃO PODE DEPENDER DE `updatedAt` ────────────────────────
+//
+// O health check reescreve a linha da câmera a cada ciclo (rotação de ~10s por
+// câmera na frota real). Com `updatedAt` na chave, os três caches de fonte
+// viravam LIXO: toda abertura de tile re-pagava a escada de ffprobes (até 5
+// sondas de 8s). Era a causa que sobreviveu a todas as outras correções do
+// "primeiro acesso demora 30s" — o cache de 30min nunca vivia 10 segundos.
+
+test('cache da grade SOBREVIVE a mudança de updatedAt (health check)', async () => {
+  const mgr = makeProxy();
+  mgr.isEnabled = () => true;
+  mgr.gridPathLooksDead = async () => false;
+  let probes = 0;
+  mgr.probeStreamVideoMetadata = async () => {
+    probes++;
+    return { codec: 'h264', width: 640, height: 360, hasDataTrack: false };
+  };
+
+  const cam1 = { ...gridCamera(), updatedAt: new Date('2026-07-30T00:00:00Z') };
+  await mgr.chooseGridSource('cam-1', cam1, 'senha', 'tcp');
+  const depoisDaPrimeira = probes;
+  assert.ok(depoisDaPrimeira > 0);
+
+  // Health check tocou a linha: MESMA câmera, MESMA configuração, updatedAt novo.
+  const cam2 = { ...gridCamera(), updatedAt: new Date('2026-07-30T00:00:10Z') };
+  await mgr.chooseGridSource('cam-1', cam2, 'senha', 'tcp');
+  assert.equal(probes, depoisDaPrimeira, 'updatedAt novo NÃO pode custar re-sondagem');
+});
+
+test('cache da grade É invalidado quando a configuração REALMENTE muda', async () => {
+  // O contraste que dá sentido ao teste acima: se nada invalidasse, uma câmera
+  // reconfigurada continuaria usando a URL velha para sempre.
+  const mgr = makeProxy();
+  mgr.isEnabled = () => true;
+  mgr.gridPathLooksDead = async () => false;
+  let probes = 0;
+  mgr.probeStreamVideoMetadata = async () => {
+    probes++;
+    return { codec: 'h264', width: 640, height: 360, hasDataTrack: false };
+  };
+
+  await mgr.chooseGridSource('cam-1', gridCamera(), 'senha', 'tcp');
+  const base = probes;
+
+  await mgr.chooseGridSource('cam-1', { ...gridCamera(), ip: '10.0.0.99' }, 'senha', 'tcp');
+  assert.ok(probes > base, 'IP novo tem que re-sondar');
+
+  const base2 = probes;
+  await mgr.chooseGridSource('cam-1', { ...gridCamera(), rtspPath: '/outro/caminho' }, 'senha', 'tcp');
+  assert.ok(probes > base2, 'caminho novo tem que re-sondar');
+});
