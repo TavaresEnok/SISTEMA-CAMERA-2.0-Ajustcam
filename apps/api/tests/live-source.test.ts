@@ -157,3 +157,35 @@ test('grade: decisão cacheada MORTA é re-sondada; saudável continua cacheada'
   await mgr.chooseGridSource('cam-9', gridCamera(), 'senha', 'tcp');
   assert.equal(probes, probesAposCura, 'cooldown de 60s impede re-probe em rajada');
 });
+
+test('grade: sub 2 em H.264 é encontrado quando sub 1 é H.265 (a busca não para no primeiro)', async () => {
+  // Caso do operador que configurou "o segundo stream em H.264 para o live":
+  // em muitas câmeras isso mora no ÍNDICE 2 (Dahua subtype=2 / Hik canal N03),
+  // e o sub 1 segue H.265 de fábrica. A busca parava no sub 1 e condenava a
+  // câmera a transcode para sempre com o stream certo parado do lado.
+  const mgr = makeProxy();
+  mgr.isEnabled = () => true;
+  mgr.gridPathLooksDead = async () => false;
+  const sondados: string[] = [];
+  mgr.probeStreamVideoMetadata = async (url: string) => {
+    sondados.push(url);
+    if (url.includes('subtype=2')) return { codec: 'h264', width: 640, height: 360, hasDataTrack: false };
+    return { codec: 'h265', width: 640, height: 360, hasDataTrack: false };
+  };
+  const r = await mgr.chooseGridSource('cam-sub2', gridCamera(), 'senha', 'tcp');
+  assert.match(r.sourceUrl, /subtype=2/, 'o H.264 do sub 2 tem que vencer o H.265 do sub 1');
+  assert.equal(r.isHevc, false, 'passthrough, sem transcode');
+});
+
+test('grade: câmera com sub 1 já em H.264 continua custando UM probe (escada preservada)', async () => {
+  const mgr = makeProxy();
+  mgr.isEnabled = () => true;
+  mgr.gridPathLooksDead = async () => false;
+  let probes = 0;
+  mgr.probeStreamVideoMetadata = async () => {
+    probes++;
+    return { codec: 'h264', width: 704, height: 480, hasDataTrack: false };
+  };
+  await mgr.chooseGridSource('cam-h264', gridCamera(), 'senha', 'tcp');
+  assert.equal(probes, 1, 'sub 1 H.264 encontrado → nenhum degrau extra é sondado');
+});

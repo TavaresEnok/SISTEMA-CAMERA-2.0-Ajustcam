@@ -1001,8 +1001,8 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       hasDataTrack: c1.hasDataTrack,
     });
     // Só sonda o alternativo se o primeiro não for H.264 (economiza um probe).
-    const has264 = found.some((f) => !isHevcCodec(f.codec));
-    if (!has264 && altUrl) {
+    const has264 = () => found.some((f) => !isHevcCodec(f.codec));
+    if (!has264() && altUrl) {
       const c2 = await this.probeStreamVideoMetadata(altUrl, transport);
       if (c2?.codec) found.push({
         url: altUrl,
@@ -1011,6 +1011,31 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         height: c2.height,
         hasDataTrack: c2.hasDataTrack,
       });
+    }
+    // TERCEIRO degrau: o SUB 2. Muitas câmeras têm TRÊS streams, e o operador
+    // que configura "o segundo stream em H.264 para o live" pode tê-lo no
+    // índice 2 (Dahua subtype=2, Hikvision canal N03) — enquanto o sub 1
+    // continua H.265 de fábrica. A busca parava no sub 1 e condenava a câmera
+    // a transcode para sempre, com o stream H.264 configurado à mão parado do
+    // lado. Escada mantida: cada degrau só é sondado se o anterior não achou
+    // H.264, então câmera bem comportada continua custando UM probe.
+    if (!has264()) {
+      const sub2Candidates = [
+        `/cam/realmonitor?channel=${subProfile.channel}&subtype=2`,
+        `/Streaming/Channels/${subProfile.channel}03`,
+      ];
+      for (const path of sub2Candidates) {
+        if (has264()) break;
+        const url = `rtsp://${encodeURIComponent(camera.username)}:${encodeURIComponent(password)}@${camera.ip}:${camera.rtspPort}${path}`;
+        const c3 = await this.probeStreamVideoMetadata(url, transport);
+        if (c3?.codec) found.push({
+          url,
+          codec: c3.codec,
+          width: c3.width,
+          height: c3.height,
+          hasDataTrack: c3.hasDataTrack,
+        });
+      }
     }
 
     // Preferência: qualquer sub H.264 (passthrough) > sub H.265 de menor resolução
