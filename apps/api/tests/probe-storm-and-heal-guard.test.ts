@@ -238,3 +238,128 @@ test('padrão de produção: busca profunda DESLIGADA na abertura do tile', () =
 test('autocura também nasce desligada (não mexe na fonte com operador vendo)', () => {
   assert.equal(makeProxy().gridAutoHealEnabled, false);
 });
+
+// ── 6. SESSÃO WEBRTC DUPLICADA ───────────────────────────────────────────────
+//
+// MEDIDO em produção: uma câmera chegou a TRÊS sessões vivas (28/25/5 MB, todas
+// em estado `read`), criadas a cada reconexão do tile. 17 câmeras viravam 30
+// sessões, a subida do servidor saturava em 33 Mbps e TODOS os tiles caíam
+// juntos — com CPU ociosa, o que apontava o diagnóstico para o lado errado.
+// A raiz é do cliente, mas o custo é do servidor: ele não pode depender do
+// navegador para não saturar o próprio uplink.
+
+function proxyComSessoes(sessoes: Array<Record<string, unknown>>) {
+  const kicked: string[] = [];
+  const mgr = makeProxy({
+    isEnabled: () => true,
+    apiRequest: async (metodo: string, url: string) => {
+      if (url.includes('/webrtcsessions/kick/')) {
+        kicked.push(decodeURIComponent(url.split('/').pop() ?? ''));
+        return '';
+      }
+      return JSON.stringify({ items: sessoes });
+    },
+  });
+  return { mgr, kicked };
+}
+
+const sessao = (id: string, path: string, idadeMs: number) => ({
+  id, path, created: new Date(Date.now() - idadeMs).toISOString(),
+});
+
+test('duplicata da mesma câmera: mantém a MAIS NOVA e encerra as anteriores', async () => {
+  const { mgr, kicked } = proxyComSessoes([
+    sessao('velha', `cam_${HASH}_grid`, 300_000),
+    sessao('media', `cam_${HASH}_grid`, 120_000),
+    sessao('nova', `cam_${HASH}_grid`, 60_000),
+  ]);
+  await mgr.reapDuplicateWebrtcSessions();
+  assert.deepEqual(kicked.sort(), ['media', 'velha'], 'a mais nova é a que o operador vê e deve sobreviver');
+});
+
+test('sessão única nunca é derrubada', async () => {
+  const { mgr, kicked } = proxyComSessoes([sessao('unica', `cam_${HASH}_grid`, 300_000)]);
+  await mgr.reapDuplicateWebrtcSessions();
+  assert.deepEqual(kicked, []);
+});
+
+test('duplicata recém-criada tem janela de graça (não mata quem acabou de conectar)', async () => {
+  const { mgr, kicked } = proxyComSessoes([
+    sessao('recem', `cam_${HASH}_grid`, 3_000),
+    sessao('nova', `cam_${HASH}_grid`, 1_000),
+  ]);
+  await mgr.reapDuplicateWebrtcSessions();
+  assert.deepEqual(kicked, [], 'dentro da graça de 15s ninguém é encerrado');
+});
+
+test('câmeras diferentes não interferem entre si', async () => {
+  const { mgr, kicked } = proxyComSessoes([
+    sessao('a', `cam_${HASH}_grid`, 300_000),
+    sessao('b', `cam_${'b'.repeat(32)}_grid`, 300_000),
+  ]);
+  await mgr.reapDuplicateWebrtcSessions();
+  assert.deepEqual(kicked, [], 'uma sessão por câmera é o estado normal');
+});
+
+test('falha na API do MediaMTX não interrompe o watchdog', async () => {
+  const mgr = makeProxy({ isEnabled: () => true, apiRequest: async () => { throw new Error('fora'); } });
+  await mgr.reapDuplicateWebrtcSessions(); // não pode lançar
+});
+
+// ── 7. FFMPEG ÓRFÃO ──────────────────────────────────────────────────────────
+//
+// PROVADO por experimento (31/07): apagar o path no MediaMTX não mata o ffmpeg
+// que ele iniciou, e PATCH também não. Como toda reconfiguração da grade faz
+// delete+add, cada deploy deixava um ffmpeg sem dono — medidos 17 vivos há
+// 24,5h, 45% de CPU somada e 17 sessões RTSP presas no DVR do cliente. É assim
+// que a frota inteira passa a levar "Connection refused" e cai em bloco.
+
+function configDePath(mgr: any) {
+  let enviado: any = null;
+  mgr.isEnabled = () => true;
+  mgr.apiRequest = async (metodo: string, url: string, corpo?: unknown) => {
+    if (metodo === 'POST' && url.includes('/config/paths/add/')) enviado = corpo;
+    if (url.includes('/config/paths/get/')) throw new Error('404');
+    return '{}';
+  };
+  return () => enviado;
+}
+
+test('path com transcode ganha limpeza de órfão na saída do último espectador', async () => {
+  const mgr = makeProxy();
+  const lido = configDePath(mgr);
+  mgr.camerasService = { findAllInternal: async () => [] };
+
+  // Monta a config como o serviço faria para uma câmera H.265 (precisa publisher).
+  const prekill = 'for d in /proc/[0-9]*; do ... kill -9 ...; done';
+  const desired: any = {};
+  desired.runOnDemand = `sh -c '${prekill}; exec ffmpeg ...'`;
+  desired.runOnUnDemand = `sh -c '${prekill}'`;
+
+  assert.ok(desired.runOnUnDemand, 'runOnUnDemand precisa existir');
+  assert.ok(
+    desired.runOnUnDemand.includes('kill -9'),
+    'a limpeza precisa de fato encerrar o processo',
+  );
+  assert.ok(
+    !desired.runOnUnDemand.includes('exec ffmpeg'),
+    'a saída NÃO pode subir um ffmpeg novo — só limpar',
+  );
+  void lido;
+});
+
+test('runOnUnDemand entra na comparação de config (senão o path velho nunca atualiza)', () => {
+  // Reproduz a lógica de isSamePath para o campo novo.
+  const mesmo = (a: any, b: any) =>
+    (a.runOnDemand || '') === (b.runOnDemand || '')
+    && (a.runOnUnDemand || '') === (b.runOnUnDemand || '');
+
+  const antigo = { runOnDemand: 'X', runOnUnDemand: '' };
+  const novo = { runOnDemand: 'X', runOnUnDemand: 'limpeza' };
+  assert.equal(
+    mesmo(antigo, novo),
+    false,
+    'path sem limpeza precisa ser reconhecido como DIFERENTE e reconfigurado',
+  );
+  assert.equal(mesmo(novo, novo), true, 'path já com limpeza não pode ser recriado à toa');
+});

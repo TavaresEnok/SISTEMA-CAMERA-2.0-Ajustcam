@@ -313,6 +313,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     if (this.configService.get<boolean>('mediaMtxWatchdogEnabled') !== false) {
       this.watchdogTimer = setInterval(() => {
         void this.streamWatchdogTick();
+        void this.reapDuplicateWebrtcSessions();
       }, MediamtxProxyService.WATCHDOG_INTERVAL_MS);
       // unref: o timer não deve impedir o processo de encerrar.
       this.watchdogTimer.unref?.();
@@ -536,6 +537,63 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     this.logger.log(
       `Grade de ${parsed.cameraId}: faixa de metadados detectada pelo MediaMTX — passará a ser descartada no remux.`,
     );
+  }
+
+  /**
+   * Derruba sessão WebRTC DUPLICADA da mesma câmera — rede de segurança.
+   *
+   * O vazamento nasce no cliente (uma reconexão que não fecha a sessão anterior),
+   * e lá ele foi corrigido. Mas o CUSTO de uma falha dessas recai inteiro sobre o
+   * servidor: cada duplicata é o MESMO vídeo saindo outra vez pelo uplink.
+   * MEDIDO em produção: 17 câmeras viravam 30 sessões, a subida saturava em
+   * 33 Mbps e TODOS os tiles caíam juntos — com CPU ociosa, o que despistava o
+   * diagnóstico para o lado errado.
+   *
+   * Por isso o servidor não confia no cliente: se há mais de uma sessão viva
+   * para o mesmo path, mantém a MAIS NOVA (é a que o operador está de fato
+   * vendo) e encerra as anteriores. Navegador antigo, aba esquecida ou bug
+   * futuro deixam de virar saturação de link.
+   *
+   * Só age em duplicata do MESMO path. Espectadores diferentes na MESMA câmera
+   * são um caso legítimo — e indistinguíveis daqui, já que todos chegam pelo IP
+   * do proxy — então a janela de graça evita matar quem acabou de conectar.
+   */
+  private async reapDuplicateWebrtcSessions() {
+    if (!this.isEnabled()) return;
+    const GRACA_MS = 15_000;
+    try {
+      const texto = await this.apiRequest('GET', '/v3/webrtcsessions/list?itemsPerPage=1000');
+      const itens = (JSON.parse(texto) as { items?: Array<Record<string, any>> }).items ?? [];
+      const porPath = new Map<string, Array<Record<string, any>>>();
+      for (const s of itens) {
+        const path = String(s?.path ?? '');
+        if (!path.startsWith('cam_')) continue;
+        const lista = porPath.get(path) ?? [];
+        lista.push(s);
+        porPath.set(path, lista);
+      }
+      const agora = Date.now();
+      for (const [path, sessoes] of porPath) {
+        if (sessoes.length < 2) continue;
+        // Mais nova primeiro: ela é a que fica.
+        sessoes.sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
+        for (const antiga of sessoes.slice(1)) {
+          const idade = agora - new Date(antiga.created).getTime();
+          if (idade < GRACA_MS) continue;
+          const id = String(antiga.id ?? '');
+          if (!id) continue;
+          await this.apiRequest('POST', `/v3/webrtcsessions/kick/${encodeURIComponent(id)}`)
+            .then(() => {
+              this.logger.warn(
+                `Sessão WebRTC duplicada encerrada em ${path} (idade ${Math.round(idade / 1000)}s) — o mesmo vídeo saía duas vezes pelo uplink.`,
+              );
+            })
+            .catch(() => undefined);
+        }
+      }
+    } catch {
+      // Falha aqui nunca pode interromper o watchdog.
+    }
   }
 
   private async recoverStuckPaths(stuck: Array<{ name: string; ready: boolean; readers: number }>) {
@@ -1524,7 +1582,22 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       // sessões RTSP na largada do boot — contra os DVRs dos clientes.
       const todas = (await this.camerasService.findAllInternal())
         .filter((camera) => (camera as { enabled?: boolean }).enabled !== false);
-      const cameras = todas.filter((camera) => this.isGridSourceHot(camera.id));
+      // AQUECER != PRÉ-CONECTAR. São duas coisas que estavam amarradas por engano.
+      //
+      // "Aquecer" é garantir que a CONFIGURAÇÃO do path no MediaMTX corresponde
+      // ao que o código quer — inclusive correções novas, como a limpeza de
+      // ffmpeg órfão. Path sob demanda não abre conexão nenhuma com a câmera ao
+      // ser configurado; ele só disca quando alguém assiste.
+      //
+      // Amarrar isso ao conjunto quente criou um efeito colateral silencioso:
+      // ao zerar o orçamento (nada pré-conectado, comportamento de 21/07), o
+      // aquecimento passou a sair sem fazer NADA — e 11 de 12 paths ficaram
+      // presos numa configuração antiga, sem receber a correção. Uma decisão de
+      // economia de banda acabou congelando o deploy de código.
+      //
+      // Agora configura todos os habilitados; quem fica QUENTE segue decidido
+      // pelo orçamento, lá em ensurePrivateSourcePath/reconcileHotGridSources.
+      const cameras = todas;
       if (!cameras.length) return;
 
       const warmSelectedPaths = this.configService.get<boolean>('mediaMtxWarmSelectedPathsOnBoot') === true;
@@ -1805,6 +1878,25 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         `&& kill -9 "$(basename "$d")" 2>/dev/null; ` +
         `done`;
       desiredPath.runOnDemand = `sh -c ${this.shellQuote(`${prekill}; exec ${ffmpegCommand}`)}`;
+      // FFMPEG ÓRFÃO: o mesmo prekill, agora também na SAÍDA do último espectador.
+      //
+      // PROVADO por experimento (31/07): apagar o path (`DELETE`) NÃO mata o
+      // ffmpeg que o MediaMTX havia iniciado — e alterar por `PATCH` também não.
+      // Como toda reconfiguração da grade faz delete+add, cada deploy deixava
+      // para trás um ffmpeg sem dono: medidos 17 vivos há 24,5 h, somando 45% de
+      // CPU e — o que importa de verdade — segurando 17 sessões RTSP no DVR do
+      // cliente. Câmera OEM aceita de 2 a 4 sessões; com as vagas ocupadas por
+      // processos fantasma, as conexões legítimas passam a levar
+      // "Connection refused", e o operador vê a frota inteira cair em bloco.
+      //
+      // O prekill já existia, mas só rodava quando um ffmpeg NOVO subia — ou
+      // seja, o órfão só era limpo se alguém voltasse a abrir aquela câmera.
+      // Câmera não revisitada ficava com o fantasma para sempre.
+      //
+      // `runOnUnDemand` fecha o ciclo: ao sair o último leitor, o MediaMTX roda
+      // este comando e nada daquele path sobrevive. Custa uma varredura em
+      // /proc por câmera, apenas quando ela fica ociosa.
+      desiredPath.runOnUnDemand = `sh -c ${this.shellQuote(prekill)}`;
       desiredPath.runOnDemandRestart = false;
       desiredPath.runOnDemandStartTimeout = '15s'; // Tempo para o ffmpeg começar a republicar.
       // Mantém o restream recente aquecido. Assim, voltar para uma câmera não
@@ -1828,6 +1920,9 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
           this.sameDuration(current.sourceOnDemandCloseAfter, desiredPath.sourceOnDemandCloseAfter);
       const hasSamePublisherSettings = needsPublisher
         ? (current.runOnDemand || '') === (desiredPath.runOnDemand || '') &&
+          // Sem comparar o runOnUnDemand, um path já existente NUNCA receberia a
+          // limpeza de órfão: seria visto como "igual" e a atualização pulada.
+          (current.runOnUnDemand || '') === (desiredPath.runOnUnDemand || '') &&
           Boolean(current.runOnDemandRestart) === Boolean(desiredPath.runOnDemandRestart) &&
           this.sameDuration(current.runOnDemandStartTimeout, desiredPath.runOnDemandStartTimeout) &&
           this.sameDuration(current.runOnDemandCloseAfter, desiredPath.runOnDemandCloseAfter)
