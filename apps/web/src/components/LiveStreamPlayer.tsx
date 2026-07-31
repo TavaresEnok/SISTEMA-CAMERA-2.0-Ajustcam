@@ -453,6 +453,23 @@ export function LiveStreamPlayer({
     () => (accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined),
     [accessToken],
   );
+  // PISCADA EM LOTE A CADA 5 MINUTOS — a causa morava aqui.
+  //
+  // A sessão é revalidada de 5 em 5 minutos (App.tsx) e isso ROTACIONA o
+  // accessToken. Como `accessToken` e `tokenHeaders` eram dependências do efeito
+  // de conexão, cada tile via a dependência mudar e REMONTAVA a conexão — as 20
+  // câmeras reconectando no mesmo segundo. MEDIDO: quedas em massa às 16:17,
+  // 16:22, 16:27, 16:32 e 16:37, sempre com "peer connection closed" (fechamento
+  // pelo NAVEGADOR) poucos segundos após a revalidação.
+  //
+  // Token novo não invalida sessão WebRTC já estabelecida: ele é usado no
+  // HANDSHAKE (busca das URLs e POST do WHEP) e depois a mídia flui pelo canal
+  // já negociado. Então o valor vai para uma ref — quem precisa lê o atual na
+  // hora de usar — e o efeito passa a depender apenas de o token EXISTIR.
+  // Login e logout continuam reagindo; rotação não derruba mais nada.
+  const tokenHeadersRef = useRef(tokenHeaders);
+  tokenHeadersRef.current = tokenHeaders;
+  const hasAccessToken = Boolean(accessToken);
 
   useEffect(() => {
     setIsMuted(muted);
@@ -607,7 +624,7 @@ export function LiveStreamPlayer({
 
   useEffect(() => {
     const element = videoRef.current;
-    if (!element || !accessToken) return;
+    if (!element || !tokenHeadersRef.current) return;
 
     let cancelled = false;
     let noFrameTimeout: number | null = null;
@@ -705,7 +722,7 @@ export function LiveStreamPlayer({
           }>(
             `${API_URL}/camera-stream/${cameraId}/urls`,
             {
-              headers: tokenHeaders,
+              headers: tokenHeadersRef.current,
               params: { viewMode: deliveryMode },
             },
           ).then(res => res.data),
@@ -779,7 +796,7 @@ export function LiveStreamPlayer({
             const response = await axios.post<{ streamToken: string; expiresAt?: string | null }>(
               `${API_URL}/camera-stream/${cameraId}/token`,
               {},
-              { headers: tokenHeaders },
+              { headers: tokenHeadersRef.current },
             );
             if (cancelled) return;
             mediaAuthTokenRef.current = response.data.streamToken;
@@ -1197,7 +1214,29 @@ export function LiveStreamPlayer({
                   }
                   throw new Error('Inicialização WebRTC cancelada.');
                 }
-                if (sessionUrl) webrtcSessionUrlRef.current = sessionUrl;
+                // A OUTRA METADE DO VAZAMENTO: a ref é ÚNICA por tile, então
+                // guardar a nova URL por cima apagava o endereço da anterior —
+                // e sem endereço não há como dar DELETE nela. A sessão velha
+                // seguia VIVA e transmitindo (medido: 3 sessões da mesma câmera,
+                // 28/25/5 MB, todas em estado `read`), porque o MediaMTX só
+                // encerra quando o cliente deleta ou o ICE cai.
+                //
+                // O bloco acima cobre "esta tentativa ficou obsoleta"; este
+                // cobre o inverso — "esta venceu, mas havia uma anterior". Sem
+                // os dois, cada reconexão somava mais um fluxo do MESMO vídeo:
+                // 17 câmeras viravam 30 sessões, a subida do servidor saturava
+                // e TODOS os tiles caíam juntos, com o servidor ocioso.
+                if (sessionUrl) {
+                  const anterior = webrtcSessionUrlRef.current;
+                  if (anterior && anterior !== sessionUrl) {
+                    void fetch(anterior, {
+                      method: 'DELETE',
+                      mode: 'cors',
+                      headers: { Authorization: `Bearer ${mediaAuthTokenRef.current}` },
+                    }).catch(() => undefined);
+                  }
+                  webrtcSessionUrlRef.current = sessionUrl;
+                }
 
                 const remoteSdp = await response.text();
                 if (cancelled || webrtcPcRef.current !== pc || abortController.signal.aborted) {
@@ -1218,13 +1257,13 @@ export function LiveStreamPlayer({
         };
 
         const reportProtocolFailure = (protocol: LiveProtocol, reason: string) => {
-          if (!tokenHeaders) return;
+          if (!tokenHeadersRef.current) return;
           void axios.post(`${API_URL}/camera-stream/${cameraId}/live-failure`, {
             protocol,
             stage: 'startup',
             reason,
             state: activeProtocolRef.current ?? 'not-playing',
-          }, { headers: tokenHeaders, timeout: 5000 }).catch(() => undefined);
+          }, { headers: tokenHeadersRef.current, timeout: 5000 }).catch(() => undefined);
         };
 
         const startHls = async (lowLatencyMode: boolean, protocolName: ActiveLiveProtocol) => {
@@ -1428,7 +1467,7 @@ export function LiveStreamPlayer({
         element.load();
       }
     };
-  }, [accessToken, authUserId, autoPlay, cameraId, deliveryMode, failActiveProtocol, getFastRetryDelay, isLikelyBlackFrame, requestFreshLiveBoot, startDelayMs, tokenHeaders, reloadNonce, suspended]);
+  }, [hasAccessToken, authUserId, autoPlay, cameraId, deliveryMode, failActiveProtocol, getFastRetryDelay, isLikelyBlackFrame, requestFreshLiveBoot, startDelayMs, reloadNonce, suspended]);
 
   useEffect(() => {
     const element = videoRef.current;
