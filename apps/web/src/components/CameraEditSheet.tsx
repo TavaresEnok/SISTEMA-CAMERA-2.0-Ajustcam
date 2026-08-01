@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { useLocation } from 'wouter';
-import { Save, Trash2, ExternalLink, LoaderCircle } from 'lucide-react';
+import { Save, Trash2, ExternalLink, LoaderCircle, Copy, RefreshCw, Check, Radio, ArrowRightLeft } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from '@/components/ui/sheet';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -53,6 +53,24 @@ const RECORDING_MODES = [
 const CODECS = ['original', 'h264', 'h265', 'mjpeg'] as const;
 const LIVE_PROTOCOLS = ['webrtc', 'hls', 'llhls', 'mjpeg'] as const;
 
+// ── COMO O VÍDEO CHEGA ATÉ NÓS ─────────────────────────────────────────────
+//
+// Duas formas, e a escolha muda o que o instalador precisa fazer em campo:
+//
+//  · NÓS CONECTAMOS (RTSP): o servidor disca para a câmera. Exige que ela seja
+//    alcançável — IP público, redirecionamento de porta ou VPN. É o modo de
+//    sempre, e continua sendo o padrão de toda câmera já cadastrada.
+//
+//  · A CÂMERA PUBLICA (RTMP): a câmera abre a conexão de saída e empurra o
+//    vídeo para nós. Funciona atrás de CGNAT, 4G e qualquer rede onde ninguém
+//    vai abrir porta — porque a conexão nasce de dentro.
+type IngestTarget = {
+  sourceMode: string;
+  serverUrl: string | null;
+  streamKey: string | null;
+  fullUrl: string | null;
+};
+
 export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEditSheetProps) {
   const [, setLocation] = useLocation();
   const accessToken = useAuthStore((s) => s.accessToken);
@@ -61,6 +79,9 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [form, setForm] = useState<Form | null>(null);
+  const [ingest, setIngest] = useState<IngestTarget | null>(null);
+  const [ingestBusy, setIngestBusy] = useState(false);
+  const [copiado, setCopiado] = useState<string | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -70,8 +91,17 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
     if (!cameraId || !accessToken || !selectedCamera) return;
     let cancelled = false;
     setForm(null);
+    setIngest(null);
     setConfirmDelete(false);
     setLoading(true);
+    // Modo de origem vem de endpoint próprio (a chave é credencial e só
+    // administrador lê). Falha aqui não pode impedir editar a câmera.
+    void axios
+      .get(`${getApiBaseUrl()}/cameras/${cameraId}/rtmp-ingest`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      .then(({ data }) => { if (!cancelled) setIngest(data ?? null); })
+      .catch(() => undefined);
     void axios
       .get(`${getApiBaseUrl()}/cameras/${cameraId}`, { headers: { Authorization: `Bearer ${accessToken}` } })
       .then(({ data }) => {
@@ -114,6 +144,62 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
 
   if (!camera) return null;
   const upd = <K extends keyof Form>(k: K, v: Form[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
+
+  const modoPush = ingest?.sourceMode === 'rtmp_push';
+  const auth = { headers: { Authorization: `Bearer ${accessToken}` } };
+
+  const copiar = async (texto: string, marca: string) => {
+    try {
+      await navigator.clipboard.writeText(texto);
+      setCopiado(marca);
+      window.setTimeout(() => setCopiado((c) => (c === marca ? null : c)), 1800);
+    } catch {
+      toast({ title: 'Não foi possível copiar', description: 'Selecione e copie manualmente.', variant: 'destructive' });
+    }
+  };
+
+  /** Liga o modo publicação e gera a chave. Rotacionar usa o mesmo caminho. */
+  const ativarPush = async (rotacionando = false) => {
+    if (!accessToken) return;
+    setIngestBusy(true);
+    try {
+      const { data } = await axios.post(`${getApiBaseUrl()}/cameras/${camera.id}/rtmp-ingest`, {}, auth);
+      setIngest(data);
+      toast({
+        title: rotacionando ? 'Chave trocada' : 'Modo publicação ativado',
+        description: rotacionando
+          ? 'A chave anterior parou de valer. Atualize a câmera com a nova.'
+          : 'Copie o endereço e a chave para a câmera.',
+      });
+    } catch (err) {
+      toast({
+        title: 'Falha ao gerar a chave',
+        description: err instanceof Error ? err.message : 'Tente novamente.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIngestBusy(false);
+    }
+  };
+
+  /** Volta ao modo tradicional e APAGA a chave (senão ela seguiria valendo). */
+  const desativarPush = async () => {
+    if (!accessToken) return;
+    setIngestBusy(true);
+    try {
+      await axios.delete(`${getApiBaseUrl()}/cameras/${camera.id}/rtmp-ingest`, auth);
+      setIngest({ sourceMode: 'rtsp_pull', serverUrl: null, streamKey: null, fullUrl: null });
+      toast({ title: 'Voltou para conexão pelo servidor', description: 'A chave de publicação foi apagada.' });
+    } catch (err) {
+      toast({
+        title: 'Falha ao desativar',
+        description: err instanceof Error ? err.message : 'Tente novamente.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIngestBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!accessToken || !form) return;
@@ -221,24 +307,114 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                     <Input value={form.name} onChange={(e) => upd('name', e.target.value)} className="text-sm" />
                   </FormField>
                   <Separator />
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Conexão</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <FormField label="Endereço IP" required>
-                      <Input value={form.ip} onChange={(e) => upd('ip', e.target.value)} className="text-sm font-mono" />
-                    </FormField>
-                    <FormField label="Porta RTSP">
-                      <Input value={form.rtspPort} onChange={(e) => upd('rtspPort', e.target.value)} className="text-sm font-mono" />
-                    </FormField>
-                    <FormField label="Usuário">
-                      <Input placeholder="admin" value={form.username} onChange={(e) => upd('username', e.target.value)} className="text-sm" />
-                    </FormField>
-                    <FormField label="Senha">
-                      <Input type="password" placeholder="Manter atual" value={form.password} onChange={(e) => upd('password', e.target.value)} className="text-sm" />
-                    </FormField>
+                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Como o vídeo chega</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { if (modoPush && !ingestBusy) void desativarPush(); }}
+                      disabled={ingestBusy}
+                      className={cn(
+                        'rounded-lg border p-3 text-left transition-colors disabled:opacity-60',
+                        !modoPush ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted/40',
+                      )}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <ArrowRightLeft className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-[12px] font-semibold">Nós conectamos</span>
+                      </div>
+                      <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                        O servidor busca o vídeo na câmera. Precisa de porta aberta ou VPN.
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { if (!modoPush && !ingestBusy) void ativarPush(); }}
+                      disabled={ingestBusy}
+                      className={cn(
+                        'rounded-lg border p-3 text-left transition-colors disabled:opacity-60',
+                        modoPush ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted/40',
+                      )}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Radio className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-[12px] font-semibold">A câmera publica</span>
+                      </div>
+                      <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                        A câmera envia o vídeo para nós. Funciona atrás de CGNAT e 4G.
+                      </p>
+                    </button>
                   </div>
-                  <FormField label="Caminho RTSP" hint="vazio = detectar">
-                    <Input value={form.rtspPath} onChange={(e) => upd('rtspPath', e.target.value)} placeholder="/live/ch1main" className="text-sm font-mono" />
-                  </FormField>
+
+                  {modoPush ? (
+                    <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3.5">
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        Cole estes dois campos na câmera ou no DVR, normalmente em
+                        {' '}<span className="font-medium text-foreground">Rede → RTMP</span> (ou
+                        {' '}<em>Push Stream</em>). Depois disso ela aparece na grade sozinha.
+                      </p>
+
+                      <CampoCopiavel
+                        rotulo="Servidor / URL"
+                        valor={ingest?.serverUrl ?? ''}
+                        copiado={copiado === 'servidor'}
+                        onCopiar={() => copiar(ingest?.serverUrl ?? '', 'servidor')}
+                      />
+                      <CampoCopiavel
+                        rotulo="Chave / Stream key"
+                        valor={ingest?.streamKey ?? ''}
+                        copiado={copiado === 'chave'}
+                        onCopiar={() => copiar(ingest?.streamKey ?? '', 'chave')}
+                      />
+                      <CampoCopiavel
+                        rotulo="URL completa"
+                        hint="para câmera com um campo só"
+                        valor={ingest?.fullUrl ?? ''}
+                        copiado={copiado === 'completa'}
+                        onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
+                      />
+
+                      <Separator />
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-[10px] leading-relaxed text-muted-foreground">
+                          A chave é uma senha de publicação. Troque se vazar ou ao trocar o equipamento —
+                          a anterior para de valer na hora.
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={ingestBusy}
+                          onClick={() => void ativarPush(true)}
+                          className="h-8 shrink-0 gap-1.5 text-[11px]"
+                        >
+                          <RefreshCw className={cn('h-3 w-3', ingestBusy && 'animate-spin')} />
+                          Trocar chave
+                        </Button>
+                      </div>
+                      <p className="text-[10px] leading-relaxed text-amber-500/90">
+                        O RTMP transporta H.264. Equipamento que só sai em H.265 não serve para este modo.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormField label="Endereço IP" required>
+                          <Input value={form.ip} onChange={(e) => upd('ip', e.target.value)} className="text-sm font-mono" />
+                        </FormField>
+                        <FormField label="Porta RTSP">
+                          <Input value={form.rtspPort} onChange={(e) => upd('rtspPort', e.target.value)} className="text-sm font-mono" />
+                        </FormField>
+                        <FormField label="Usuário">
+                          <Input placeholder="admin" value={form.username} onChange={(e) => upd('username', e.target.value)} className="text-sm" />
+                        </FormField>
+                        <FormField label="Senha">
+                          <Input type="password" placeholder="Manter atual" value={form.password} onChange={(e) => upd('password', e.target.value)} className="text-sm" />
+                        </FormField>
+                      </div>
+                      <FormField label="Caminho RTSP" hint="vazio = detectar">
+                        <Input value={form.rtspPath} onChange={(e) => upd('rtspPath', e.target.value)} placeholder="/live/ch1main" className="text-sm font-mono" />
+                      </FormField>
+                    </>
+                  )}
                 </TabsContent>
 
                 {/* STREAM */}
@@ -377,6 +553,55 @@ function ToggleRow({ label, desc, value, onChange }: { label: string; desc: stri
         <div className="text-[10px] text-muted-foreground">{desc}</div>
       </div>
       <Switch checked={value} onCheckedChange={onChange} />
+    </div>
+  );
+}
+
+/**
+ * Campo somente-leitura com botão de copiar.
+ *
+ * O instalador está com a câmera aberta noutra aba e precisa transportar estes
+ * valores sem errar um caractere — uma chave de 32 hexadecimais digitada à mão
+ * é erro garantido. Fonte monoespaçada e botão de copiar, nada além disso.
+ */
+function CampoCopiavel({
+  rotulo,
+  valor,
+  hint,
+  copiado,
+  onCopiar,
+}: {
+  rotulo: string;
+  valor: string;
+  hint?: string;
+  copiado: boolean;
+  onCopiar: () => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-[11px] font-medium text-muted-foreground">
+        {rotulo}
+        {hint && <span className="ml-1 text-[10px] font-normal opacity-60">({hint})</span>}
+      </Label>
+      <div className="flex items-center gap-1.5">
+        <Input
+          value={valor}
+          readOnly
+          onFocus={(e) => e.currentTarget.select()}
+          className="h-9 flex-1 text-[11px] font-mono"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onCopiar}
+          disabled={!valor}
+          className="h-9 w-9 shrink-0 p-0"
+          aria-label={`Copiar ${rotulo}`}
+        >
+          {copiado ? <Check className="h-3.5 w-3.5 text-[hsl(var(--status-online))]" /> : <Copy className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
     </div>
   );
 }
