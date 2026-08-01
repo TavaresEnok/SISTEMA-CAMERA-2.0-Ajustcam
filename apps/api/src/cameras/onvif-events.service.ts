@@ -9,6 +9,7 @@ import { AiService } from '../ai/ai.service';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { envNumber } from '../common/config/env-number.helper';
 import { assertCameraTargetAllowed } from '../common/network/safe-url.helper';
+import { candidateOnvifPorts, streamUriIdentifiesCamera } from './helpers/onvif-port-discovery.helper';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const onvif = require('onvif');
 
@@ -59,6 +60,9 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
   // Backoff de conexão: câmera com ONVIF recusando (porta fechada) não deve ser
   // re-tentada a cada 60s para sempre — após 3 falhas seguidas, tenta a cada 10min.
   private connectFailures: Map<string, { count: number; nextRetryAt: number }> = new Map();
+  // Câmeras cuja porta ONVIF procuramos e não achamos: recuam para não ficarem
+  // sondando o equipamento do cliente a cada ciclo para sempre.
+  private portDiscoveryFailures: Map<string, { count: number; nextRetryAt: number }> = new Map();
   private pollInterval: NodeJS.Timeout | null = null;
   private probeInterval: NodeJS.Timeout | null = null;
 
@@ -85,6 +89,19 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
 
   private deadSyncsForFallback() {
     return envNumber('AI_ONVIF_DEAD_SYNCS_FOR_FALLBACK', 3, { min: 1 });
+  }
+
+  private portDiscoveryEnabled() {
+    return String(process.env.AI_ONVIF_PORT_DISCOVERY ?? 'true').trim().toLowerCase() !== 'false';
+  }
+
+  /**
+   * Teto de câmeras sondadas por ciclo. A descoberta tenta até 6 portas por
+   * câmera; sem teto, um site novo com 50 câmeras sem cadastro viraria 300
+   * conexões contra o roteador do cliente de uma vez.
+   */
+  private portDiscoveryBudget() {
+    return envNumber('AI_ONVIF_PORT_DISCOVERY_PER_CYCLE', 4, { min: 1, max: 64, integer: true });
   }
 
   async onModuleInit() {
@@ -118,6 +135,116 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
       return cameras.registerEvent(cameraId, type, severity, message, metadata).catch(() => undefined);
     } catch {
       return Promise.resolve(undefined);
+    }
+  }
+
+  // ── DESCOBERTA DA PORTA ONVIF ──────────────────────────────────────────────
+  /**
+   * Pergunta a uma porta candidata: "você é a câmera X?".
+   *
+   * A resposta vem da PRÓPRIA câmera — pede-se o fluxo dela (GetStreamUri) e
+   * exige-se que o endereço declarado seja o que temos no cadastro. Uma porta
+   * que responde mas aponta para a câmera vizinha é rejeitada, que é justamente
+   * o engano em que um mapeamento por posição cairia.
+   */
+  private confirmOnvifPort(camera: any, port: number, password: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      try {
+        assertCameraTargetAllowed(camera.ip, port);
+      } catch {
+        return resolve(false);
+      }
+      let settled = false;
+      const finish = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+      const timer = setTimeout(() => finish(false), 8000);
+      try {
+        const cam = new onvif.Cam(
+          { hostname: camera.ip, username: camera.username, password, port, timeout: 6000 },
+          (err: any) => {
+            if (settled) return;
+            if (err) { clearTimeout(timer); return finish(false); }
+            cam.getStreamUri({ protocol: 'RTSP' }, (e2: any, result: any) => {
+              if (settled) return;
+              clearTimeout(timer);
+              if (e2 || !result?.uri) return finish(false);
+              finish(streamUriIdentifiesCamera(String(result.uri), camera));
+            });
+          },
+        );
+        cam.on('error', () => {});
+      } catch { clearTimeout(timer); finish(false); }
+    });
+  }
+
+  /**
+   * Preenche a porta ONVIF das câmeras cadastradas sem ela.
+   *
+   * Por que isto existe: `probeMotionSupport` desiste sem `onvifPort`, então uma
+   * câmera com o campo em branco nunca é sondada e fica em `motionTrigger`
+   * SYSTEM para sempre — pagando 1,06 Mbps e ~2% de CPU no servidor mesmo
+   * quando o equipamento sabe detectar movimento sozinho. Medido em campo
+   * (2026-07-31): 9 das 15 câmeras em SYSTEM tinham a porta ONVIF ABERTA no
+   * roteador; faltava apenas alguém digitar o número.
+   *
+   * Roda antes do auto-probe para que a porta descoberta já seja sondada no
+   * mesmo ciclo, sem esperar mais 15 minutos.
+   */
+  private async discoverMissingOnvifPorts() {
+    if (!this.portDiscoveryEnabled()) return;
+    const semPorta = await this.prisma.camera.findMany({
+      where: { enabled: true, onvifPort: null },
+      select: { id: true, name: true, ip: true, rtspPort: true, username: true, passwordEncrypted: true },
+    });
+    if (semPorta.length === 0) return;
+
+    // As irmãs do mesmo endereço revelam a regra do roteador daquele site.
+    const comPorta = await this.prisma.camera.findMany({
+      where: { onvifPort: { not: null } },
+      select: { ip: true, rtspPort: true, onvifPort: true },
+    });
+    const irmasPorIp = new Map<string, Array<{ rtspPort: number; onvifPort: number }>>();
+    for (const irma of comPorta) {
+      if (irma.rtspPort == null || irma.onvifPort == null) continue;
+      const lista = irmasPorIp.get(irma.ip) ?? [];
+      lista.push({ rtspPort: irma.rtspPort, onvifPort: irma.onvifPort });
+      irmasPorIp.set(irma.ip, lista);
+    }
+
+    let orcamento = this.portDiscoveryBudget();
+    for (const camera of semPorta) {
+      if (orcamento <= 0) break;
+      const recuo = this.portDiscoveryFailures.get(camera.id);
+      if (recuo && Date.now() < recuo.nextRetryAt) continue;
+      orcamento -= 1;
+
+      let password: string;
+      try { password = this.cryptoService.decrypt(camera.passwordEncrypted); }
+      catch { continue; }
+
+      const candidatas = candidateOnvifPorts(camera, irmasPorIp.get(camera.ip) ?? []);
+      let encontrada: number | null = null;
+      for (const porta of candidatas) {
+        if (await this.confirmOnvifPort(camera, porta, password)) { encontrada = porta; break; }
+      }
+
+      if (encontrada === null) {
+        const falha = this.portDiscoveryFailures.get(camera.id) ?? { count: 0, nextRetryAt: 0 };
+        falha.count += 1;
+        // Recuo crescente até 6h: câmera sem ONVIF de verdade não deve custar
+        // seis conexões a cada 15 minutos pelo resto da vida da instalação.
+        falha.nextRetryAt = Date.now() + Math.min(falha.count, 24) * 15 * 60_000;
+        this.portDiscoveryFailures.set(camera.id, falha);
+        if (falha.count <= 2) {
+          this.logger.log(`Porta ONVIF não encontrada em ${camera.name} (tentadas: ${candidatas.join(', ')}).`);
+        }
+        continue;
+      }
+
+      this.portDiscoveryFailures.delete(camera.id);
+      await this.prisma.camera.update({ where: { id: camera.id }, data: { onvifPort: encontrada } });
+      this.logger.log(`Porta ONVIF descoberta em ${camera.name}: ${encontrada} (confirmada pela própria câmera).`);
+      void this.registerCameraEvent(camera.id, 'ONVIF_PORT_DISCOVERED', 'INFO',
+        `Porta ONVIF ${encontrada} descoberta e confirmada automaticamente.`, { port: encontrada });
     }
   }
 
@@ -173,6 +300,11 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
   private async probeAllCameras() {
     if (this.isDisabled()) return;
     try {
+      // Primeiro preenche as portas em branco: sem porta, a sonda abaixo desiste
+      // e a câmera fica presa em SYSTEM. Descoberta e sonda no mesmo ciclo.
+      await this.discoverMissingOnvifPorts().catch((error: any) =>
+        this.logger.warn(`Falha na descoberta de porta ONVIF: ${error.message}`));
+
       const cameras = await this.prisma.camera.findMany({
         select: { id: true, name: true, ip: true, onvifPort: true, username: true, passwordEncrypted: true, motionTrigger: true, recordingMode: true, enabled: true },
       });
