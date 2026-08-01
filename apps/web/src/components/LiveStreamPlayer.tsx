@@ -205,6 +205,13 @@ function prefersModernBridge(codec?: string | null) {
 // protocolo principal é reavaliado uma vez.
 const LIVE_PROTOCOL_TTL_MS = 12 * 60 * 60 * 1000;
 
+// Prazo do GET /urls. Generoso o bastante para caber uma abertura fria legítima,
+// curto o bastante para que um tile travado não segure os outros por minutos.
+const LIVE_URLS_TIMEOUT_MS = 20_000;
+// Prazo do DELETE da sessão WHEP na limpeza. É cortesia com o servidor, não
+// pré-requisito: esperar por ela atrasa a PRÓXIMA conexão do operador.
+const WHEP_DELETE_TIMEOUT_MS = 2_000;
+
 function getStoredProtocol(cameraId: string): LiveProtocol | null {
   try {
     const raw = window.localStorage.getItem(`${LIVE_PROTOCOL_STORAGE_PREFIX}:${cameraId}`);
@@ -425,6 +432,20 @@ export function LiveStreamPlayer({
   // Suspende a transmissão quando a aba fica oculta por tempo suficiente, para
   // não gastar CPU de transcode nem banda com quem não está vendo.
   const [suspended, setSuspended] = useState(false);
+  // ESCALONAMENTO É COISA DA PRIMEIRA MONTAGEM, NÃO DO CICLO DE VIDA.
+  //
+  // `startDelayMs` vem de streamStartDelay(indice, total) — muda quando o
+  // operador MOVE uma câmera na grade ou troca 3x3 por 4x4. Como era dependência
+  // do efeito de conexão, qualquer rearranjo visual fechava e reabria streams que
+  // continuaram na tela o tempo todo. A grade inteira piscava por mudança de
+  // layout, sem falha nenhuma de câmera ou rede.
+  //
+  // Numa ref, o valor certo continua disponível no boot (que é quando o
+  // escalonamento importa) e deixa de reiniciar vídeo saudável.
+  const startDelayMsRef = useRef(startDelayMs);
+  startDelayMsRef.current = startDelayMs;
+  // Poster que não carregou apenas desaparece. Nunca influencia o transporte.
+  const [posterFailed, setPosterFailed] = useState(false);
   const suspendedRef = useRef(false);
   const suspendTimerRef = useRef<number | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -570,6 +591,31 @@ export function LiveStreamPlayer({
       setIsLoading(false);
     }
   }, [liveViewMode]);
+
+  // ── VIVACIDADE É QUADRO AVANÇANDO, NÃO BRILHO ─────────────────────────────
+  //
+  // A checagem de imagem preta media a coisa errada. Cena legitimamente escura —
+  // madrugada, lente coberta, transição do infravermelho, ambiente apagado — é
+  // vídeo PERFEITO, e era tratada como falha: o quadro nunca era aceito, o
+  // protocolo estourava o prazo e caía para o próximo, gastando ~30s em cascata
+  // com mídia chegando o tempo todo.
+  //
+  // O sinal honesto é o contador de quadros decodificados do próprio elemento.
+  // Se ele avança, o transporte está vivo, seja a cena branca ou preta.
+  const decodedFramesRef = useRef<{ count: number; at: number } | null>(null);
+  const framesAreProgressing = useCallback((element: HTMLVideoElement) => {
+    const quality = (element as any).getVideoPlaybackQuality?.();
+    const count = Number(
+      quality?.totalVideoFrames ?? (element as any).webkitDecodedFrameCount ?? NaN,
+    );
+    // Navegador que não expõe o contador não pode ser punido por isso: sem sinal,
+    // assume-se vivo (o prazo de conexão continua sendo a rede de proteção).
+    if (!Number.isFinite(count)) return true;
+    const anterior = decodedFramesRef.current;
+    decodedFramesRef.current = { count, at: Date.now() };
+    if (!anterior) return false; // primeira leitura: ainda não dá para comparar
+    return count > anterior.count;
+  }, []);
 
   const isLikelyBlackFrame = useCallback((element: HTMLVideoElement) => {
     if (element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || element.videoWidth <= 0 || element.videoHeight <= 0) {
@@ -746,6 +792,15 @@ export function LiveStreamPlayer({
             {
               headers: tokenHeadersRef.current,
               params: { viewMode: deliveryMode },
+              // PRAZO PRÓPRIO, obrigatório.
+              //
+              // Sem ele, a única barreira era o nginx a 300s. Pior: a promessa
+              // pendente fica registrada como "em voo", e TODA nova montagem da
+              // mesma câmera reaproveita a MESMA requisição travada — um tile
+              // preso prendia os demais, com "Conectando" por minutos e nenhuma
+              // tentativa nova. Estourar rápido e repetir é sempre melhor que
+              // esperar para sempre.
+              timeout: LIVE_URLS_TIMEOUT_MS,
             },
           ).then(res => res.data),
           STREAM_URL_CACHE_TTL_MS,
@@ -910,15 +965,28 @@ export function LiveStreamPlayer({
             }
           }
           if (webrtcSessionUrlRef.current) {
+            // ENCERRAR A SESSÃO É CORTESIA, NÃO PRÉ-REQUISITO.
+            //
+            // Aguardar este DELETE sem teto atrasa a PRÓXIMA conexão pelo tempo
+            // que o servidor levar para responder — e o nginx só corta o WHEP em
+            // 3600s. O operador ficava vendo "Conectando" por causa de uma
+            // despedida. Com teto curto a limpeza acontece quase sempre; quando
+            // não acontece, a sessão órfã morre sozinha do lado do servidor.
+            const sessao = webrtcSessionUrlRef.current;
+            webrtcSessionUrlRef.current = null;
+            const abortar = new AbortController();
+            const corte = window.setTimeout(() => abortar.abort(), WHEP_DELETE_TIMEOUT_MS);
             try {
-              await fetch(webrtcSessionUrlRef.current, {
+              await fetch(sessao, {
                 method: 'DELETE',
                 mode: 'cors',
                 headers: { Authorization: `Bearer ${mediaAuthTokenRef.current}` },
+                signal: abortar.signal,
               });
             } catch {
+            } finally {
+              window.clearTimeout(corte);
             }
-            webrtcSessionUrlRef.current = null;
           }
         };
 
@@ -944,7 +1012,10 @@ export function LiveStreamPlayer({
             }
             if (isLikelyBlackFrame(element)) {
               blackFrameObserved = true;
-              return;
+              // Preto SÓ segura enquanto os quadros NÃO avançam. Câmera em cena
+              // escura entrega quadros normalmente e precisa ser aceita — antes
+              // ela estourava o prazo e caía de protocolo sem falha nenhuma.
+              if (!framesAreProgressing(element)) return;
             }
             finish();
           };
@@ -1112,7 +1183,8 @@ export function LiveStreamPlayer({
                 if (element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || element.videoWidth <= 0 || element.videoHeight <= 0) {
                   return;
                 }
-                if (isLikelyBlackFrame(element)) return;
+                // Idem ao caminho comum: preto só adia enquanto não há quadro novo.
+                if (isLikelyBlackFrame(element) && !framesAreProgressing(element)) return;
                 visibleFrameReceived = true;
                 markHealthy('WEBRTC');
                 finish();
@@ -1424,7 +1496,7 @@ export function LiveStreamPlayer({
     if (!suspended) {
       bootDelayTimeout = window.setTimeout(() => {
         void boot();
-      }, Math.max(0, startDelayMs));
+      }, Math.max(0, startDelayMsRef.current));
     }
 
     return () => {
@@ -1489,7 +1561,7 @@ export function LiveStreamPlayer({
         element.load();
       }
     };
-  }, [hasAccessToken, authUserId, autoPlay, cameraId, deliveryMode, failActiveProtocol, getFastRetryDelay, isLikelyBlackFrame, requestFreshLiveBoot, startDelayMs, reloadNonce, suspended]);
+  }, [hasAccessToken, authUserId, autoPlay, cameraId, deliveryMode, failActiveProtocol, framesAreProgressing, getFastRetryDelay, isLikelyBlackFrame, requestFreshLiveBoot, reloadNonce, suspended]);
 
   useEffect(() => {
     const element = videoRef.current;
@@ -1798,11 +1870,16 @@ export function LiveStreamPlayer({
       // watchdog de render (rVFC) acima: se frames novos continuam sendo apresentados,
       // o stream está vivo, com ou sem movimento na cena.
       if (liveViewMode === 'selected') {
-        if (isLikelyBlackFrame(element)) {
+        // Preto NÃO derruba mais o transporte sozinho. Só há falha real quando a
+        // imagem está preta E os quadros pararam de avançar — aí de fato não está
+        // chegando vídeo. Madrugada, lente coberta e infravermelho entregam preto
+        // com quadros correndo normalmente, e trocar de protocolo ali só produzia
+        // piscada numa câmera saudável.
+        if (isLikelyBlackFrame(element) && !framesAreProgressing(element)) {
           if (blackFrameSinceRef.current == null) blackFrameSinceRef.current = now;
           if (now - blackFrameSinceRef.current >= LIVE_BLACK_FRAME_FAILOVER_MS) {
             blackFrameSinceRef.current = null;
-            failActiveProtocol('imagem preta persistente');
+            failActiveProtocol('sem imagem: quadros pararam de avançar');
             return;
           }
         } else {
@@ -1881,7 +1958,7 @@ export function LiveStreamPlayer({
     }, LIVE_STALL_CHECK_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [autoPlay, error, failActiveProtocol, isLikelyBlackFrame, isLoading, liveViewMode]);
+  }, [autoPlay, error, failActiveProtocol, framesAreProgressing, isLikelyBlackFrame, isLoading, liveViewMode]);
 
   useEffect(() => {
     if (!aiOverlayEnabled || !accessToken || !tokenHeaders) return;
@@ -1939,11 +2016,15 @@ export function LiveStreamPlayer({
           transition: zoom === 1 ? 'transform 0.2s ease-out' : 'none',
         }}
       >
-        {posterUrl && !hasLiveFrame && (
+        {posterUrl && !hasLiveFrame && !posterFailed && (
           <img
             src={posterUrl}
             alt=""
-            onError={() => requestFreshLiveBoot('Atualizando amostra da câmera...', false)}
+            // O poster é uma IMAGEM ESTÁTICA de cortesia, exibida enquanto o vídeo
+            // não chega. Ele falhar não diz NADA sobre a transmissão — e antes
+            // chamava requestFreshLiveBoot: uma miniatura com erro interrompia uma
+            // negociação de vídeo perfeitamente saudável. Agora ele só some.
+            onError={() => setPosterFailed(true)}
             className={`absolute inset-0 h-full w-full opacity-80 ${liveViewMode === 'grid' ? 'object-cover' : 'object-contain'}`}
             draggable={false}
           />

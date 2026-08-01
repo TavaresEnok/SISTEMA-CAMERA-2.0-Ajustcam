@@ -129,7 +129,25 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   });
   private activeProbes = 0;
   private readonly probeQueue: Array<() => void> = [];
-  private static readonly LIVE_CODEC_TTL_MS = 30 * 60 * 1000;
+  // ── VALIDADE DA DECISÃO DE FONTE ───────────────────────────────────────────
+  //
+  // Era 30 minutos, e isso colocava o ffprobe DENTRO da requisição do tile: o
+  // operador que abrisse a grade meia hora depois da última vez pagava a
+  // redescoberta inteira. Numa grade de 21 tiles com cache frio, as sondas
+  // enfileiram (teto de 4 simultâneas, até 8s cada) — dezenas de segundos até a
+  // primeira imagem, exatamente a demora relatada após restart da API.
+  //
+  // O prazo curto não protegia nada, porque a decisão NÃO expira por tempo: ela
+  // é descartada por EVENTO. `invalidateMainCodecCache` é chamada quando o
+  // watchdog recupera um path travado e quando o MediaMTX reporta faixa
+  // inesperada — ou seja, quando a fonte realmente mudou. Encurtar o prazo só
+  // adicionava re-sondagem cega contra o DVR do cliente.
+  //
+  // Seis horas cobrem um turno inteiro. Quem muda o cadastro da câmera continua
+  // invalidando na hora, pelo caminho de evento.
+  private static readonly LIVE_CODEC_TTL_MS =
+    envNumber('MEDIAMTX_SOURCE_DECISION_TTL_MINUTES', 360, { min: 1, max: 10080, integer: true })
+    * 60 * 1000;
   private static readonly PATH_ENSURE_TTL_MS = 30 * 1000;
 
   // Watchdog de stream: vigia paths de câmera com espectador mas SEM progresso de
