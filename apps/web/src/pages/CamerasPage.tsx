@@ -4,11 +4,12 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   LayoutGrid, List, Search, Plus, Edit, PlaySquare,
   Crosshair, RefreshCw, ChevronRight, X, Wifi,
-  Camera as CameraIcon, Check, Trash2, Circle, Radar
+  Camera as CameraIcon, Check, Trash2, Circle, Radar, Radio,
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Camera, useVmsDataStore } from '../store/vmsDataStore';
 import { CameraEditSheet } from '../components/CameraEditSheet';
+import { AddPushCameraDialog } from '../components/AddPushCameraDialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   AlertDialog,
@@ -976,6 +977,7 @@ export default function CamerasPage() {
   const [groupFilter, setGroupFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<(typeof STATUSES)[number]>('all');
   const [showWizard, setShowWizard] = useState(false);
+  const [showPushDialog, setShowPushDialog] = useState(false);
   const [selectedCam, setSelectedCam] = useState<Camera | null>(null);
   const [editCamera, setEditCamera] = useState<Camera | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Camera | null>(null);
@@ -1395,6 +1397,15 @@ export default function CamerasPage() {
             <button onClick={() => setViewMode('card')} className={`w-7 h-7 flex items-center justify-center rounded-[6px] transition-colors ${viewMode === 'card' ? 'ops-segment-active' : 'text-[hsl(var(--muted-foreground))] hover:text-foreground'}`} title="Cards"><LayoutGrid className="w-3.5 h-3.5" /></button>
           </div>
           <button
+            onClick={() => setShowPushDialog(true)}
+            className="btn btn-secondary btn-sm"
+            data-testid="button-add-push-camera"
+            title="Para câmera ou DVR que envia o vídeo para nós (atrás de CGNAT, 4G)"
+          >
+            <Radio className="w-3.5 h-3.5" />
+            Câmera que publica
+          </button>
+          <button
             onClick={() => setShowWizard(true)}
             className="btn btn-primary btn-sm"
             data-testid="button-add-camera"
@@ -1748,6 +1759,13 @@ export default function CamerasPage() {
         onDeleted={(id) => { if (selectedCam?.id === id) setSelectedCam(null); }}
       />
 
+      <AddPushCameraDialog
+        open={showPushDialog}
+        onClose={() => setShowPushDialog(false)}
+        sites={wizardSites}
+        areas={wizardAreas}
+        onCreated={loadData}
+      />
       {showWizard && <WizardModal onClose={() => setShowWizard(false)} sites={wizardSites} areas={wizardAreas} onCreated={createCamera} onTestConnection={testConnectionDraft} onPreviewFrame={previewFrameDraft} />}
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>

@@ -1,5 +1,6 @@
-import { IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsString, Max, Min, ValidateIf } from 'class-validator';
 
+const SOURCE_MODES = ['rtsp_pull', 'rtmp_push'] as const;
 const RECORDING_MODES = ['continuous', 'motion', 'schedule', 'manual'] as const;
 const VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
 const STREAM_VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
@@ -10,10 +11,25 @@ export class CreateCameraDto {
   @IsString()
   name!: string;
 
+  /**
+   * Como o vídeo chega. Ausente = 'rtsp_pull', o modo de sempre — toda
+   * integração existente continua enviando o mesmo corpo e obtendo o mesmo
+   * comportamento.
+   *
+   * Em 'rtmp_push' a câmera é que disca para nós, então endereço, porta e
+   * credencial deixam de existir do nosso lado: não há o que preencher, e exigir
+   * um IP inventado só para vencer a validação seria cadastro sujo por desenho.
+   */
+  @IsOptional()
+  @IsIn(SOURCE_MODES)
+  sourceMode?: (typeof SOURCE_MODES)[number];
+
+  @ValidateIf((o) => o.sourceMode !== 'rtmp_push')
   @IsString()
   @IsIP()
   ip!: string;
 
+  @ValidateIf((o) => o.sourceMode !== 'rtmp_push')
   @IsInt()
   @Min(1)
   @Max(65535)
@@ -25,9 +41,11 @@ export class CreateCameraDto {
   @Max(65535)
   onvifPort?: number;
 
+  @ValidateIf((o) => o.sourceMode !== 'rtmp_push')
   @IsString()
   username!: string;
 
+  @ValidateIf((o) => o.sourceMode !== 'rtmp_push')
   @IsString()
   password!: string;
 

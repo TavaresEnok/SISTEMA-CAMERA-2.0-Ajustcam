@@ -169,6 +169,21 @@ export class CamerasService {
   }
 
   async create(dto: CreateCameraDto, privacy?: { isPrivate: boolean; ownerUserId: string | null }) {
+    // ── CÂMERA QUE PUBLICA NÃO TEM ENDEREÇO NOSSO ────────────────────────────
+    //
+    // No modo push é a câmera que disca. Não existe IP para alcançá-la, porta
+    // para bater nem credencial para apresentar — e obrigar o instalador a
+    // inventar esses valores só para vencer a validação encheria o cadastro de
+    // dado falso que ninguém saberia interpretar depois.
+    //
+    // Guardamos marcadores inertes: o caminho de push nunca os lê (ver
+    // configurePushSourcedPath), e a checagem de destino é pulada justamente
+    // porque não há destino nenhum a proteger.
+    const pushSourced = dto.sourceMode === SOURCE_MODE_PUSH;
+    if (pushSourced) {
+      return this.createPushSourcedCamera(dto, privacy);
+    }
+
     const normalizedIp = this.assertTestTargetAllowed(dto.ip, dto.rtspPort);
     if (dto.onvifPort != null) this.assertTestTargetAllowed(normalizedIp, dto.onvifPort);
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
@@ -1396,6 +1411,50 @@ export class CamerasService {
     // como invariante do caminho de autenticação, mesmo se a busca mudar um dia.
     if (!ingestHashMatches(camera.rtmpIngestKeyHash, hashIngestKey(key))) return null;
     return camera;
+  }
+
+  /**
+   * Cria uma câmera que PUBLICA em nós, já com a chave pronta.
+   *
+   * Sai da mesma chamada o cadastro e o alvo de publicação, porque separar em
+   * dois passos obrigaria o instalador a salvar, reabrir e só então descobrir o
+   * que colar no equipamento — com a câmera na mão, no alto de um poste.
+   */
+  private async createPushSourcedCamera(
+    dto: CreateCameraDto,
+    privacy?: { isPrivate: boolean; ownerUserId: string | null },
+  ) {
+    await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
+    const key = generateIngestKey();
+    const camera = await this.prisma.camera.create({
+      data: {
+        name: dto.name,
+        // Marcadores inertes: no modo push nada disto é discado. Ver o comentário
+        // em create() sobre por que não pedimos ao usuário.
+        ip: '0.0.0.0',
+        rtspPort: 554,
+        username: '',
+        passwordEncrypted: this.cryptoService.encrypt(''),
+        sourceMode: SOURCE_MODE_PUSH,
+        rtmpIngestKeyHash: hashIngestKey(key),
+        rtmpIngestKeyEncrypted: this.cryptoService.encrypt(key),
+        siteId: dto.siteId,
+        areaId: dto.areaId,
+        groupId: dto.groupId,
+        recordingEnabled: dto.recordingEnabled ?? true,
+        recordingMode: dto.recordingMode ?? ((dto.recordingEnabled ?? true) ? 'continuous' : 'manual'),
+        retentionDays: dto.retentionDays ?? this.getDefaultRetentionDays(),
+        // RTMP clássico entrega H.264 — não há sonda a fazer nem codec a adivinhar.
+        streamVideoCodec: 'h264',
+        detectedVideoCodec: 'h264',
+        audioEnabled: dto.audioEnabled ?? false,
+        aiEnabled: dto.aiEnabled ?? true,
+        alarmsEnabled: dto.alarmsEnabled ?? true,
+        ...(privacy?.isPrivate ? { isPrivate: true, ownerUserId: privacy.ownerUserId } : {}),
+      },
+    });
+    this.logger.log(`Câmera ${camera.name} criada em modo de publicação (RTMP).`);
+    return { ...camera, rtmpIngest: this.buildIngestDescriptor(key) };
   }
 
   /**
