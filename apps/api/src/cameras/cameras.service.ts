@@ -1486,6 +1486,95 @@ export class CamerasService {
   }
 
   /**
+   * Saúde de uma câmera que PUBLICA em nós.
+   *
+   * ONLINE enquanto a ingestão dela estiver de pé no MediaMTX — é a única prova
+   * honesta disponível, e é mais forte que a do modo tradicional: lá "porta
+   * aberta" só diz que o equipamento responde; aqui, que o vídeo está chegando.
+   */
+  private async getPushSourcedStatus(
+    camera: { id: string; name: string; status: CameraStatus; rtmpIngestPath?: string | null; rtmpIngestKeyEncrypted?: string | null },
+    previousStatus: CameraStatus,
+    startedAt: number,
+  ) {
+    let publicando = false;
+    try {
+      let caminho: string | null = null;
+      if (isAcceptableIngestPath(camera.rtmpIngestPath)) {
+        caminho = normalizeIngestPath(camera.rtmpIngestPath);
+      } else if (camera.rtmpIngestKeyEncrypted) {
+        try {
+          const chave = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted);
+          if (isValidIngestKey(chave)) caminho = `drac/${chave}`;
+        } catch { /* chave ilegível: segue como não publicando */ }
+      }
+      if (caminho) publicando = await this.ingestPathIsLive(caminho);
+    } catch {
+      // MediaMTX fora do ar não é prova de câmera offline: mantém o status
+      // anterior em vez de inventar uma queda que não aconteceu.
+      publicando = previousStatus === CameraStatus.ONLINE;
+    }
+
+    const status = publicando ? CameraStatus.ONLINE : CameraStatus.OFFLINE;
+    await this.prisma.camera.update({
+      where: { id: camera.id },
+      data: { status, ...(publicando ? { lastSeenAt: new Date() } : {}) },
+    });
+    if (status !== previousStatus) {
+      this.logger.log(`${camera.name}: ${previousStatus} → ${status} (ingestão RTMP).`);
+    }
+    return {
+      cameraId: camera.id,
+      // "Alcançável" aqui significa "está mandando" — é o sinal honesto no push.
+      rtspReachable: publicando,
+      rtspAuthOk: publicando,
+      onvifReachable: false,
+      detectedVideoCodec: 'h264',
+      detectedFps: null as number | null,
+      configuredFps: null as number | null,
+      recordingEnabled: true,
+      preferredLiveProtocol: 'webrtc',
+      status,
+      lastSeenAt: publicando ? new Date() : null,
+      liveProbeLatencyMs: Math.max(0, Date.now() - startedAt),
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * A ingestão deste caminho está de pé no MediaMTX agora?
+   *
+   * Consulta HTTP direta em vez de injetar MediamtxProxyService: aquele serviço
+   * vive num módulo que já importa este, e fechar o ciclo impede o Nest de subir.
+   * A pergunta é simples demais para justificar refatorar a fronteira dos módulos.
+   *
+   * Lança em falha de consulta, para quem chama distinguir "não está publicando"
+   * de "não consegui perguntar" — tratar igual marcaria a frota como offline num
+   * soluço do MediaMTX.
+   */
+  private async ingestPathIsLive(pathName: string): Promise<boolean> {
+    const base = (this.configService.get<string>('mediaMtxApiBaseUrl') ?? 'http://mediamtx:9997').replace(/\/+$/, '');
+    const user = (this.configService.get<string>('mediaMtxApiUser') ?? '').trim();
+    const pass = (this.configService.get<string>('mediaMtxApiPass') ?? '').trim();
+    if (!user || !pass) throw new Error('Credenciais do MediaMTX não configuradas.');
+    const controller = new AbortController();
+    const corte = setTimeout(() => controller.abort(), 5000);
+    try {
+      const resposta = await fetch(`${base}/v3/paths/get/${encodeURIComponent(pathName)}`, {
+        headers: { Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` },
+        signal: controller.signal,
+      });
+      // 404 = ninguém publicando ali. É resposta legítima, não falha de consulta.
+      if (resposta.status === 404) return false;
+      if (!resposta.ok) throw new Error(`MediaMTX respondeu ${resposta.status}`);
+      const info = (await resposta.json()) as { ready?: boolean };
+      return info?.ready === true;
+    } finally {
+      clearTimeout(corte);
+    }
+  }
+
+  /**
    * Resolve a câmera dona de um caminho APRENDIDO.
    *
    * O par do findCameraByIngestKey, para equipamento que não deixa escolher o
@@ -1910,6 +1999,20 @@ export class CamerasService {
     try {
       const camera = await this.getCameraOrThrow(id);
       const previousStatus = camera.status;
+
+      // ── CÂMERA QUE PUBLICA: saúde é ESTAR PUBLICANDO ────────────────────────
+      //
+      // Toda a verificação abaixo pergunta "consigo alcançar a câmera?" — abre
+      // porta RTSP, sonda ONVIF, testa credencial. No modo push não há para onde
+      // discar: o cadastro guarda marcadores inertes (0.0.0.0), a sonda falha
+      // sempre, e a câmera ficava OFFLINE mesmo com vídeo entrando perfeitamente.
+      //
+      // A pergunta certa aqui é outra: o equipamento está mandando? Quem sabe
+      // disso é o MediaMTX, que tem a ingestão de pé enquanto ele publica.
+      if (isPushSourced(camera)) {
+        return this.getPushSourcedStatus(camera, previousStatus, startedAt);
+      }
+
       const rtspReachable = await this.portChecker.check(camera.ip, camera.rtspPort);
       const onvifReachable =
         camera.onvifPort == null ? true : await this.portChecker.check(camera.ip, camera.onvifPort);

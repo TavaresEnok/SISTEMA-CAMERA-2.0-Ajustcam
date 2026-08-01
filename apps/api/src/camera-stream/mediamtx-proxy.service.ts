@@ -2154,6 +2154,21 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   }
 
 
+  /**
+   * A ingestão deste caminho está de pé AGORA?
+   *
+   * Usado como sinal de saúde da câmera que publica: enquanto o equipamento
+   * manda, o path existe e está pronto. Falha de consulta lança, para quem
+   * chama distinguir "não está publicando" de "não consegui perguntar" — tratar
+   * os dois igual marcaria a frota inteira como offline num soluço do MediaMTX.
+   */
+  async isPathPublishing(pathName: string): Promise<boolean> {
+    if (!this.isEnabled()) return false;
+    const texto = await this.apiRequest('GET', `/v3/paths/get/${encodeURIComponent(pathName)}`);
+    const info = JSON.parse(texto) as { ready?: boolean; source?: { type?: string } | null };
+    return info?.ready === true;
+  }
+
   buildInternalRtspUrl(pathName: string | null) {
     if (!pathName) return null;
     const base = (this.configService.get<string>('mediaMtxRtspInternalUrl') ?? 'rtsp://mediamtx:8554').replace(/\/+$/, '');
