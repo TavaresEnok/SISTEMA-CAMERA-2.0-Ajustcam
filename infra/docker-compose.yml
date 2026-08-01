@@ -600,6 +600,21 @@ services:
       # Mídia WebRTC (ICE/UDP): PRECISA ser pública — o browser conecta direto no IP anunciado
       # (mediamtx.yml webrtcAdditionalHosts) nesta porta. Sem ela o vídeo WebRTC não flui.
       - "8189:8189/udp"
+      # INGESTÃO RTMP: a câmera é que disca para cá.
+      #
+      # Precisa ser pública pelo mesmo motivo que a mídia WebRTC acima — só que
+      # no sentido contrário: é o equipamento em campo que abre a conexão. É
+      # justamente isso que faz o modo push atravessar CGNAT e 4G, onde não há
+      # como redirecionar porta nenhuma no lado do cliente.
+      #
+      # Publicar aqui NÃO abre o acervo: quem chega nesta porta só consegue
+      # PUBLICAR, e apenas no path `drac/<chave>` da própria câmera. Assistir
+      # continua exigindo streamToken (ver mediamtx-auth na API). Sem chave
+      # cadastrada, toda publicação é recusada — a porta nasce inerte.
+      #
+      # Para desligar por completo, basta comentar esta linha: o modo pull das
+      # instalações existentes não depende dela.
+      - "${MEDIAMTX_RTMP_PORT:-1935}:1935/tcp"
       # TCP na mesma porta: REMOVIDO a pedido do dono, restaurando o transporte
       # de 21/07 (só UDP), que rodava estável.
       #

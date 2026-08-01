@@ -101,6 +101,19 @@ model Camera {
   retentionDays          Int          @default(7)
   preferredRtspTransport String       @default("tcp")
   preferredLiveProtocol  String       @default("webrtc")
+  /// COMO O VÍDEO CHEGA ATÉ NÓS.
+  /// - "rtsp_pull" (padrão): nós discamos para a câmera. Exige que ela seja
+  ///   alcançável — IP público, redirecionamento de porta ou VPN.
+  /// - "rtmp_push": a CÂMERA disca para nós e publica. Funciona atrás de CGNAT,
+  ///   4G e qualquer rede sem porta aberta, porque a conexão nasce de dentro.
+  /// O padrão mantém byte a byte o comportamento de toda instalação existente.
+  sourceMode             String       @default("rtsp_pull")
+  /// SHA-256 da chave de ingestão, para autenticar a publicação em tempo O(1)
+  /// sem guardar o segredo em claro. Único: duas câmeras nunca compartilham chave.
+  rtmpIngestKeyHash      String?      @unique
+  /// A mesma chave cifrada (AES-256-GCM), porque o administrador precisa relê-la
+  /// para configurar a câmera. Só o hash autentica; este campo é conveniência.
+  rtmpIngestKeyEncrypted String?
   streamVideoCodec       String?
   streamWidth            Int?
   streamHeight           Int?

@@ -9,6 +9,11 @@ import {
   resolveLiveRtspProfile,
 } from '../cameras/helpers/rtsp-url.helper';
 import { envNumber } from '../common/config/env-number.helper';
+import {
+  ingestPathName,
+  isPushSourced,
+  isValidIngestKey,
+} from '../cameras/helpers/rtmp-ingest.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
@@ -1690,6 +1695,102 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     return request;
   }
 
+  /**
+   * Prepara os paths de entrega de uma câmera que PUBLICA em nós.
+   *
+   * A inversão de sentido simplifica quase tudo:
+   *  · não há o que sondar — a câmera não é discável, e o codec do RTMP clássico
+   *    é H.264 por definição do protocolo, então a entrega é PASSTHROUGH puro
+   *    (sem FFmpeg, sem transcode, sem custo de CPU por câmera);
+   *  · os três modos (grade, selecionada, original) leem a MESMA ingestão, porque
+   *    quem publica manda um fluxo só — não existe sub-stream para escolher;
+   *  · `sourceOnDemand` mantém o repasse ligado só enquanto alguém assiste; a
+   *    ingestão em si continua de pé, pois quem a segura é a câmera.
+   *
+   * Se a câmera não estiver publicando no momento, o path simplesmente não fica
+   * pronto — mesmo comportamento visível de uma câmera offline no modo pull.
+   */
+  private async configurePushSourcedPath(
+    camera: any,
+    deliveryMode: LiveViewMode,
+  ): Promise<EnsuredCameraPath> {
+    const cameraId = String(camera.id);
+    const pathName = this.pathNameFromCameraId(cameraId, deliveryMode);
+
+    let ingestKey: string | null = null;
+    try {
+      if (camera.rtmpIngestKeyEncrypted) {
+        ingestKey = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted);
+      }
+    } catch {
+      ingestKey = null;
+    }
+    if (!isValidIngestKey(ingestKey)) {
+      // Câmera marcada como push mas sem chave gerada: estado de cadastro
+      // incompleto, não erro de operação. Falha explícita para o operador ver a
+      // causa em vez de encarar um tile eternamente "Conectando".
+      throw new BadRequestException(
+        'Câmera em modo de publicação (RTMP) ainda não tem chave de ingestão gerada.',
+      );
+    }
+
+    const sourceUrl = this.buildInternalRtspUrl(ingestPathName(ingestKey));
+    if (!sourceUrl) {
+      throw new BadRequestException('Ingestão RTMP indisponível: MediaMTX não configurado.');
+    }
+
+    const encodedPath = encodeURIComponent(pathName);
+    const desiredPath: any = {
+      source: sourceUrl,
+      sourceOnDemand: true,
+      sourceOnDemandStartTimeout:
+        this.configService.get<string>('mediaMtxSourceOnDemandStartTimeout') ?? '6s',
+      sourceOnDemandCloseAfter:
+        this.configService.get<string>('mediaMtxSourceOnDemandCloseAfter') ?? '5m',
+      // A ingestão vive dentro do MediaMTX: TCP no laço local é o transporte
+      // previsível, sem depender de UDP entre containers.
+      rtspTransport: 'tcp',
+    };
+
+    try {
+      const current: any = await this.getPath(pathName);
+      const igual =
+        current?.source === desiredPath.source &&
+        current?.rtspTransport === desiredPath.rtspTransport &&
+        current?.sourceOnDemand === desiredPath.sourceOnDemand;
+      if (igual) {
+        return {
+          pathName,
+          sourceUrl,
+          sourceVideoCodec: 'h264',
+          transcodedForLive: false,
+          liveProfile: null,
+          deliveryMode,
+        };
+      }
+    } catch {
+      // Não existe ainda, ou a leitura falhou: cria abaixo.
+    }
+
+    try {
+      await this.apiRequest('DELETE', `/v3/config/paths/delete/${encodedPath}`);
+    } catch {
+      // ignora quando ainda não existe
+    }
+    await this.apiRequest('POST', `/v3/config/paths/add/${encodedPath}`, desiredPath);
+    this.logger.log(`Path MediaMTX pronto ${pathName} -> ingestão RTMP (publicação da câmera)`);
+
+    return {
+      pathName,
+      sourceUrl,
+      // RTMP clássico transporta H.264; o navegador recebe passthrough.
+      sourceVideoCodec: 'h264',
+      transcodedForLive: false,
+      liveProfile: null,
+      deliveryMode,
+    };
+  }
+
   private async configurePathForCamera(cameraId: string, deliveryMode: LiveViewMode): Promise<EnsuredCameraPath> {
     if (!this.isEnabled()) {
       return {
@@ -1709,6 +1810,19 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       await this.teardownPathsForCamera(cameraId);
       throw new BadRequestException('Câmera desativada.');
     }
+    // ── CÂMERA QUE PUBLICA: nada a discar ───────────────────────────────────
+    //
+    // No modo push a câmera não é alcançável — é ela que abre a conexão. Então
+    // TODO o fluxo abaixo (montar URL RTSP, sondar sub-stream, escolher perfil,
+    // subir FFmpeg) não se aplica e, pior, sondar um endereço inalcançável
+    // gastaria os mesmos segundos de espera que já nos custaram caro.
+    //
+    // O desvio é antes de qualquer trabalho, e o caminho de `rtsp_pull` segue
+    // byte a byte o de hoje — a frota existente não passa nem perto daqui.
+    if (isPushSourced(camera)) {
+      return this.configurePushSourcedPath(camera, deliveryMode);
+    }
+
     const password = this.cryptoService.decrypt(camera.passwordEncrypted);
 
     const pathName = this.pathNameFromCameraId(cameraId, deliveryMode);

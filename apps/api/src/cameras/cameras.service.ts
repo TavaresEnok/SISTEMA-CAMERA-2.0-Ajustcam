@@ -9,6 +9,16 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
 import {
+  buildPublishTarget,
+  generateIngestKey,
+  hashIngestKey,
+  ingestHashMatches,
+  isPushSourced,
+  isValidIngestKey,
+  SOURCE_MODE_PULL,
+  SOURCE_MODE_PUSH,
+} from './helpers/rtmp-ingest.helper';
+import {
   assertCameraTargetAllowed,
   CameraNetworkPolicyError,
 } from '../common/network/safe-url.helper';
@@ -1359,6 +1369,100 @@ export class CamerasService {
       const match = uri.match(/^rtsp:\/\/[^/]+(\/.*)$/i);
       return match?.[1] ?? null;
     }
+  }
+
+  /**
+   * Resolve a câmera dona de uma chave de ingestão RTMP.
+   *
+   * Chamado no handshake de PUBLICAÇÃO, ou seja, por quem ainda não provou nada
+   * — então cada passo desconfia da entrada:
+   *  · formato validado antes de tocar o banco (chave torta não vira consulta);
+   *  · busca pelo HASH, em índice único, para não varrer o cadastro nem guardar
+   *    o segredo em claro;
+   *  · exige modo push E câmera habilitada: desativar a câmera ou tirá-la do
+   *    modo push corta a publicação na hora, sem precisar rotacionar a chave.
+   *
+   * Devolve null em qualquer desvio — quem chama traduz isso em 401 sem revelar
+   * qual das condições falhou.
+   */
+  async findCameraByIngestKey(key: unknown) {
+    if (!isValidIngestKey(key)) return null;
+    const camera = await this.prisma.camera.findUnique({
+      where: { rtmpIngestKeyHash: hashIngestKey(key) },
+      select: { id: true, name: true, enabled: true, sourceMode: true, rtmpIngestKeyHash: true },
+    });
+    if (!camera || camera.enabled === false || !isPushSourced(camera)) return null;
+    // Redundante depois do findUnique, mas mantém a comparação em tempo constante
+    // como invariante do caminho de autenticação, mesmo se a busca mudar um dia.
+    if (!ingestHashMatches(camera.rtmpIngestKeyHash, hashIngestKey(key))) return null;
+    return camera;
+  }
+
+  /**
+   * Gera (ou troca) a chave de ingestão e devolve o que o instalador digita na
+   * câmera. Colocar a câmera em modo push é parte da mesma operação: chave sem
+   * modo não serviria para nada, e modo sem chave deixaria a câmera num estado
+   * incompleto que o path de live recusa.
+   *
+   * Rotacionar derruba a publicação em andamento — é exatamente para isso que
+   * serve, quando a chave vaza ou o equipamento é trocado.
+   */
+  async rotateRtmpIngestKey(cameraId: string) {
+    const camera = await this.prisma.camera.findUnique({ where: { id: cameraId }, select: { id: true, name: true } });
+    if (!camera) throw new NotFoundException(`Camera ${cameraId} não encontrada.`);
+
+    const key = generateIngestKey();
+    await this.prisma.camera.update({
+      where: { id: cameraId },
+      data: {
+        sourceMode: SOURCE_MODE_PUSH,
+        rtmpIngestKeyHash: hashIngestKey(key),
+        rtmpIngestKeyEncrypted: this.cryptoService.encrypt(key),
+      },
+    });
+    this.logger.log(`Chave de ingestão RTMP gerada para ${camera.name}.`);
+    return this.buildIngestDescriptor(key);
+  }
+
+  /**
+   * Relê a chave já existente para exibi-la ao administrador. Devolve null quando
+   * a câmera não está em modo push ou ainda não tem chave — o chamador traduz
+   * isso na interface, sem inventar credencial.
+   */
+  async getRtmpIngestTarget(cameraId: string) {
+    const camera = await this.prisma.camera.findUnique({
+      where: { id: cameraId },
+      select: { sourceMode: true, rtmpIngestKeyEncrypted: true },
+    });
+    if (!camera || !isPushSourced(camera) || !camera.rtmpIngestKeyEncrypted) return null;
+    let key: string;
+    try { key = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted); }
+    catch { return null; }
+    if (!isValidIngestKey(key)) return null;
+    return this.buildIngestDescriptor(key);
+  }
+
+  /**
+   * Devolve a câmera ao modo tradicional e APAGA a chave. Sem apagar, a chave
+   * antiga continuaria autorizando publicação numa câmera que ninguém espera que
+   * esteja publicando.
+   */
+  async disableRtmpIngest(cameraId: string) {
+    await this.prisma.camera.update({
+      where: { id: cameraId },
+      data: { sourceMode: SOURCE_MODE_PULL, rtmpIngestKeyHash: null, rtmpIngestKeyEncrypted: null },
+    });
+  }
+
+  private buildIngestDescriptor(key: string) {
+    const host =
+      (this.configService.get<string>('mediaMtxPublicHost') ?? '').trim() || 'SEU-SERVIDOR';
+    const port = envNumber('MEDIAMTX_RTMP_PORT', 1935, { min: 1, max: 65535, integer: true });
+    const scheme =
+      String(process.env.MEDIAMTX_RTMP_SCHEME ?? 'rtmp').trim().toLowerCase() === 'rtmps'
+        ? 'rtmps'
+        : 'rtmp';
+    return { ...buildPublishTarget({ host, port, key, scheme }), sourceMode: SOURCE_MODE_PUSH };
   }
 
   private async discoverOnvifMediaProfiles(input: {

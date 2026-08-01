@@ -465,6 +465,41 @@ export class CamerasController {
     return result;
   }
 
+  // ── INGESTÃO POR RTMP (a câmera publica em nós) ───────────────────────────
+  //
+  // Só administrador: a chave é um credencial de publicação, e quem a tem pode
+  // empurrar vídeo como se fosse a câmera. Limite de requisições porque gerar
+  // chave é operação rara e em rajada só faria sentido em abuso.
+
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post(':id/rtmp-ingest')
+  async rotateRtmpIngest(@CurrentUser() user: AuthUser, @Param('id') id: string, @Req() req: Request) {
+    const alvo = await this.camerasService.rotateRtmpIngestKey(id);
+    // A chave NÃO entra na auditoria: o registro prova que houve rotação, sem
+    // reintroduzir o segredo num lugar que muita gente pode ler.
+    await this.auditService.log(user.id, 'camera.rtmp_ingest.rotate', 'Camera', id, {}, req);
+    return alvo;
+  }
+
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Get(':id/rtmp-ingest')
+  async getRtmpIngest(@Param('id') id: string) {
+    const alvo = await this.camerasService.getRtmpIngestTarget(id);
+    return alvo ?? { sourceMode: 'rtsp_pull', serverUrl: null, streamKey: null, fullUrl: null };
+  }
+
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Delete(':id/rtmp-ingest')
+  async disableRtmpIngest(@CurrentUser() user: AuthUser, @Param('id') id: string, @Req() req: Request) {
+    await this.camerasService.disableRtmpIngest(id);
+    await this.auditService.log(user.id, 'camera.rtmp_ingest.disable', 'Camera', id, {}, req);
+    return { sourceMode: 'rtsp_pull' };
+  }
+
   @Roles(UserRole.ADMIN)
   @Delete('alarms')
   async deleteAllAlarms(@CurrentUser() user: AuthUser, @Req() req: Request) {

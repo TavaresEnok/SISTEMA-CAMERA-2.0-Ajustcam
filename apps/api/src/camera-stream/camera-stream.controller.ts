@@ -20,6 +20,7 @@ import { MediamtxProxyService } from './mediamtx-proxy.service';
 import { StreamResourceAdvisorService } from './stream-resource-advisor.service';
 import { assessLiveReadiness } from './helpers/live-readiness.helper';
 import { CamerasService } from '../cameras/cameras.service';
+import { ingestKeyFromPathName } from '../cameras/helpers/rtmp-ingest.helper';
 import {
   GRID_LIVE_MAX_HEIGHT,
   GRID_LIVE_MAX_WIDTH,
@@ -161,6 +162,30 @@ export class CameraStreamController {
       timingSafeTextEquals(suppliedUser, expectedUser) &&
       timingSafeTextEquals(suppliedPass, expectedPass)
     ) {
+      return res.status(200).json({ authorized: true });
+    }
+
+    // ── PUBLICAÇÃO POR RTMP: a câmera é que disca ───────────────────────────
+    //
+    // Único caminho em que publicar é permitido sem a credencial administrativa,
+    // e ele é estreito de propósito:
+    //  · só a ação 'publish', só nos protocolos rtmp/rtmps;
+    //  · só no path `drac/<32 hex>` — nenhum nome de path de câmera casa com
+    //    esse padrão, então um publicador não tem como mirar um stream existente;
+    //  · a chave autentica por hash, em tempo constante, e some se a câmera for
+    //    desabilitada ou tirada do modo push.
+    //
+    // Publicar NÃO concede leitura: assistir continua exigindo streamToken, como
+    // antes desta funcionalidade existir.
+    if (action === 'publish') {
+      const protocolo = String(body?.protocol ?? '').toLowerCase();
+      if (protocolo !== 'rtmp' && protocolo !== 'rtmps') {
+        return deny('Publicação permitida apenas por RTMP.');
+      }
+      const chave = ingestKeyFromPathName(String(body?.path ?? ''));
+      if (!chave) return deny('Caminho de publicação inválido.');
+      const camera = await this.camerasService.findCameraByIngestKey(chave).catch(() => null);
+      if (!camera) return deny('Chave de publicação inválida.');
       return res.status(200).json({ authorized: true });
     }
 
