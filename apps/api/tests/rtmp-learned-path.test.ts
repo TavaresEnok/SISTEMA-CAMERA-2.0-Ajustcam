@@ -101,3 +101,32 @@ test('varredura de porta não expulsa a câmera de verdade', () => {
   );
   delete process.env.RTMP_PENDING_MAX;
 });
+
+// ── A LISTA PRECISA SER A MESMA DOS DOIS LADOS ──────────────────────────────
+//
+// Defeito real, encontrado em campo: o registro foi declarado como provider em
+// DOIS módulos (cameras e camera-stream). O Nest cria uma instância por módulo,
+// então o handler de autenticação gravava as tentativas numa e a tela lia da
+// outra — sempre vazia. Tudo "funcionava"; a lista nunca aparecia.
+//
+// Nenhum teste unitário pegaria isso, porque cada teste instancia o seu. O que
+// pega é conferir a DECLARAÇÃO: o provider tem de existir em um módulo só.
+
+test('o registro de tentativas é declarado em UM módulo só', () => {
+  const fs = require('fs');
+  const modulos = [
+    'src/cameras/cameras.module.ts',
+    'src/camera-stream/camera-stream.module.ts',
+  ];
+  const declaram = modulos.filter((m) => {
+    const texto = fs.readFileSync(m, 'utf8');
+    // Conta só a declaração em `providers:`, não o import nem o export.
+    const bloco = texto.match(/providers:\s*\[[^\]]*\]/s)?.[0] ?? '';
+    return bloco.includes('PendingIngestRegistry');
+  });
+  assert.deepEqual(
+    declaram,
+    ['src/cameras/cameras.module.ts'],
+    'duas declarações = duas instâncias = a tela lê uma lista que ninguém preenche',
+  );
+});

@@ -1,3 +1,11 @@
+// INSTÂNCIA ÚNICA, de propósito.
+//
+// Declarar este provider em DOIS módulos faz o Nest criar DUAS instâncias: o
+// camera-stream gravava as tentativas numa e a tela de câmeras lia da outra,
+// sempre vazia. O sintoma era cruel — tudo "funcionando", lista sempre vazia,
+// e nenhum teste unitário pega porque cada um instancia o seu.
+//
+// Fica só aqui e é exportado; o camera-stream já importa este módulo.
 import { PendingIngestRegistry } from './pending-ingest.registry';
 import { forwardRef, Module } from '@nestjs/common';
 import { AccessControlModule } from '../access-control/access-control.module';

@@ -25,6 +25,12 @@ import { getApiBaseUrl } from '../lib/api-base';
 // edição da câmera, depois que ela existir — no momento do cadastro o que o
 // instalador precisa é da chave, e ela sai pronta na mesma tela.
 
+type PendingIngest = {
+  path: string;
+  remoteAddr: string | null;
+  attempts: number;
+};
+
 export function AddPushCameraDialog({
   open,
   onClose,
@@ -39,9 +45,12 @@ export function AddPushCameraDialog({
   const [salvando, setSalvando] = useState(false);
   const [copiado, setCopiado] = useState<string | null>(null);
   const [alvo, setAlvo] = useState<{ serverUrl: string; streamKey: string; fullUrl: string } | null>(null);
+  const [cameraId, setCameraId] = useState<string | null>(null);
+  const [pendentes, setPendentes] = useState<PendingIngest[]>([]);
+  const [vinculando, setVinculando] = useState<string | null>(null);
 
   const fechar = () => {
-    setNome(''); setAlvo(null); setCopiado(null);
+    setNome(''); setAlvo(null); setCopiado(null); setCameraId(null); setPendentes([]);
     onClose();
   };
 
@@ -73,6 +82,13 @@ export function AddPushCameraDialog({
         throw new Error('A câmera foi criada, mas a chave não veio. Abra a câmera e gere pela edição.');
       }
       setAlvo(data.rtmpIngest);
+      setCameraId(data.id ?? null);
+      // Equipamento que ignora o caminho que mandamos já está batendo na porta.
+      // Mostrar aqui evita mandar o instalador procurar noutra tela.
+      await axios
+        .get(`${getApiBaseUrl()}/cameras/rtmp-ingest/pending`, { headers: { Authorization: `Bearer ${accessToken}` } })
+        .then(({ data: lista }) => setPendentes(lista?.items ?? []))
+        .catch(() => undefined);
       await onCreated();
     } catch (err) {
       const msg = axios.isAxiosError(err)
@@ -81,6 +97,29 @@ export function AddPushCameraDialog({
       toast({ title: 'Falha ao cadastrar', description: String(msg), variant: 'destructive' });
     } finally {
       setSalvando(false);
+    }
+  };
+
+  const vincular = async (path: string) => {
+    if (!accessToken || !cameraId) return;
+    setVinculando(path);
+    try {
+      await axios.post(
+        `${getApiBaseUrl()}/cameras/${cameraId}/rtmp-ingest/bind`,
+        { path },
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      setPendentes([]);
+      toast({
+        title: 'Equipamento vinculado',
+        description: 'O vídeo dele passa a entrar como esta câmera em até um minuto.',
+      });
+      await onCreated();
+    } catch (err) {
+      const msg = axios.isAxiosError(err) ? (err.response?.data?.message ?? err.message) : 'Tente novamente.';
+      toast({ title: 'Falha ao vincular', description: String(msg), variant: 'destructive' });
+    } finally {
+      setVinculando(null);
     }
   };
 
@@ -130,6 +169,41 @@ export function AddPushCameraDialog({
             <Campo rotulo="Servidor / URL" valor={alvo.serverUrl} copiado={copiado === 's'} onCopiar={() => copiar(alvo.serverUrl, 's')} />
             <Campo rotulo="Chave / Stream key" valor={alvo.streamKey} copiado={copiado === 'k'} onCopiar={() => copiar(alvo.streamKey, 'k')} />
             <Campo rotulo="URL completa" hint="para equipamento com um campo só" valor={alvo.fullUrl} copiado={copiado === 'f'} onCopiar={() => copiar(alvo.fullUrl, 'f')} />
+            {pendentes.length > 0 && (
+              <>
+                <Separator />
+                <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                  <p className="text-[11px] font-semibold">
+                    Já tem equipamento batendo na porta
+                  </p>
+                  <p className="text-[10px] leading-relaxed text-muted-foreground">
+                    Estes aparelhos estão tentando publicar mas não deixam escolher o destino — usam
+                    caminho próprio e ignoram a chave acima. Se um deles for esta câmera, vincule e
+                    pronto: não precisa configurar mais nada nele.
+                  </p>
+                  {pendentes.map((p) => (
+                    <div key={p.path} className="flex items-center gap-2 rounded-md border border-border bg-background/70 p-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-[11px]">{p.path}</p>
+                        <p className="text-[10px] text-muted-foreground">
+                          {p.remoteAddr ?? 'origem desconhecida'} · {p.attempts} tentativa{p.attempts > 1 ? 's' : ''}
+                        </p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={vinculando !== null}
+                        onClick={() => void vincular(p.path)}
+                        className="h-8 shrink-0 gap-1.5 text-[11px]"
+                      >
+                        {vinculando === p.path && <LoaderCircle className="h-3 w-3 animate-spin" />}
+                        É esta câmera
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             <Separator />
             <p className="text-[10px] leading-relaxed text-muted-foreground">
               A chave é uma senha de publicação — quem a tiver pode enviar vídeo como se fosse esta câmera.
