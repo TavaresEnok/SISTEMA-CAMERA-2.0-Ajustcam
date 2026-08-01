@@ -252,6 +252,10 @@ function proxyComSessoes(sessoes: Array<Record<string, unknown>>) {
   const kicked: string[] = [];
   const mgr = makeProxy({
     isEnabled: () => true,
+    // Os testes abaixo exercitam a LÓGICA do coletor, então ligam a flag de
+    // propósito. Que ele nasça desligado é verificado num teste próprio — sem
+    // essa separação, os demais passariam sem executar nada.
+    reapDuplicateSessionsEnabled: true,
     apiRequest: async (metodo: string, url: string) => {
       if (url.includes('/webrtcsessions/kick/')) {
         kicked.push(decodeURIComponent(url.split('/').pop() ?? ''));
@@ -267,7 +271,29 @@ const sessao = (id: string, path: string, idadeMs: number) => ({
   id, path, created: new Date(Date.now() - idadeMs).toISOString(),
 });
 
-test('duplicata da mesma câmera: mantém a MAIS NOVA e encerra as anteriores', async () => {
+// ── O COLETOR NASCE DESLIGADO ───────────────────────────────────────────────
+//
+// Ele agrupa sessões só pelo path. Daqui o servidor NÃO distingue uma sessão
+// órfã de um segundo operador legítimo — todos chegam pelo IP do proxy. Com dois
+// operadores na mesma câmera (ou duas abas, ou um monitor mural), quem assiste
+// há mais de 15s era expulso a cada ciclo: a própria piscada que ele deveria
+// evitar. O vazamento que o motivou foi corrigido na raiz, no player.
+//
+// Segue disponível para diagnóstico atrás de MEDIAMTX_REAP_DUPLICATE_SESSIONS.
+
+test('DESLIGADO por padrão: dois operadores na mesma câmera convivem', async () => {
+  const { mgr, kicked } = proxyComSessoes([
+    sessao('operador-a', `cam_${HASH}_grid`, 300_000),
+    sessao('operador-b', `cam_${HASH}_grid`, 120_000),
+    sessao('mural', `cam_${HASH}_grid`, 60_000),
+  ]);
+  // Estado REAL de produção: a flag não vem do ambiente, então é falsa.
+  mgr.reapDuplicateSessionsEnabled = false;
+  await mgr.reapDuplicateWebrtcSessions();
+  assert.deepEqual(kicked, [], 'nenhum espectador pode ser expulso pelo servidor');
+});
+
+test('quando LIGADO explicitamente, mantém a MAIS NOVA e encerra as anteriores', async () => {
   const { mgr, kicked } = proxyComSessoes([
     sessao('velha', `cam_${HASH}_grid`, 300_000),
     sessao('media', `cam_${HASH}_grid`, 120_000),
@@ -275,6 +301,14 @@ test('duplicata da mesma câmera: mantém a MAIS NOVA e encerra as anteriores', 
   ]);
   await mgr.reapDuplicateWebrtcSessions();
   assert.deepEqual(kicked.sort(), ['media', 'velha'], 'a mais nova é a que o operador vê e deve sobreviver');
+});
+
+test('o padrão de fábrica da flag é DESLIGADO', () => {
+  // Guarda contra alguém religar por descuido: sem a variável de ambiente, o
+  // coletor tem de nascer inerte.
+  delete process.env.MEDIAMTX_REAP_DUPLICATE_SESSIONS;
+  const mgr = makeProxy();
+  assert.equal(mgr.reapDuplicateSessionsEnabled, false);
 });
 
 test('sessão única nunca é derrubada', async () => {
@@ -362,4 +396,85 @@ test('runOnUnDemand entra na comparação de config (senão o path velho nunca a
     'path sem limpeza precisa ser reconhecido como DIFERENTE e reconfigurado',
   );
   assert.equal(mesmo(novo, novo), true, 'path já com limpeza não pode ser recriado à toa');
+});
+
+// ── 8. A AUTOCURA É REDUNDANTE COM O WATCHDOG ────────────────────────────────
+//
+// A pergunta certa não é "ligar ou desligar a autocura", é "quem protege a
+// câmera que aceita RTSP e não envia mídia (Cam-03/09)". Resposta: o WATCHDOG,
+// que já existia em 21/07 e é o mecanismo com histórico de estabilidade.
+//
+// O que fazia a autocura parecer única era descartar a decisão de fonte para
+// re-sondar outro endpoint. Mas `invalidateMainCodecCache` — chamado por
+// `recoverStuckPath` — JÁ limpa o gridSourceCache. O watchdog portanto também
+// re-sonda; a diferença é que ele faz isso:
+//   · fora do caminho da requisição (abrir um tile nunca espera sonda);
+//   · só em path COM espectador (demanda comprovada);
+//   · com freio anti-tempestade contra câmera morta.
+// A autocura acrescentava o mesmo efeito com risco: rodava na abertura do tile
+// e podia trocar a fonte com o operador assistindo (delete+add derruba leitor).
+
+test('a recuperação do watchdog descarta a decisão de fonte (re-sonda de verdade)', async () => {
+  const invalidadas: string[] = [];
+  const mgr = makeProxy({
+    invalidateMainCodecCache: (id: string) => invalidadas.push(id),
+    apiRequest: async () => '',
+    ensurePathForCamera: async () => {},
+  });
+
+  await mgr.recoverStuckPath(`cam_${HASH}_grid`, true, 1);
+
+  assert.deepEqual(
+    invalidadas,
+    [CAM],
+    'sem isto o watchdog reconfiguraria o MESMO endpoint ruim para sempre',
+  );
+});
+
+test('invalidateMainCodecCache limpa mesmo o cache da decisão de grade', () => {
+  const mgr = makeProxy();
+  mgr.gridSourceCache.set(`grid:${CAM}:1.2.3.4|554|admin||1|1`, { url: 'x', at: Date.now() });
+  mgr.gridSourceCache.set('grid:outra-camera:9.9.9.9|554|admin||1|1', { url: 'y', at: Date.now() });
+
+  mgr.invalidateMainCodecCache(CAM);
+
+  assert.equal(mgr.gridSourceCache.size, 1, 'só a câmera alvo sai do cache');
+  assert.ok(
+    [...mgr.gridSourceCache.keys()][0].includes('outra-camera'),
+    'a vizinha não pode ser afetada',
+  );
+});
+
+// ── FALHA DE LEITURA NÃO PODE APAGAR PATH SAUDÁVEL ──────────────────────────
+//
+// A reconciliação lê a configuração do path e, se divergir, faz DELETE + POST.
+// Antes, QUALQUER erro na leitura caía no ramo "não existe" e seguia para o
+// DELETE. Mas timeout, 5xx e 401 descrevem "não consegui ler agora" — o path
+// pode estar vivo, com gente assistindo, e apagá-lo derruba todos os leitores
+// por causa de um soluço do plano de controle.
+
+test('erro HTTP carrega o status para quem reconcilia decidir', async () => {
+  const mgr = makeProxy({
+    configService: {
+      get: (k: string) => {
+        if (k === 'mediaMtxApiUser') return 'u';
+        if (k === 'mediaMtxApiPass') return 'p';
+        if (k === 'mediaMtxApiBaseUrl') return 'http://mediamtx:9997';
+        return undefined;
+      },
+    },
+  });
+  const fetchOriginal = globalThis.fetch;
+  for (const status of [404, 500, 502, 401]) {
+    globalThis.fetch = (async () => ({
+      ok: false, status, text: async () => 'erro',
+    })) as unknown as typeof fetch;
+    try {
+      await mgr.apiRequest('GET', '/v3/config/paths/get/x');
+      assert.fail(`deveria ter lançado para ${status}`);
+    } catch (error: any) {
+      assert.equal(error.status, status, 'o status HTTP precisa sobreviver ao Error');
+    }
+  }
+  globalThis.fetch = fetchOriginal;
 });

@@ -98,6 +98,21 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     String(process.env.MEDIAMTX_DEEP_SUB_SEARCH ?? 'false').trim().toLowerCase() === 'true';
   private readonly gridAutoHealEnabled =
     String(process.env.MEDIAMTX_GRID_AUTOHEAL ?? 'false').trim().toLowerCase() === 'true';
+  // Coletor de sessões WebRTC duplicadas. DESLIGADO por padrão.
+  //
+  // Ele agrupa sessões apenas pelo path e mantém a mais nova. O servidor não tem
+  // como distinguir uma sessão órfã de um SEGUNDO OPERADOR legítimo — todos
+  // chegam pelo IP do proxy. Então, com dois operadores na mesma câmera (ou duas
+  // abas, ou um monitor mural), quem estava assistindo há mais de 15s é EXPULSO
+  // a cada ciclo do watchdog. Isso é exatamente a piscada que ele deveria evitar.
+  //
+  // O vazamento que motivou o coletor foi corrigido na raiz, no player (fecha a
+  // sessão anterior antes de assumir a nova). O coletor era cinto além do
+  // suspensório — e o suspensório passou a apertar o pescoço.
+  //
+  // Continua disponível para diagnóstico de vazamento: MEDIAMTX_REAP_DUPLICATE_SESSIONS=true.
+  private readonly reapDuplicateSessionsEnabled =
+    String(process.env.MEDIAMTX_REAP_DUPLICATE_SESSIONS ?? 'false').trim().toLowerCase() === 'true';
   // Salto privado (`_source`) entre a câmera e o FFmpeg. DESLIGADO por padrão:
   // protegia a credencial no `ps aux`, mas o repasse extra custou FPS e tiles
   // pretos em produção. Ver o comentário em ensurePathForCamera.
@@ -565,6 +580,7 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
    */
   private async reapDuplicateWebrtcSessions() {
     if (!this.isEnabled()) return;
+    if (!this.reapDuplicateSessionsEnabled) return;
     const GRACA_MS = 15_000;
     try {
       const texto = await this.apiRequest('GET', '/v3/webrtcsessions/list?itemsPerPage=1000');
@@ -1423,9 +1439,14 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
         // A config que enviamos ao MediaMTX embute a URL RTSP da câmera COM credencial;
         // um erro pode ecoá-la de volta no corpo. Sanitiza antes de virar Error.message
         // (que sobe para logs e mensagens de diagnóstico).
-        throw new Error(
+        const error: any = new Error(
           `MediaMTX API ${method} ${path} failed (${response.status}): ${sanitizeSensitiveText(text).slice(0, 160)}`,
         );
+        // O código HTTP precisa sobreviver ao Error: quem reconcilia path tem de
+        // distinguir "não existe" (404, recriar) de "não deu para ler agora"
+        // (timeout/5xx) — tratar os dois igual APAGA path saudável com espectador.
+        error.status = response.status;
+        throw error;
       }
       return await response.text().catch(() => '');
     } finally {
@@ -2053,8 +2074,31 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
           deliveryMode,
         };
       }
-    } catch {
-      // Se não existe, cria abaixo. Se a API falhar temporariamente, a criação vai expor o erro real.
+    } catch (error: any) {
+      // SÓ 404 significa "não existe, pode criar".
+      //
+      // Antes, QUALQUER erro caía aqui e seguia para DELETE + POST. Mas timeout,
+      // 5xx, 401 ou JSON inválido descrevem "não consegui LER a configuração" —
+      // e o path pode estar vivo, com gente assistindo. Apagá-lo derruba todos os
+      // leitores por causa de um soluço do plano de controle.
+      //
+      // Na dúvida, não muta: devolve o que já sabemos e tenta de novo no próximo
+      // ciclo. Path realmente errado é reconciliado então; path saudável sobrevive.
+      const status = Number(error?.status);
+      if (status !== 404) {
+        this.logger.warn(
+          `Não foi possível ler a configuração de ${pathName} (${error?.message ?? 'erro desconhecido'}) — ` +
+          'path preservado; nada foi recriado.',
+        );
+        return {
+          pathName,
+          sourceUrl,
+          sourceVideoCodec: isHevc ? 'h265' : 'h264',
+          transcodedForLive,
+          liveProfile,
+          deliveryMode,
+        };
+      }
     }
 
     // Só recria quando a configuração mudou; recriar em toda leitura derruba muxers HLS/WebRTC ativos.

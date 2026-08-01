@@ -195,10 +195,29 @@ function prefersModernBridge(codec?: string | null) {
   return normalized.includes('h265') || normalized.includes('hevc') || normalized.includes('hvc1') || normalized.includes('265');
 }
 
+// A preferência aprendida VENCE. Sem prazo, uma única falha passageira de WebRTC
+// (queda de link, servidor reiniciando) fixava aquela câmera em HLS naquele
+// navegador PARA SEMPRE: como o HLS funciona, o WebRTC nunca mais era tentado, e
+// o operador ficava com latência alta mesmo depois de a infraestrutura sarar.
+//
+// Doze horas cobrem um turno inteiro — dentro do turno vale o fato observado
+// (nada de repetir tentativa fracassada a cada tile); no turno seguinte, o
+// protocolo principal é reavaliado uma vez.
+const LIVE_PROTOCOL_TTL_MS = 12 * 60 * 60 * 1000;
+
 function getStoredProtocol(cameraId: string): LiveProtocol | null {
   try {
-    const stored = window.localStorage.getItem(`${LIVE_PROTOCOL_STORAGE_PREFIX}:${cameraId}`);
-    const normalized = stored === 'll-hls' ? 'llhls' : stored;
+    const raw = window.localStorage.getItem(`${LIVE_PROTOCOL_STORAGE_PREFIX}:${cameraId}`);
+    if (!raw) return null;
+    // Formato novo: "<protocolo>|<timestamp>". O antigo (só o protocolo) ainda é
+    // aceito uma vez e migra na primeira gravação — ninguém perde a preferência
+    // ao atualizar, mas também ninguém fica preso ao valor eterno de antes.
+    const [valor, gravadoEm] = raw.split('|');
+    if (gravadoEm) {
+      const idade = Date.now() - Number(gravadoEm);
+      if (!Number.isFinite(idade) || idade < 0 || idade > LIVE_PROTOCOL_TTL_MS) return null;
+    }
+    const normalized = valor === 'll-hls' ? 'llhls' : valor;
     return normalized === 'webrtc' || normalized === 'hls' || normalized === 'llhls' ? normalized : null;
   } catch {
     return null;
@@ -208,7 +227,10 @@ function getStoredProtocol(cameraId: string): LiveProtocol | null {
 function storeProtocol(cameraId: string, protocol: ActiveLiveProtocol) {
   try {
     const normalized = protocol === 'LL-HLS' ? 'llhls' : protocol.toLowerCase();
-    window.localStorage.setItem(`${LIVE_PROTOCOL_STORAGE_PREFIX}:${cameraId}`, normalized);
+    window.localStorage.setItem(
+      `${LIVE_PROTOCOL_STORAGE_PREFIX}:${cameraId}`,
+      `${normalized}|${Date.now()}`,
+    );
   } catch {
   }
 }
