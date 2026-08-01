@@ -561,6 +561,20 @@ export class CamerasService {
 
   async getPipelineSummary(id: string) {
     const camera = await this.getCameraOrThrow(id);
+
+    // Câmera que PUBLICA não tem URL RTSP nossa para resumir: o cadastro guarda
+    // marcadores inertes (0.0.0.0), e montar a URL com eles fazia a política de
+    // rede recusar o destino — virando 500 a cada abertura da tela de ajustes.
+    // Aqui a resposta honesta é "não há três perfis": quem publica manda UM
+    // fluxo, e é o mesmo para live, gravação e análise.
+    if (isPushSourced(camera)) {
+      const origem = camera.rtmpIngestPath
+        ? `rtmp://…/${camera.rtmpIngestPath}`
+        : 'aguardando o equipamento publicar';
+      const perfil = { channel: 1, subtype: 0, url: origem, codec: 'h264' };
+      return { live: perfil, recording: perfil, analytics: perfil, sourceMode: SOURCE_MODE_PUSH };
+    }
+
     const password = this.cryptoService.decrypt(camera.passwordEncrypted);
     const liveProfile = resolveLiveRtspProfile(camera);
     const recordingProfile = resolveRecordingRtspProfile(camera);
