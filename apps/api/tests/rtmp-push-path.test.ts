@@ -115,7 +115,7 @@ test('modo push sem chave gerada falha explicitamente, não fica "Conectando"', 
   });
   await assert.rejects(
     () => mgr.configurePushSourcedPath(cameraPush('x') as any, 'grid'),
-    /chave de ingestão/i,
+    /chave nem equipamento vinculado/i,
   );
 });
 

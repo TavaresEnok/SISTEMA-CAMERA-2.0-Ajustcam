@@ -114,6 +114,18 @@ model Camera {
   /// A mesma chave cifrada (AES-256-GCM), porque o administrador precisa relê-la
   /// para configurar a câmera. Só o hash autentica; este campo é conveniência.
   rtmpIngestKeyEncrypted String?
+  /// CAMINHO PRÓPRIO DO EQUIPAMENTO.
+  ///
+  /// Muita câmera não deixa escolher para onde publicar: ela monta o caminho
+  /// sozinha a partir do número de série (medido: `live/liveStream_H3ZL...`) e
+  /// ignora o que se digita depois do endereço. Exigir o NOSSO formato deixaria
+  /// esse equipamento de fora para sempre.
+  ///
+  /// Então o sistema aprende: registra a tentativa, o administrador confirma de
+  /// qual câmera é, e o caminho fica vinculado. Publicar em caminho NÃO
+  /// registrado continua negado — a confirmação é o que separa a câmera do
+  /// cliente de qualquer um na internet.
+  rtmpIngestPath         String?      @unique
   streamVideoCodec       String?
   streamWidth            Int?
   streamHeight           Int?

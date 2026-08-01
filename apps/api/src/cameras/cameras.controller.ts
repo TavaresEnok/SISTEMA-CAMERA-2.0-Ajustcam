@@ -1,3 +1,4 @@
+import { PendingIngestRegistry } from './pending-ingest.registry';
 import { Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { UserRole, CameraStatus, AlarmPriority, AlarmSource } from '@prisma/client';
@@ -35,6 +36,7 @@ export class CamerasController {
     private readonly recordingManager: RecordingProcessManagerService,
     private readonly moduleRef: ModuleRef,
     private readonly commercialPolicy: CommercialPolicyService,
+    private readonly pendingIngest: PendingIngestRegistry,
   ) {}
 
   private schedulePostCreateProvisioning(cameraId: string) {
@@ -481,6 +483,39 @@ export class CamerasController {
     // reintroduzir o segredo num lugar que muita gente pode ler.
     await this.auditService.log(user.id, 'camera.rtmp_ingest.rotate', 'Camera', id, {}, req);
     return alvo;
+  }
+
+  /**
+   * Equipamentos que tentaram publicar e ainda não pertencem a ninguém.
+   *
+   * É a peça que faz o sistema "aprender": em vez de recusar em silêncio (o que
+   * transforma "a câmera não aparece" num mistério), a tentativa vira uma linha
+   * na tela para o administrador dizer de qual câmera é.
+   *
+   * Rota FIXA antes das dinâmicas `:id/...` — senão o Nest leria
+   * "rtmp-ingest" como um id de câmera.
+   */
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Get('rtmp-ingest/pending')
+  listPendingIngest() {
+    return { items: this.pendingIngest.list() };
+  }
+
+  /** Vincula a esta câmera o caminho que o equipamento usa por conta própria. */
+  @Roles(UserRole.ADMIN)
+  @RequirePermission('cameraConfig')
+  @Post(':id/rtmp-ingest/bind')
+  async bindRtmpIngest(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() body: { path?: string },
+    @Req() req: Request,
+  ) {
+    const resultado = await this.camerasService.bindRtmpIngestPath(id, String(body?.path ?? ''));
+    this.pendingIngest.clear(resultado.ingestPath);
+    await this.auditService.log(user.id, 'camera.rtmp_ingest.bind', 'Camera', id, { path: resultado.ingestPath }, req);
+    return resultado;
   }
 
   @Roles(UserRole.ADMIN)

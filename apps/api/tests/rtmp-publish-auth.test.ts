@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CameraStreamController } from '../src/camera-stream/camera-stream.controller';
+import { PendingIngestRegistry } from '../src/cameras/pending-ingest.registry';
 import {
   generateIngestKey,
   hashIngestKey,
@@ -33,7 +34,7 @@ function respostaFalsa() {
 }
 
 /** Controller com apenas o que o caminho de autenticação toca. */
-function montarController(opcoes: { cameraPorChave?: (k: unknown) => Promise<any> } = {}) {
+function montarController(opcoes: { cameraPorChave?: (k: unknown) => Promise<any>; cameraPorCaminho?: (p: unknown) => Promise<any> } = {}) {
   const config: any = {
     get: (chave: string) => {
       if (chave === 'mediaMtxAuthCallbackToken') return TOKEN_INTERNO;
@@ -44,10 +45,16 @@ function montarController(opcoes: { cameraPorChave?: (k: unknown) => Promise<any
   };
   const cameras: any = {
     findCameraByIngestKey: opcoes.cameraPorChave ?? (async () => null),
+    // Sem vínculo aprendido, salvo quando o teste disser o contrário.
+    findCameraByIngestPath: (opcoes as any).cameraPorCaminho ?? (async () => null),
   };
+  // O registro de tentativas entra aqui: recusar em silêncio foi o que
+  // transformou a primeira tentativa de campo num mistério.
+  const pendentes = new PendingIngestRegistry();
   return new CameraStreamController(
     null as any, null as any, null as any, cameras,
     null as any, null as any, null as any, null as any, null as any, config,
+    pendentes,
   );
 }
 

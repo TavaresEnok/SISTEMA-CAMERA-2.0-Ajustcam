@@ -21,6 +21,7 @@ import { StreamResourceAdvisorService } from './stream-resource-advisor.service'
 import { assessLiveReadiness } from './helpers/live-readiness.helper';
 import { CamerasService } from '../cameras/cameras.service';
 import { ingestKeyFromPathName } from '../cameras/helpers/rtmp-ingest.helper';
+import { PendingIngestRegistry } from '../cameras/pending-ingest.registry';
 import {
   GRID_LIVE_MAX_HEIGHT,
   GRID_LIVE_MAX_WIDTH,
@@ -78,6 +79,7 @@ export class CameraStreamController {
     private readonly commercialPolicy: CommercialPolicyService,
     private readonly streamResourceAdvisor: StreamResourceAdvisorService,
     private readonly configService: ConfigService,
+    private readonly pendingIngest: PendingIngestRegistry,
   ) {}
 
   private extractBearerToken(req: Request): string | null {
@@ -182,11 +184,29 @@ export class CameraStreamController {
       if (protocolo !== 'rtmp' && protocolo !== 'rtmps') {
         return deny('Publicação permitida apenas por RTMP.');
       }
-      const chave = ingestKeyFromPathName(String(body?.path ?? ''));
-      if (!chave) return deny('Caminho de publicação inválido.');
-      const camera = await this.camerasService.findCameraByIngestKey(chave).catch(() => null);
-      if (!camera) return deny('Chave de publicação inválida.');
-      return res.status(200).json({ authorized: true });
+      const caminho = String(body?.path ?? '');
+
+      // 1ª via: a chave que NÓS geramos, embutida no caminho `drac/<32 hex>`.
+      const chave = ingestKeyFromPathName(caminho);
+      if (chave) {
+        const camera = await this.camerasService.findCameraByIngestKey(chave).catch(() => null);
+        if (camera) return res.status(200).json({ authorized: true });
+        this.pendingIngest.record(caminho, body?.ip ?? null);
+        return deny('Chave de publicação inválida.');
+      }
+
+      // 2ª via: o caminho PRÓPRIO do equipamento, já confirmado por um
+      // administrador. Existe porque muita câmera não deixa escolher para onde
+      // publicar — ela monta o caminho do número de série e ignora o resto.
+      const porCaminho = await this.camerasService.findCameraByIngestPath(caminho).catch(() => null);
+      if (porCaminho) return res.status(200).json({ authorized: true });
+
+      // Desconhecido: recusa, mas NÃO em silêncio. A tentativa vira uma linha na
+      // tela para o administrador dizer de qual câmera é. Recusar calado foi o
+      // que transformou a primeira tentativa de campo num mistério que só se
+      // resolveu capturando pacote.
+      this.pendingIngest.record(caminho, body?.ip ?? null);
+      return deny('Equipamento ainda não vinculado a uma câmera.');
     }
 
     if (action !== 'read' && action !== 'playback') {

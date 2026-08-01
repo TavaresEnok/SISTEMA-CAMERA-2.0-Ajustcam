@@ -11,8 +11,10 @@ import {
 import { envNumber } from '../common/config/env-number.helper';
 import {
   ingestPathName,
+  isAcceptableIngestPath,
   isPushSourced,
   isValidIngestKey,
+  normalizeIngestPath,
 } from '../cameras/helpers/rtmp-ingest.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -1756,24 +1758,36 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     const cameraId = String(camera.id);
     const pathName = this.pathNameFromCameraId(cameraId, deliveryMode);
 
-    let ingestKey: string | null = null;
-    try {
-      if (camera.rtmpIngestKeyEncrypted) {
-        ingestKey = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted);
+    // Duas origens possíveis, nesta ordem:
+    //  1. o caminho PRÓPRIO do equipamento, aprendido e confirmado por um
+    //     administrador — tem precedência porque, quando existe, é onde o
+    //     aparelho realmente publica (ele ignora o que mandamos);
+    //  2. a chave que nós geramos, para equipamento que aceita configurar o
+    //     caminho.
+    let ingestPath: string | null = null;
+    if (isAcceptableIngestPath(camera.rtmpIngestPath)) {
+      ingestPath = normalizeIngestPath(camera.rtmpIngestPath);
+    } else {
+      let ingestKey: string | null = null;
+      try {
+        if (camera.rtmpIngestKeyEncrypted) {
+          ingestKey = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted);
+        }
+      } catch {
+        ingestKey = null;
       }
-    } catch {
-      ingestKey = null;
+      if (isValidIngestKey(ingestKey)) ingestPath = ingestPathName(ingestKey);
     }
-    if (!isValidIngestKey(ingestKey)) {
-      // Câmera marcada como push mas sem chave gerada: estado de cadastro
+    if (!ingestPath) {
+      // Câmera marcada como push mas sem chave nem caminho vinculado: cadastro
       // incompleto, não erro de operação. Falha explícita para o operador ver a
       // causa em vez de encarar um tile eternamente "Conectando".
       throw new BadRequestException(
-        'Câmera em modo de publicação (RTMP) ainda não tem chave de ingestão gerada.',
+        'Câmera em modo de publicação (RTMP) ainda não tem chave nem equipamento vinculado.',
       );
     }
 
-    const sourceUrl = this.buildInternalRtspUrl(ingestPathName(ingestKey));
+    const sourceUrl = this.buildInternalRtspUrl(ingestPath);
     if (!sourceUrl) {
       throw new BadRequestException('Ingestão RTMP indisponível: MediaMTX não configurado.');
     }

@@ -69,6 +69,15 @@ type IngestTarget = {
   serverUrl: string | null;
   streamKey: string | null;
   fullUrl: string | null;
+  /** Caminho próprio do equipamento, quando ele não deixa escolher. */
+  ingestPath?: string | null;
+};
+
+type PendingIngest = {
+  path: string;
+  remoteAddr: string | null;
+  lastSeenAt: number;
+  attempts: number;
 };
 
 export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEditSheetProps) {
@@ -82,6 +91,7 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
   const [ingest, setIngest] = useState<IngestTarget | null>(null);
   const [ingestBusy, setIngestBusy] = useState(false);
   const [copiado, setCopiado] = useState<string | null>(null);
+  const [pendentes, setPendentes] = useState<PendingIngest[]>([]);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -101,6 +111,12 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
         headers: { Authorization: `Bearer ${accessToken}` },
       })
       .then(({ data }) => { if (!cancelled) setIngest(data ?? null); })
+      .catch(() => undefined);
+    void axios
+      .get(`${getApiBaseUrl()}/cameras/rtmp-ingest/pending`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      .then(({ data }) => { if (!cancelled) setPendentes(data?.items ?? []); })
       .catch(() => undefined);
     void axios
       .get(`${getApiBaseUrl()}/cameras/${cameraId}`, { headers: { Authorization: `Bearer ${accessToken}` } })
@@ -177,6 +193,27 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
         description: err instanceof Error ? err.message : 'Tente novamente.',
         variant: 'destructive',
       });
+    } finally {
+      setIngestBusy(false);
+    }
+  };
+
+  /** Assume que o equipamento que publica naquele caminho É esta câmera. */
+  const vincular = async (path: string) => {
+    if (!accessToken) return;
+    setIngestBusy(true);
+    try {
+      await axios.post(`${getApiBaseUrl()}/cameras/${camera.id}/rtmp-ingest/bind`, { path }, auth);
+      const [{ data: alvo }, { data: lista }] = await Promise.all([
+        axios.get(`${getApiBaseUrl()}/cameras/${camera.id}/rtmp-ingest`, auth),
+        axios.get(`${getApiBaseUrl()}/cameras/rtmp-ingest/pending`, auth),
+      ]);
+      setIngest(alvo ?? null);
+      setPendentes(lista?.items ?? []);
+      toast({ title: 'Equipamento vinculado', description: 'O vídeo dele passa a entrar como esta câmera.' });
+    } catch (err) {
+      const msg = axios.isAxiosError(err) ? (err.response?.data?.message ?? err.message) : 'Tente novamente.';
+      toast({ title: 'Falha ao vincular', description: String(msg), variant: 'destructive' });
     } finally {
       setIngestBusy(false);
     }
@@ -353,6 +390,16 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                         {' '}<em>Push Stream</em>). Depois disso ela aparece na grade sozinha.
                       </p>
 
+                      {ingest?.ingestPath ? (
+                        <div className="rounded-md border border-[hsl(var(--status-online)_/_0.35)] bg-[hsl(var(--status-online)_/_0.08)] p-3">
+                          <p className="text-[11px] font-semibold">Equipamento vinculado</p>
+                          <p className="mt-1 font-mono text-[11px] text-muted-foreground">{ingest.ingestPath}</p>
+                          <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">
+                            Este aparelho não deixa escolher o destino — ele publica sempre neste caminho.
+                            Nada a configurar nele; o vídeo já entra como esta câmera.
+                          </p>
+                        </div>
+                      ) : null}
                       <CampoCopiavel
                         rotulo="Servidor / URL"
                         valor={ingest?.serverUrl ?? ''}
@@ -372,6 +419,38 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                         copiado={copiado === 'completa'}
                         onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
                       />
+
+                      {pendentes.length > 0 && (
+                        <>
+                          <Separator />
+                          <div className="space-y-2">
+                            <p className="text-[11px] font-semibold">Equipamentos tentando publicar</p>
+                            <p className="text-[10px] leading-relaxed text-muted-foreground">
+                              Chegaram no servidor mas ainda não pertencem a nenhuma câmera. Se um deles
+                              for esta, vincule — o vídeo passa a entrar por aqui.
+                            </p>
+                            {pendentes.map((p) => (
+                              <div key={p.path} className="flex items-center gap-2 rounded-md border border-border bg-background/60 p-2">
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate font-mono text-[11px]">{p.path}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {p.remoteAddr ?? 'origem desconhecida'} · {p.attempts} tentativa{p.attempts > 1 ? 's' : ''}
+                                  </p>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={ingestBusy}
+                                  onClick={() => void vincular(p.path)}
+                                  className="h-8 shrink-0 text-[11px]"
+                                >
+                                  É esta câmera
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
 
                       <Separator />
                       <div className="flex items-center justify-between gap-3">

@@ -1,3 +1,4 @@
+import { PendingIngestRegistry } from '../cameras/pending-ingest.registry';
 import { Module } from '@nestjs/common';
 import { AccessControlModule } from '../access-control/access-control.module';
 import { AuditModule } from '../audit/audit.module';
@@ -16,13 +17,13 @@ import { StreamResourceAdvisorService } from './stream-resource-advisor.service'
 @Module({
   imports: [CamerasModule, AuthModule, AuditModule, AccessControlModule],
   controllers: [CameraStreamController],
-  providers: [
+  providers: [PendingIngestRegistry, 
     ClipCaptureService,
     FfmpegMjpegService,
     MediamtxProxyService,
     SourceGatewayService,
     StreamResourceAdvisorService,
   ],
-  exports: [FfmpegMjpegService, MediamtxProxyService, SourceGatewayService, StreamResourceAdvisorService],
+  exports: [PendingIngestRegistry, FfmpegMjpegService, MediamtxProxyService, SourceGatewayService, StreamResourceAdvisorService],
 })
 export class CameraStreamModule {}

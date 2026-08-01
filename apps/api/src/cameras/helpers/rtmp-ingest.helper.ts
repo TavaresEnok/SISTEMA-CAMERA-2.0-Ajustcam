@@ -130,6 +130,47 @@ export function buildPublishTarget(input: {
   };
 }
 
+// ── EQUIPAMENTO QUE NÃO DEIXA ESCOLHER O CAMINHO ───────────────────────────
+//
+// Medido em campo (2026-08-01, Positivo CIP-B1312-M): a câmera pega só o
+// ENDEREÇO da URL e monta o caminho sozinha a partir do número de série —
+// `live/liveStream_H3ZL2802830WB_0_0C` — descartando o que vem depois do host.
+// O diálogo RTMP vai até o `publish` e só então é recusado.
+//
+// Exigir o nosso formato deixaria essa classe inteira de equipamento de fora.
+// Então o sistema APRENDE o caminho que o aparelho usa, e o administrador
+// confirma de qual câmera é. A confirmação é o que separa a câmera do cliente
+// de qualquer um na internet — a porta 1935 é pública.
+
+/** Teto de tamanho: nome de fluxo real cabe folgado, e limita abuso de memória. */
+const MAX_INGEST_PATH = 128;
+
+/**
+ * Caminho aprendido é aceitável?
+ *
+ * Permissivo no CONTEÚDO (cada fabricante inventa o seu) e rígido na FORMA:
+ *  · só letras, números, ponto, hífen, sublinhado e UMA barra por segmento;
+ *  · sem `..`, sem barra no início ou fim, sem barra dupla — nada que possa
+ *    escapar do próprio caminho;
+ *  · nunca pode casar com o prefixo `cam_`, que é o espaço dos paths de
+ *    entrega: um publicador jamais deve conseguir assumir um stream de câmera.
+ */
+export function isAcceptableIngestPath(path: unknown): path is string {
+  if (typeof path !== 'string') return false;
+  const limpo = path.trim();
+  if (limpo.length === 0 || limpo.length > MAX_INGEST_PATH) return false;
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(limpo)) return false;
+  if (limpo.split('/').some((seg) => seg === '.' || seg === '..')) return false;
+  // O espaço de entrega é intocável, venha o pedido de onde vier.
+  if (/^cam_/i.test(limpo)) return false;
+  return true;
+}
+
+/** Normaliza para comparação e armazenamento (a barra e o caso importam ao RTMP). */
+export function normalizeIngestPath(path: string): string {
+  return path.trim();
+}
+
 /** Modos de origem aceitos. String, e não enum do Prisma, para migrar sem downtime. */
 export const SOURCE_MODE_PULL = 'rtsp_pull';
 export const SOURCE_MODE_PUSH = 'rtmp_push';

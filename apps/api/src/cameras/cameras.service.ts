@@ -13,8 +13,10 @@ import {
   generateIngestKey,
   hashIngestKey,
   ingestHashMatches,
+  isAcceptableIngestPath,
   isPushSourced,
   isValidIngestKey,
+  normalizeIngestPath,
   SOURCE_MODE_PULL,
   SOURCE_MODE_PUSH,
 } from './helpers/rtmp-ingest.helper';
@@ -1484,6 +1486,53 @@ export class CamerasService {
   }
 
   /**
+   * Resolve a câmera dona de um caminho APRENDIDO.
+   *
+   * O par do findCameraByIngestKey, para equipamento que não deixa escolher o
+   * caminho. A diferença é de onde vem a confiança: ali, de um segredo que nós
+   * geramos; aqui, de um administrador que olhou a tentativa e confirmou. Nos
+   * dois casos publicar exige um vínculo explícito — nunca basta chegar.
+   */
+  async findCameraByIngestPath(path: unknown) {
+    if (!isAcceptableIngestPath(path)) return null;
+    const camera = await this.prisma.camera.findUnique({
+      where: { rtmpIngestPath: normalizeIngestPath(path) },
+      select: { id: true, name: true, enabled: true, sourceMode: true },
+    });
+    if (!camera || camera.enabled === false || !isPushSourced(camera)) return null;
+    return camera;
+  }
+
+  /**
+   * Vincula a esta câmera o caminho que o equipamento usa por conta própria.
+   *
+   * Troca a chave gerada por nós pelo caminho do aparelho: quem publica ali é
+   * tratado como esta câmera. Por isso o caminho é ÚNICO no cadastro — dois
+   * equipamentos disputando o mesmo destino seria ambiguidade sobre a origem da
+   * prova, que num sistema probatório não pode existir.
+   */
+  async bindRtmpIngestPath(cameraId: string, path: string) {
+    if (!isAcceptableIngestPath(path)) {
+      throw new BadRequestException('Caminho de publicação inválido.');
+    }
+    const normalizado = normalizeIngestPath(path);
+    const dono = await this.prisma.camera.findUnique({
+      where: { rtmpIngestPath: normalizado },
+      select: { id: true, name: true },
+    });
+    if (dono && dono.id !== cameraId) {
+      throw new BadRequestException(`Este caminho já pertence à câmera "${dono.name}".`);
+    }
+    const camera = await this.prisma.camera.update({
+      where: { id: cameraId },
+      data: { sourceMode: SOURCE_MODE_PUSH, rtmpIngestPath: normalizado },
+      select: { id: true, name: true },
+    });
+    this.logger.log(`Caminho de publicação "${normalizado}" vinculado a ${camera.name}.`);
+    return { sourceMode: SOURCE_MODE_PUSH, ingestPath: normalizado };
+  }
+
+  /**
    * Relê a chave já existente para exibi-la ao administrador. Devolve null quando
    * a câmera não está em modo push ou ainda não tem chave — o chamador traduz
    * isso na interface, sem inventar credencial.
@@ -1491,9 +1540,21 @@ export class CamerasService {
   async getRtmpIngestTarget(cameraId: string) {
     const camera = await this.prisma.camera.findUnique({
       where: { id: cameraId },
-      select: { sourceMode: true, rtmpIngestKeyEncrypted: true },
+      select: { sourceMode: true, rtmpIngestKeyEncrypted: true, rtmpIngestPath: true },
     });
-    if (!camera || !isPushSourced(camera) || !camera.rtmpIngestKeyEncrypted) return null;
+    if (!camera || !isPushSourced(camera)) return null;
+    // Equipamento com caminho próprio não usa a nossa chave: mostrar a chave ali
+    // seria mentir para o instalador sobre o que está valendo.
+    if (camera.rtmpIngestPath) {
+      return {
+        sourceMode: SOURCE_MODE_PUSH,
+        serverUrl: null,
+        streamKey: null,
+        fullUrl: null,
+        ingestPath: camera.rtmpIngestPath,
+      };
+    }
+    if (!camera.rtmpIngestKeyEncrypted) return null;
     let key: string;
     try { key = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted); }
     catch { return null; }
@@ -1509,7 +1570,7 @@ export class CamerasService {
   async disableRtmpIngest(cameraId: string) {
     await this.prisma.camera.update({
       where: { id: cameraId },
-      data: { sourceMode: SOURCE_MODE_PULL, rtmpIngestKeyHash: null, rtmpIngestKeyEncrypted: null },
+      data: { sourceMode: SOURCE_MODE_PULL, rtmpIngestKeyHash: null, rtmpIngestKeyEncrypted: null, rtmpIngestPath: null },
     });
   }
 
@@ -1521,7 +1582,7 @@ export class CamerasService {
       String(process.env.MEDIAMTX_RTMP_SCHEME ?? 'rtmp').trim().toLowerCase() === 'rtmps'
         ? 'rtmps'
         : 'rtmp';
-    return { ...buildPublishTarget({ host, port, key, scheme }), sourceMode: SOURCE_MODE_PUSH };
+    return { ...buildPublishTarget({ host, port, key, scheme }), sourceMode: SOURCE_MODE_PUSH, ingestPath: null as string | null };
   }
 
   private async discoverOnvifMediaProfiles(input: {

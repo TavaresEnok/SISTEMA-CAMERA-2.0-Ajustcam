@@ -1,3 +1,4 @@
+import { PendingIngestRegistry } from './pending-ingest.registry';
 import { forwardRef, Module } from '@nestjs/common';
 import { AccessControlModule } from '../access-control/access-control.module';
 import { AlarmsModule } from '../alarms/alarms.module';
@@ -12,7 +13,7 @@ import { OnvifEventsService } from './onvif-events.service';
 @Module({
   imports: [AuditModule, AccessControlModule, AlarmsModule, forwardRef(() => RecordingsModule)],
   controllers: [CamerasController],
-  providers: [CamerasService, CryptoService, PortCheckerService, OnvifEventsService],
-  exports: [CamerasService, CryptoService, PortCheckerService, OnvifEventsService],
+  providers: [PendingIngestRegistry, CamerasService, CryptoService, PortCheckerService, OnvifEventsService],
+  exports: [PendingIngestRegistry, CamerasService, CryptoService, PortCheckerService, OnvifEventsService],
 })
 export class CamerasModule {}
