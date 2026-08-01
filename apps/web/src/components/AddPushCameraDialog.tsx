@@ -90,16 +90,16 @@ export function AddPushCameraDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <Radio className="h-4 w-4" />
-            {alvo ? 'Câmera cadastrada — configure o equipamento' : 'Nova câmera que publica (RTMP)'}
+            {alvo ? 'Câmera cadastrada — configure o equipamento' : 'Nova câmera que envia vídeo (RTMP)'}
           </DialogTitle>
         </DialogHeader>
 
         {!alvo ? (
           <div className="space-y-4 py-1">
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              Use quando a câmera ou o DVR <strong className="text-foreground">envia o vídeo para nós</strong>.
+              Use quando a câmera ou o DVR <strong className="text-foreground">manda o vídeo para o servidor</strong>.
               Funciona atrás de CGNAT, 4G e redes sem porta aberta, porque a conexão nasce do lado de lá.
-              Não pedimos endereço nem senha: não há nada que a gente vá acessar.
+              Não pedimos endereço nem senha, porque não há nada que o servidor precise acessar.
             </p>
 
             <div className="space-y-1.5">

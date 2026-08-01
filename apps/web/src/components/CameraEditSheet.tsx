@@ -320,10 +320,10 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                     >
                       <div className="flex items-center gap-1.5">
                         <ArrowRightLeft className="h-3.5 w-3.5 shrink-0" />
-                        <span className="text-[12px] font-semibold">Nós conectamos</span>
+                        <span className="text-[12px] font-semibold">Buscar na câmera (RTSP)</span>
                       </div>
                       <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-                        O servidor busca o vídeo na câmera. Precisa de porta aberta ou VPN.
+                        O servidor busca o vídeo na câmera. Ela precisa estar acessível: porta liberada ou VPN.
                       </p>
                     </button>
                     <button
@@ -337,10 +337,10 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                     >
                       <div className="flex items-center gap-1.5">
                         <Radio className="h-3.5 w-3.5 shrink-0" />
-                        <span className="text-[12px] font-semibold">A câmera publica</span>
+                        <span className="text-[12px] font-semibold">Câmera envia (RTMP)</span>
                       </div>
                       <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-                        A câmera envia o vídeo para nós. Funciona atrás de CGNAT e 4G.
+                        A câmera manda o vídeo para o servidor. Funciona atrás de CGNAT e 4G, sem liberar porta.
                       </p>
                     </button>
                   </div>

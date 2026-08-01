@@ -1400,10 +1400,10 @@ export default function CamerasPage() {
             onClick={() => setShowPushDialog(true)}
             className="btn btn-secondary btn-sm"
             data-testid="button-add-push-camera"
-            title="Para câmera ou DVR que envia o vídeo para nós (atrás de CGNAT, 4G)"
+            title="Para câmera ou DVR que envia o vídeo para o servidor — funciona atrás de CGNAT, 4G e redes sem porta aberta"
           >
             <Radio className="w-3.5 h-3.5" />
-            Câmera que publica
+            Câmera que envia (RTMP)
           </button>
           <button
             onClick={() => setShowWizard(true)}
