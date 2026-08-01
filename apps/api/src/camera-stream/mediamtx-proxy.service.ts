@@ -237,6 +237,34 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     void this.persistGridViewHistory().catch(() => undefined);
   }
 
+  /**
+   * O path da GRADE desta câmera deve ficar SOB DEMANDA?
+   *
+   * Quem decide é o ORÇAMENTO QUENTE, por câmera — não uma env global.
+   *
+   * Antes isto vinha direto de `mediaMtxSourceOnDemand`, e com
+   * `MEDIAMTX_SOURCE_ON_DEMAND=false` (produção) TODO path configurado nascia
+   * sempre-conectado. Como o aquecimento de boot configura todos os habilitados,
+   * a premissa que o justifica — "path sob demanda não abre conexão ao ser
+   * configurado" — deixava de valer, e aquecer 22 câmeras virava 22 sessões
+   * RTSP permanentes.
+   *
+   * Medido em produção em 2026-08-01: 4 paths prontos com ZERO espectadores,
+   * 1,7 GB em 8 minutos — ~304 GB/dia de banda WAN paga para ninguém, além de
+   * 4 sessões presas nas câmeras (o recurso que a câmera barata limita a 2–4).
+   *
+   * O orçamento já existia e estava em 0, mas `reconcileHotGridSources` só age
+   * em paths `_grid_source`, que sumiram quando o salto privado virou opt-in
+   * (revert fdc79ff): o controle olhava para um path que a produção não tem.
+   *
+   * `isGridSourceHot` já respeita `MEDIAMTX_SOURCE_ON_DEMAND=true` como decisão
+   * explícita do operador ("tudo sob demanda"), então essa escolha continua
+   * vencendo o orçamento.
+   */
+  private resolveGridSourceOnDemand(cameraId: string): boolean {
+    return !this.isGridSourceHot(cameraId);
+  }
+
   private isGridSourceHot(cameraId: string): boolean {
     // Env explícita vence: operador que setou "tudo sob demanda" quis isso.
     if (this.configService.get<boolean>('mediaMtxSourceOnDemand') === true) return false;
@@ -1925,7 +1953,13 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       // 'original' (máxima qualidade) puxa o stream PRINCIPAL direto da câmera em
       // passthrough. Sempre sob demanda com janela curta: senão o path seguraria
       // uma sessão RTSP + banda WAN do main 24/7 mesmo sem ninguém assistindo.
-      sourceOnDemand: deliveryMode === 'original' ? true : sourceOnDemand,
+      // GRADE: o orçamento quente decide por câmera (ver resolveGridSourceOnDemand).
+      // 'original' é sempre sob demanda; 'selected' segue a env global.
+      sourceOnDemand: deliveryMode === 'original'
+        ? true
+        : deliveryMode === 'grid'
+          ? this.resolveGridSourceOnDemand(cameraId)
+          : sourceOnDemand,
       sourceOnDemandStartTimeout,
       sourceOnDemandCloseAfter: deliveryMode === 'original' ? selectedRunOnDemandCloseAfter : sourceOnDemandCloseAfter,
       rtspTransport,
