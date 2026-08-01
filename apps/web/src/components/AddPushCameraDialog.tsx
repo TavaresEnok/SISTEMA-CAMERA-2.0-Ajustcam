@@ -5,7 +5,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { useAuthStore } from '../store/authStore';
 import { toast } from '../hooks/use-toast';
@@ -22,34 +21,27 @@ import { getApiBaseUrl } from '../lib/api-base';
 // o instalador a inventar IP, porta, usuário e senha só para vencer a validação
 // — cadastro sujo por desenho, que ninguém saberia interpretar meses depois.
 //
-// Aqui só se pede o que existe: um nome e onde ela fica. O resto é a chave, que
-// sai pronta na mesma tela para ser colada no equipamento.
-
-type Local = { id: string; name: string };
+// Aqui só se pede o nome. Local, área e o resto da configuração ficam para a
+// edição da câmera, depois que ela existir — no momento do cadastro o que o
+// instalador precisa é da chave, e ela sai pronta na mesma tela.
 
 export function AddPushCameraDialog({
   open,
   onClose,
-  sites,
-  areas,
   onCreated,
 }: {
   open: boolean;
   onClose: () => void;
-  sites: Local[];
-  areas: Local[];
   onCreated: () => void | Promise<void>;
 }) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const [nome, setNome] = useState('');
-  const [siteId, setSiteId] = useState<string>('');
-  const [areaId, setAreaId] = useState<string>('');
   const [salvando, setSalvando] = useState(false);
   const [copiado, setCopiado] = useState<string | null>(null);
   const [alvo, setAlvo] = useState<{ serverUrl: string; streamKey: string; fullUrl: string } | null>(null);
 
   const fechar = () => {
-    setNome(''); setSiteId(''); setAreaId(''); setAlvo(null); setCopiado(null);
+    setNome(''); setAlvo(null); setCopiado(null);
     onClose();
   };
 
@@ -72,8 +64,6 @@ export function AddPushCameraDialog({
         {
           name: nome.trim(),
           sourceMode: 'rtmp_push',
-          ...(siteId ? { siteId } : {}),
-          ...(areaId ? { areaId } : {}),
           recordingEnabled: true,
           recordingMode: 'continuous',
         },
@@ -124,27 +114,6 @@ export function AddPushCameraDialog({
                 placeholder="Portaria — Loja Centro"
                 className="text-sm"
               />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-medium text-muted-foreground">Local</Label>
-                <Select value={siteId} onValueChange={setSiteId}>
-                  <SelectTrigger className="text-sm"><SelectValue placeholder="Nenhum" /></SelectTrigger>
-                  <SelectContent>
-                    {sites.map((s) => <SelectItem key={s.id} value={s.id} className="text-sm">{s.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-medium text-muted-foreground">Área</Label>
-                <Select value={areaId} onValueChange={setAreaId}>
-                  <SelectTrigger className="text-sm"><SelectValue placeholder="Nenhuma" /></SelectTrigger>
-                  <SelectContent>
-                    {areas.map((a) => <SelectItem key={a.id} value={a.id} className="text-sm">{a.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
             </div>
 
             <p className="text-[10px] leading-relaxed text-amber-500/90">

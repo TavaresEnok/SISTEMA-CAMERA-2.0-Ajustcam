@@ -1762,8 +1762,6 @@ export default function CamerasPage() {
       <AddPushCameraDialog
         open={showPushDialog}
         onClose={() => setShowPushDialog(false)}
-        sites={wizardSites}
-        areas={wizardAreas}
         onCreated={loadData}
       />
       {showWizard && <WizardModal onClose={() => setShowWizard(false)} sites={wizardSites} areas={wizardAreas} onCreated={createCamera} onTestConnection={testConnectionDraft} onPreviewFrame={previewFrameDraft} />}
