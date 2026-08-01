@@ -385,7 +385,7 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                   {modoPush ? (
                     <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3.5">
                       <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        Cole estes dois campos na câmera ou no DVR, normalmente em
+                        Cole este endereço na câmera ou no DVR, normalmente em
                         {' '}<span className="font-medium text-foreground">Rede → RTMP</span> (ou
                         {' '}<em>Push Stream</em>). Depois disso ela aparece na grade sozinha.
                       </p>
@@ -400,25 +400,14 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                           </p>
                         </div>
                       ) : null}
-                      <CampoCopiavel
-                        rotulo="Servidor / URL"
-                        valor={ingest?.serverUrl ?? ''}
-                        copiado={copiado === 'servidor'}
-                        onCopiar={() => copiar(ingest?.serverUrl ?? '', 'servidor')}
-                      />
-                      <CampoCopiavel
-                        rotulo="Chave / Stream key"
-                        valor={ingest?.streamKey ?? ''}
-                        copiado={copiado === 'chave'}
-                        onCopiar={() => copiar(ingest?.streamKey ?? '', 'chave')}
-                      />
-                      <CampoCopiavel
-                        rotulo="URL completa"
-                        hint="para câmera com um campo só"
-                        valor={ingest?.fullUrl ?? ''}
-                        copiado={copiado === 'completa'}
-                        onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
-                      />
+                      {!ingest?.ingestPath && (
+                        <CampoCopiavel
+                          rotulo="Endereço de publicação"
+                          valor={ingest?.fullUrl ?? ''}
+                          copiado={copiado === 'completa'}
+                          onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
+                        />
+                      )}
 
                       {pendentes.length > 0 && (
                         <>

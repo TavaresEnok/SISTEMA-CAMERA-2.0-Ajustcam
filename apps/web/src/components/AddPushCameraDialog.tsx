@@ -162,13 +162,11 @@ export function AddPushCameraDialog({
         ) : (
           <div className="space-y-3 py-1">
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              Cole estes campos no equipamento, normalmente em{' '}
+              Cole este endereço no equipamento, normalmente em{' '}
               <span className="font-medium text-foreground">Rede → RTMP</span> (ou <em>Push Stream</em>).
               Assim que ele começar a publicar, a câmera aparece na grade.
             </p>
-            <Campo rotulo="Servidor / URL" valor={alvo.serverUrl} copiado={copiado === 's'} onCopiar={() => copiar(alvo.serverUrl, 's')} />
-            <Campo rotulo="Chave / Stream key" valor={alvo.streamKey} copiado={copiado === 'k'} onCopiar={() => copiar(alvo.streamKey, 'k')} />
-            <Campo rotulo="URL completa" hint="para equipamento com um campo só" valor={alvo.fullUrl} copiado={copiado === 'f'} onCopiar={() => copiar(alvo.fullUrl, 'f')} />
+            <Campo rotulo="Endereço de publicação" valor={alvo.fullUrl} copiado={copiado === 'f'} onCopiar={() => copiar(alvo.fullUrl, 'f')} />
             {pendentes.length > 0 && (
               <>
                 <Separator />
