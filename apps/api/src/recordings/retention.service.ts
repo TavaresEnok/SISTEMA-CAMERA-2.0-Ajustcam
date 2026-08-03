@@ -31,6 +31,8 @@ type CleanupResult = {
   eventsDeleted: number;
   orphanThumbnailsDeleted: number;
   orphanCompatibleFilesDeleted: number;
+  /** Objetos recolhidos do bucket por já não terem linha em `Recording`. */
+  orphanCloudObjectsDeleted?: number;
   // Campos da retenção em dois níveis: só aparecem quando a feature está ATIVA,
   // para que o resultado (e o JSON que vai ao log) continue idêntico ao atual
   // enquanto a flag estiver desligada.
@@ -149,8 +151,86 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   // Falha ao apagar na nuvem NÃO impede a limpeza local: disco cheio é
   // emergência operacional, objeto órfão é desperdício. O órfão é registrado
   // para uma varredura posterior recolher.
+  /**
+   * Recolhe do bucket os objetos que NÃO têm dono no banco.
+   *
+   * Existe porque a limpeza da nuvem foi acrescentada depois: tudo que a
+   * retenção apagou antes disso deixou objeto órfão, e sem varredura eles
+   * ficariam ocupando espaço para sempre — foi o que encheu o MinIO.
+   *
+   * ── A REGRA DE SEGURANÇA, QUE É O PONTO INTEIRO ──────────────────────────
+   *
+   * A decisão de apagar é SEMPRE da retenção do DRAC, nunca da idade do objeto.
+   * Aqui só sai o que já não tem linha em `Recording` — ou seja, o que a
+   * retenção JÁ autorizou a sair, respeitando câmera por câmera, gravação
+   * protegida por incidente e a quarentena de movimento desconhecido.
+   *
+   * O objeto de uma gravação que ainda existe no banco NUNCA é tocado, por mais
+   * antigo que seja. É essa assimetria que torna a varredura segura num sistema
+   * probatório: ela recolhe lixo, não decide retenção.
+   *
+   * Consulta em LOTES contra o banco, não um Set com o acervo inteiro: com 100
+   * câmeras a 30 dias seriam ~800 mil chaves em memória num job periódico.
+   */
+  private async cleanupOrphanCloudObjects(): Promise<number> {
+    if (!this.cloudConnector) return 0;
+    const cfg = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
+    if (!cfg?.enabled) return 0;
+    if (!envBool('RETENTION_CLOUD_ORPHAN_SWEEP', true)) return 0;
+
+    const LOTE = envNumber('RETENTION_CLOUD_ORPHAN_BATCH', 500, { min: 50, max: 1000, integer: true });
+    const TETO = envNumber('RETENTION_CLOUD_ORPHAN_MAX_PER_CYCLE', 5000, { min: 0, max: 100_000, integer: true });
+    if (TETO === 0) return 0;
+
+    let removidos = 0;
+    try {
+      const client = new S3Client({
+        endpoint: cfg.endpoint,
+        bucket: cfg.bucket,
+        region: cfg.region ?? 'us-east-1',
+        accessKeyId: cfg.accessKeyId,
+        secretAccessKey: cfg.secretAccessKey,
+        forcePathStyle: true,
+      });
+
+      const objetos = await client.listObjects('', LOTE);
+      if (!objetos.length) return 0;
+      const chaves = objetos.map((o) => o.key).filter(Boolean);
+
+      // Quem AINDA tem dono no banco fica. A pergunta é feita ao banco em uma
+      // consulta só, e o resultado define exatamente o que pode sair.
+      const comDono = await this.prisma.recording.findMany({
+        where: { cloudKey: { in: chaves } },
+        select: { cloudKey: true },
+      });
+      const protegidas = new Set(comDono.map((r) => r.cloudKey).filter(Boolean) as string[]);
+
+      for (const chave of chaves) {
+        if (removidos >= TETO) break;
+        if (protegidas.has(chave)) continue;   // tem dono ⇒ a retenção ainda não liberou
+        try {
+          await client.deleteObject(chave);
+          removidos += 1;
+        } catch (error) {
+          this.logger.warn(`Órfão na nuvem não pôde ser removido: ${chave} — ${(error as Error).message}`);
+        }
+      }
+      if (removidos > 0) {
+        this.logger.log(`Varredura da nuvem: ${removidos} objeto(s) órfão(s) removido(s) de ${chaves.length} inspecionado(s).`);
+      }
+    } catch (error) {
+      // Nuvem fora do ar não pode derrubar a retenção local, que é a que libera disco.
+      this.logger.warn(`Varredura de órfãos na nuvem falhou: ${(error as Error).message}`);
+    }
+    return removidos;
+  }
+
   private async deleteCloudObject(cloudKey: string | null | undefined): Promise<void> {
     if (!cloudKey) return;
+    // `cloudConnector` pode não existir: a retenção é instanciada sem o
+    // contêiner do Nest em teste, e uma instalação sem nuvem provisionada nunca
+    // precisa dele. Ausência de conector é "não há nuvem", não erro.
+    if (!this.cloudConnector) return;
     try {
       const cfg = await this.cloudConnector.getCloudStorageConfig();
       if (!cfg?.enabled) return;
@@ -780,6 +860,11 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const derived = await this.cleanupOrphanDerivedArtifacts();
     result.orphanThumbnailsDeleted = derived.orphanThumbnailsDeleted;
     result.orphanCompatibleFilesDeleted = derived.orphanCompatibleFilesDeleted;
+    // Só entra no resultado quando a varredura de fato removeu algo: há um teste
+    // que exige que o objeto logado NÃO ganhe campos quando a funcionalidade não
+    // agiu, para que instalações sem nuvem continuem com a saída idêntica.
+    const orfaosNuvem = await this.cleanupOrphanCloudObjects();
+    if (orfaosNuvem > 0) result.orphanCloudObjectsDeleted = orfaosNuvem;
     this.cleanEmptyDirs(this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings');
     await this.checkDiskUsage(protection);
     this.logger.log(`Retenção concluída: ${JSON.stringify(result)}.`);
