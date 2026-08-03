@@ -14,6 +14,7 @@ const {
   decryptSecret: decryptStorageSecret,
 } = require('./cloud-storage');
 const { testS3Access, measureS3Performance } = require('./s3-probe');
+const { resolverEndpoint } = require('./endpoint-scheme');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
 const {
@@ -1870,6 +1871,15 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
   const body = await readBody(req);
   const payload = body && typeof body === 'object' ? body.cloudStorage : null;
+
+  // ESQUEMA INFERIDO. O operador digita `meu-storage.exemplo.com.br` e o sistema
+  // descobre se é http ou https sondando os dois — na ordem que tem mais chance
+  // de acertar de primeira. Exigir que ele soubesse era transferir para a pessoa
+  // um trabalho que a máquina faz melhor.
+  if (payload && typeof payload === 'object' && typeof payload.endpoint === 'string' && payload.endpoint.trim()) {
+    const resolvido = await resolverEndpoint(payload.endpoint);
+    if (resolvido.endpoint) payload.endpoint = resolvido.endpoint;
+  }
 
   const previous = normalizeCloudStorage(item.cloudStorage);
   let existingSecret = '';

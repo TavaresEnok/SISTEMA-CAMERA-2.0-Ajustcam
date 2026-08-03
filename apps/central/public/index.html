@@ -2461,7 +2461,7 @@
             <div class="section-title">${configurado ? 'Editar armazenamento' : 'Novo armazenamento'}</div>
             <div class="grid-3">
               <div class="field"><label for="cloud-name">Nome do storage</label><input id="cloud-name" placeholder="ex.: MinIO do escritório" value="${escapeHtml(c.name || '')}"/></div>
-              <div class="field"><label for="cloud-endpoint">Endpoint</label><input id="cloud-endpoint" class="mono" placeholder="http://ip:9000" value="${escapeHtml(c.endpoint || '')}"/></div>
+              <div class="field"><label for="cloud-endpoint">Endpoint</label><input id="cloud-endpoint" class="mono" placeholder="meu-storage.exemplo.com.br  ou  192.168.0.50:9000" value="${escapeHtml(c.endpoint || '')}"/><small class="subtext">Pode digitar sem <b>http://</b>: o painel descobre sozinho, testando os dois.</small></div>
               <div class="field"><label for="cloud-region">Região</label><input id="cloud-region" placeholder="us-east-1" value="${escapeHtml(c.region || 'us-east-1')}"/></div>
               <div class="field"><label for="cloud-bucket">Bucket</label><input id="cloud-bucket" class="mono" placeholder="meu-storage" value="${escapeHtml(c.bucket || '')}"/></div>
               <div class="field"><label for="cloud-prefix">Prefixo</label><input id="cloud-prefix" class="mono" placeholder="${escapeHtml(item.id || '')}" value="${escapeHtml(c.prefix || '')}"/><small class="subtext">Isola instalações que dividem o mesmo bucket.</small></div>

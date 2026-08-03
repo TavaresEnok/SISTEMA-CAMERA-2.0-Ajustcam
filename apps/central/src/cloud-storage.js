@@ -164,8 +164,11 @@ function validateCloudStorage(input, { existingSecret = '' } = {}) {
   const secret = String(source.secretAccessKey ?? '').trim() || existingSecret;
 
   if (enabled) {
+    // O ESQUEMA não é mais obrigatório: quem cadastra não tem por que saber se
+    // aquele fornecedor atende em TLS. `resolverEndpoint` sonda e decide antes
+    // de chegar aqui; o que resta validar é que existe um endereço.
     if (!endpoint) errors.push('endpoint é obrigatório para habilitar');
-    else if (!/^https?:\/\//i.test(endpoint)) errors.push('endpoint deve começar com http:// ou https://');
+    else if (!/^https?:\/\/[^/\s]+/i.test(endpoint)) errors.push('endpoint inválido');
     if (!bucket) errors.push('bucket é obrigatório para habilitar');
     if (!accessKeyId) errors.push('accessKeyId é obrigatório para habilitar');
     if (!secret) errors.push('secretAccessKey é obrigatório para habilitar');
