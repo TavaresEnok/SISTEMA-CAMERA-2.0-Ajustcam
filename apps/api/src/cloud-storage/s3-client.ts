@@ -206,6 +206,28 @@ export function parseListObjects(body: string): S3ObjectSummary[] {
   return out;
 }
 
+/**
+ * Uma PÁGINA de listagem, com o ponteiro para a próxima.
+ *
+ * O ListObjectsV2 devolve no máximo 1000 chaves por chamada e sinaliza o resto
+ * com `IsTruncated` + `NextContinuationToken`. Ignorar isso é o erro clássico:
+ * quem varre um bucket sem continuação vê as primeiras 1000 chaves, conclui que
+ * acabou e relata "esvaziado" com o bucket ainda cheio — e o cliente continua
+ * pagando pelo que acha que apagou.
+ */
+export type S3ObjectPage = { objects: S3ObjectSummary[]; nextToken: string | null };
+
+export function parseListObjectsPage(body: string): S3ObjectPage {
+  const truncado = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(body);
+  const token = /<NextContinuationToken>([^<]*)<\/NextContinuationToken>/.exec(body)?.[1] ?? null;
+  return {
+    objects: parseListObjects(body),
+    // Truncado sem token não existe em servidor correto; se acontecer, parar é
+    // melhor que repetir a mesma página para sempre.
+    nextToken: truncado && token ? token : null,
+  };
+}
+
 export class S3Client {
   constructor(private readonly config: S3Config) {}
 
@@ -334,6 +356,33 @@ export class S3Client {
       },
     });
     return parseListObjects(body.toString('utf8'));
+  }
+
+  /**
+   * Uma página da listagem, com o ponteiro para a próxima.
+   *
+   * O prefixo devolvido nas chaves é o COMPLETO (inclui o prefixo do storage),
+   * que é o que `deleteObject` NÃO espera — ele prefixa de novo. Por isso a
+   * chave volta relativa, pronta para as demais operações desta classe.
+   */
+  async listObjectsPage(prefix = '', continuationToken: string | null = null, maxKeys = 1000): Promise<S3ObjectPage> {
+    const { body } = await this.request({
+      method: 'GET',
+      query: {
+        'list-type': '2',
+        'max-keys': String(maxKeys),
+        prefix: this.fullKey(prefix),
+        ...(continuationToken ? { 'continuation-token': continuationToken } : {}),
+      },
+    });
+    const page = parseListObjectsPage(body.toString('utf8'));
+    const base = this.fullKey('');
+    return {
+      nextToken: page.nextToken,
+      objects: base
+        ? page.objects.map((o) => (o.key.startsWith(base) ? { ...o, key: o.key.slice(base.length) } : o))
+        : page.objects,
+    };
   }
 
   /**

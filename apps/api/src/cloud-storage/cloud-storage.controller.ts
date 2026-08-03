@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Post, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CloudOffloadService } from './cloud-offload.service';
+import { CloudStorageAdminService } from './cloud-storage-admin.service';
 
 // Estado do storage em nuvem DESTA instalação.
 //
@@ -14,7 +15,10 @@ import { CloudOffloadService } from './cloud-offload.service';
 // heartbeat sobrescreveria a edição local no ciclo seguinte.
 @Controller('cloud-storage')
 export class CloudStorageController {
-  constructor(private readonly offload: CloudOffloadService) {}
+  constructor(
+    private readonly offload: CloudOffloadService,
+    private readonly admin: CloudStorageAdminService,
+  ) {}
 
   @Roles(UserRole.ADMIN)
   @Get('status')
@@ -42,5 +46,36 @@ export class CloudStorageController {
   @Put('policy')
   setPolicy(@Body() body: unknown) {
     return this.offload.setPolicy((body as { policy?: unknown })?.policy ?? body);
+  }
+
+  // ── Storages: o ativo e os anteriores ──────────────────────────────────────
+  //
+  // Trocar o storage na Central não apaga o anterior: ele fica aqui como
+  // somente-leitura, com o acervo ainda acessível, e some sozinho conforme a
+  // retenção vence. Estas rotas existem para quem não quer esperar.
+
+  @Roles(UserRole.ADMIN)
+  @Get('storages')
+  listStorages() {
+    return this.admin.listar();
+  }
+
+  /**
+   * ESVAZIA o bucket: apaga os objetos lá no fornecedor. Irreversível.
+   *
+   * POST e não DELETE porque exige corpo (a confirmação com o nome do bucket) e
+   * porque não é a remoção de um recurso — o cadastro continua existindo, vazio.
+   */
+  @Roles(UserRole.ADMIN)
+  @Post('storages/:id/purge')
+  purgeStorage(@Param('id') id: string, @Body() body: { confirmacao?: string }) {
+    return this.admin.esvaziar(id, String(body?.confirmacao ?? ''));
+  }
+
+  /** Remove só o CADASTRO. Nenhum objeto é tocado no fornecedor. */
+  @Roles(UserRole.ADMIN)
+  @Delete('storages/:id')
+  removeStorage(@Param('id') id: string, @Query('forcar') forcar?: string) {
+    return this.admin.remover(id, forcar === 'true' || forcar === '1');
   }
 }

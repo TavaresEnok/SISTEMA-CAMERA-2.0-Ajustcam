@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/authStore';
 import { getApiBaseUrl } from '../lib/api-base';
 import { toast } from '../hooks/use-toast';
 import { CloudStorageCard } from '../components/CloudStorageCard';
+import { PreviousStoragesCard } from '../components/PreviousStoragesCard';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -265,6 +266,9 @@ export default function MonitoramentoPage() {
       </StorageSection>
       <StorageSection title="Armazenamento em nuvem" open={openStorageSections.cloud} onToggle={() => toggleStorageSection('cloud')}>
         <CloudStorageCard apiUrl={API_URL} accessToken={accessToken} />
+        {/* Só aparece quando existe storage anterior — é o que sobra de uma
+            troca de fornecedor, e continua sendo pago até alguém esvaziá-lo. */}
+        <PreviousStoragesCard apiUrl={API_URL} accessToken={accessToken} />
       </StorageSection>
 
       <StorageSection title="Uso por câmera" open={openStorageSections.cameras} onToggle={() => toggleStorageSection('cameras')}>
