@@ -52,6 +52,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-vms_db}
       POSTGRES_BACKUP_RETENTION_DAYS: ${POSTGRES_BACKUP_RETENTION_DAYS:-14}
       POSTGRES_BACKUP_INTERVAL_SECONDS: ${POSTGRES_BACKUP_INTERVAL_SECONDS:-86400}
+      # Bancos ALÉM do da aplicação. `drac_central` guarda o painel mestre:
+      # instalações, licenças e credenciais de storage. Ficava de fora — o
+      # pg_dump copiava só POSTGRES_DB, e o backup de arquivo da Central copiava
+      # um JSON que virou legado somente-leitura quando o painel foi para modo
+      # dual. O dado VIVO da Central não tinha cópia nenhuma, e os dois backups
+      # pareciam estar rodando.
+      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-drac_central}
     volumes:
       - ./backups/postgres:/backups
     command: >
@@ -67,7 +74,20 @@ services:
         pg_restore --list "$$tmp" >/dev/null;
         mv "$$tmp" "$$out";
         echo "$$(date -u +%FT%TZ) postgres_backup=ok file=$$(basename "$$out")";
-        find /backups -type f -name "drac-postgres-*.dump" -mtime +$${POSTGRES_BACKUP_RETENTION_DAYS:-14} -delete;
+        for extra in $$POSTGRES_EXTRA_DATABASES; do
+          etmp="/backups/.drac-$$extra-$$ts.dump.tmp";
+          eout="/backups/drac-$$extra-$$ts.dump";
+          rm -f "$$etmp";
+          if pg_dump -h postgres -U "$$POSTGRES_USER" -d "$$extra" -Fc -f "$$etmp" 2>/dev/null; then
+            pg_restore --list "$$etmp" >/dev/null;
+            mv "$$etmp" "$$eout";
+            echo "$$(date -u +%FT%TZ) postgres_backup=ok db=$$extra file=$$(basename "$$eout")";
+          else
+            rm -f "$$etmp";
+            echo "$$(date -u +%FT%TZ) postgres_backup=FALHOU db=$$extra";
+          fi;
+        done;
+        find /backups -type f -name "drac-*.dump" -mtime +$${POSTGRES_BACKUP_RETENTION_DAYS:-14} -delete;
         sleep "$${POSTGRES_BACKUP_INTERVAL_SECONDS:-86400}";
       done'
     networks:
