@@ -38,6 +38,25 @@ function trechoNegociacao() {
   return SRC.slice(i, f);
 }
 
+/**
+ * O cabeçalho do bloco `{ … }` que ENVOLVE a posição dada.
+ *
+ * Anda para trás contando chaves até achar a abertura sem par: é essa que
+ * delimita o bloco. Comparar texto ("a linha tem `if (sessionUrl)`?") não serve
+ * — um `if` fechado logo antes passaria pelo mesmo teste sem envolver nada.
+ */
+function aberturaDoBlocoQueEnvolve(fonte: string, posicao: number): string {
+  let profundidade = 0;
+  for (let i = posicao; i >= 0; i -= 1) {
+    if (fonte[i] === '}') profundidade += 1;
+    else if (fonte[i] === '{') {
+      if (profundidade === 0) return fonte.slice(Math.max(0, i - 80), i + 1).trim();
+      profundidade -= 1;
+    }
+  }
+  return '';
+}
+
 test('a URL da sessão é LOCAL da tentativa antes de virar a oficial', () => {
   const t = trechoNegociacao();
   const local = t.indexOf('const sessionUrl');
@@ -45,8 +64,14 @@ test('a URL da sessão é LOCAL da tentativa antes de virar a oficial', () => {
   assert.ok(local > -1, 'a URL precisa ser capturada numa variável da tentativa');
   assert.ok(publica > local, 'e só depois publicada na ref compartilhada');
   // A publicação NÃO pode ser incondicional: é exatamente o que sobrescrevia
-  // a sessão da tentativa vencedora.
-  assert.match(t, /if \(sessionUrl\) webrtcSessionUrlRef\.current = sessionUrl;/);
+  // a sessão da tentativa vencedora. O que importa é a GUARDA, não a grafia —
+  // a asserção antiga exigia o `if` de uma linha e passou a falhar quando ele
+  // virou bloco (que além de guardar, apaga a sessão anterior no servidor).
+  assert.match(
+    aberturaDoBlocoQueEnvolve(t, publica),
+    /if \(sessionUrl\)\s*\{$/,
+    'a publicação precisa estar dentro de uma guarda `if (sessionUrl)`',
+  );
 });
 
 test('tentativa SUPERADA fecha o pc e APAGA a própria sessão no servidor', () => {
