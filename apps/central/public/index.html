@@ -503,6 +503,28 @@
       .kv > div:nth-child(even) { text-align: right; font-weight: 450; padding-left: 12px; }
       .kv > div:nth-last-child(1), .kv > div:nth-last-child(2) { border-bottom: 0; }
 
+      /* ── Cartão do storage ─────────────────────────────────────────────
+         Ele era `.resource.allowed`, classe feita para CHIP de recurso
+         permitido: pinta o texto inteiro de verde sobre fundo verde. Ao virar
+         cartão de informação, endpoint, bucket, prefixo, Access Key ID e Secret
+         saíam todos na mesma cor, no mesmo peso e quase na cor do fundo —
+         ilegível e sem hierarquia nenhuma.
+         Aqui o estado é dito pelos BADGES e pela faixa lateral; o conteúdo fica
+         em --ink, com o rótulo em --muted e o valor em mono. Cor semântica
+         marca estado, não tinge dado. */
+      .storage-card { border: 1px solid var(--line); border-left: 3px solid var(--green); border-radius: var(--r-md);
+        background: var(--surface-2); color: var(--ink); padding: 14px; }
+      .storage-card.off { border-left-color: var(--quiet); }
+      .storage-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+      .storage-name { font-size: 13.5px; font-weight: 500; }
+      .storage-endpoint { margin-top: 3px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); word-break: break-all; }
+      .storage-meta { margin-top: 7px; font-size: 11.5px; color: var(--muted); }
+      .storage-meta b { color: var(--ink); font-weight: 500; }
+      .storage-kv { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-hair); display: grid; gap: 8px; }
+      .storage-kv > div { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 11.5px; }
+      .storage-kv label { color: var(--muted); min-width: 124px; }
+      .storage-kv b { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink); word-break: break-all; }
+
       /* ── Medição de desempenho do storage ──────────────────────────────
          Aqui o conteúdo É o número, então ele manda na hierarquia: valor
          grande em tabular-nums sobre --ink, rótulo apagado em --quiet.
@@ -2391,34 +2413,33 @@
               <div class="subtext">As gravações ficam apenas no disco local do servidor do cliente.</div>
             </div>
           </div>` : `
-          <div class="resource ${c.enabled ? 'allowed' : 'blocked'}" style="text-align:left;padding:14px">
-            <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+          <div class="storage-card ${c.enabled ? '' : 'off'}">
+            <div class="storage-head">
               <div style="min-width:0">
-                <div style="font-weight:500;font-size:13px">${escapeHtml(c.displayName || c.name || c.bucket)}</div>
-                <div class="subtext mono" style="color:inherit;opacity:.8">${escapeHtml(c.endpoint || '')}</div>
-                <div class="subtext" style="color:inherit;opacity:.8">bucket <b>${escapeHtml(c.bucket || '')}</b>${c.prefix ? ' · prefixo <b>' + escapeHtml(c.prefix) + '</b>' : ''}</div>
+                <div class="storage-name">${escapeHtml(c.displayName || c.name || c.bucket)}</div>
+                <div class="storage-endpoint">${escapeHtml(c.endpoint || '')}</div>
+                <div class="storage-meta">
+                  bucket <b>${escapeHtml(c.bucket || '')}</b>${c.prefix ? ` · prefixo <b>${escapeHtml(c.prefix)}</b>` : ''}
+                </div>
+                <div class="storage-meta">
+                  ${c.mode === 'mount' ? 'Modo direto — grava no bucket montado' : `Camada — mantém ${Number(c.localWindowHours) || 24}h no disco local depois de enviar`}
+                </div>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
                 <span class="badge ${c.enabled ? 'ok' : 'neutral'}">${c.enabled ? 'Habilitado' : 'Desabilitado'}</span>
                 ${c.lastTestOk === true ? '<span class="badge ok">Conexão OK</span>' : c.lastTestOk === false ? '<span class="badge warn">Conexão falhou</span>' : ''}
               </div>
             </div>
-            <div class="subtext" style="color:inherit;opacity:.85">
-              ${c.mode === 'mount' ? 'Modo direto — grava no bucket montado' : `Camada — mantém ${Number(c.localWindowHours) || 24}h no disco local depois de enviar`}
-            </div>
-            <div style="margin-top:11px;padding-top:11px;border-top:1px solid var(--line);display:grid;gap:5px">
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Access Key ID</span>
-                <b class="mono" style="word-break:break-all">${escapeHtml(c.accessKeyId || '—')}</b>
-              </div>
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Secret Access Key</span>
-                <b class="mono" id="cloud-secret-value" style="word-break:break-all">••••••••••••••••</b>
+            <div class="storage-kv">
+              <div><label>Access Key ID</label><b>${escapeHtml(c.accessKeyId || '—')}</b></div>
+              <div>
+                <label>Secret Access Key</label>
+                <b id="cloud-secret-value">••••••••••••••••</b>
                 <button id="cloud-reveal" style="padding:2px 9px;font-size:11px">Mostrar</button>
                 <span id="cloud-secret-feedback"></span>
               </div>
             </div>
-            <div class="license-actions" style="margin-top:12px">
+            <div class="license-actions" style="margin-top:13px">
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
               <button id="cloud-perf">Desempenho</button>
