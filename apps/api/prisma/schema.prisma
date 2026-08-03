@@ -182,6 +182,37 @@ model Camera {
   @@index([status])
 }
 
+/// Um destino de armazenamento em nuvem da instalação.
+///
+/// Uma instalação pode ter VÁRIOS: o cliente troca de fornecedor, ou cresce e
+/// contrata um bucket maior. O acervo antigo continua legível no storage de
+/// origem enquanto a retenção o esvazia naturalmente, e tudo que é novo já
+/// nasce no ativo — sem copiar terabytes entre provedores nem janela de
+/// indisponibilidade.
+model CloudStorage {
+  id                   String   @id @default(uuid())
+  /// Nome para o operador reconhecer ("Eveo 1T", "Contabo 10T").
+  name                 String
+  provider             String   @default("s3")
+  endpoint             String
+  region               String   @default("us-east-1")
+  bucket               String
+  prefix               String   @default("")
+  accessKeyId          String
+  /// Cifrada com a mesma chave mestra das senhas de câmera (AES-256-GCM).
+  secretAccessKeyEncrypted String
+  forcePathStyle       Boolean  @default(true)
+  /// SOMENTE UM ativo por instalação: é nele que toda gravação nova é escrita.
+  /// Os demais ficam somente-leitura, servindo o acervo que já está neles.
+  isActive             Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  recordings Recording[]
+
+  @@index([isActive])
+}
+
 model Recording {
   id              String          @id @default(uuid())
   cameraId        String
@@ -205,6 +236,18 @@ model Recording {
   // prova para sempre.
   cloudKey        String?
   cloudUploadedAt DateTime?
+  /// EM QUAL storage este objeto está.
+  ///
+  /// Existe porque uma instalação pode trocar de fornecedor de S3 sem perder o
+  /// acervo. Sem esta coluna, o playback montava o cliente a partir da config
+  /// ATUAL e procurava a chave antiga no bucket novo — o histórico inteiro
+  /// sumia da tela (os dados continuavam lá, inacessíveis, e a retenção também
+  /// não os alcançava mais).
+  ///
+  /// NULL = storage legado (a configuração única `cloud.storage`), para que
+  /// instalações anteriores à migração continuem funcionando sem backfill.
+  cloudStorageId  String?
+  cloudStorage    CloudStorage? @relation(fields: [cloudStorageId], references: [id], onDelete: SetNull)
   localDeletedAt  DateTime?
   createdAt       DateTime        @default(now())
 

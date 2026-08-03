@@ -21,7 +21,7 @@ const FONTE = readFileSync('src/recordings/retention.service.ts', 'utf8');
 
 test('a exclusão de gravação também remove o objeto da nuvem', () => {
   assert.ok(
-    /deleteCloudObject\(recording\.cloudKey\)/.test(FONTE),
+    /deleteCloudObject\(recording\.cloudKey, recording\.cloudStorageId\)/.test(FONTE),
     'sem isto o objeto no bucket fica órfão e o storage enche até travar',
   );
 });
@@ -31,7 +31,7 @@ test('o objeto da nuvem é removido DEPOIS de a linha sair, nunca antes', () => 
   // existe: playback quebrado e nenhuma forma de saber que aquilo era prova.
   // A ordem correta, no pior caso, deixa lixo no bucket — recuperável.
   const i = FONTE.indexOf('await this.deleteRowsWithFiles');
-  const j = FONTE.indexOf('deleteCloudObject(recording.cloudKey)');
+  const j = FONTE.indexOf('deleteCloudObject(recording.cloudKey, recording.cloudStorageId)');
   assert.ok(i > 0 && j > i, 'a remoção na nuvem precisa vir após a exclusão transacional local');
 });
 
@@ -55,8 +55,10 @@ test('gravação sem objeto na nuvem não gera chamada inútil', () => {
   assert.ok(/if \(!cloudKey\) return;/.test(FONTE), 'quem nunca subiu não deve custar uma ida ao bucket');
 });
 
-test('a nuvem só é tocada quando o storage está habilitado', () => {
-  assert.ok(/cfg\?\.enabled/.test(FONTE), 'sem storage provisionado não há objeto a remover');
+test('a nuvem só é tocada quando há storage resolvido', () => {
+  // O resolvedor devolve null quando não há storage (nem cadastrado, nem legado)
+  // e quando a credencial é ilegível — nos dois casos não há objeto a remover.
+  assert.ok(/if \(!cfg\) return;/.test(FONTE), 'sem storage resolvido não há objeto a remover');
 });
 
 // ── VARREDURA DE ÓRFÃOS: A DECISÃO É SEMPRE DA RETENÇÃO ─────────────────────
@@ -91,7 +93,7 @@ test('a varredura não decide por IDADE do objeto', () => {
   const bloco = FONTE.slice(FONTE.indexOf('private async cleanupOrphanCloudObjects'),
                             FONTE.indexOf('private async deleteCloudObject'));
   assert.ok(
-    !/lastModified|LastModified|olderThan|idade|maxAge/i.test(bloco),
+    !/lastModified|LastModified|olderThan|maxAge/i.test(bloco),
     'idade do objeto não pode ser critério: quem decide retenção é o DRAC, não o bucket',
   );
 });
@@ -109,8 +111,28 @@ test('nuvem fora do ar não derruba a retenção local', () => {
     'a varredura precisa tolerar falha: a retenção local é a que libera disco');
 });
 
-test('a varredura só roda com storage habilitado', () => {
+test('a varredura cobre TODOS os storages, não só o ativo', () => {
+  // Numa migração é justamente o storage ANTIGO que acumula órfãos e precisa
+  // esvaziar; varrer só o ativo deixaria o bucket que se quer desocupar
+  // crescendo para sempre.
   const bloco = FONTE.slice(FONTE.indexOf('private async cleanupOrphanCloudObjects'),
                             FONTE.indexOf('private async deleteCloudObject'));
-  assert.ok(/cfg\?\.enabled/.test(bloco), 'sem storage provisionado não há bucket a varrer');
+  assert.ok(/todosOsStorages\(\)/.test(bloco), 'a varredura precisa percorrer todos os storages');
+  assert.ok(/for \(const storage of storages\)/.test(bloco), 'precisa iterar storage a storage');
+});
+
+test('a identidade do objeto é o par (chave, storage)', () => {
+  // Após uma migração a MESMA chave pode existir em dois buckets. Consultar só
+  // por cloudKey acharia o dono no storage errado e pouparia um órfão de verdade
+  // — ou pior, apagaria um objeto vivo achando que era lixo.
+  const bloco = FONTE.slice(FONTE.indexOf('private async cleanupOrphanCloudObjects'),
+                            FONTE.indexOf('private async deleteCloudObject'));
+  assert.ok(/cloudStorageId: storage\.id/.test(bloco),
+    'a consulta de donos precisa filtrar pelo storage, não só pela chave');
+});
+
+test('um storage fora do ar não impede a varredura dos outros', () => {
+  const bloco = FONTE.slice(FONTE.indexOf('private async cleanupOrphanCloudObjects'),
+                            FONTE.indexOf('private async deleteCloudObject'));
+  assert.ok(/Varredura falhou no storage/.test(bloco), 'a falha precisa ser por storage, não global');
 });

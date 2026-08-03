@@ -1,4 +1,6 @@
+import { CloudStorageResolverService } from './cloud-storage-resolver.service';
 import { Module } from '@nestjs/common';
+import { CryptoService } from '../common/crypto/crypto.service';
 import { CloudConnectorModule } from '../cloud-connector/cloud-connector.module';
 import { CloudOffloadService } from './cloud-offload.service';
 import { CloudStorageController } from './cloud-storage.controller';
@@ -10,7 +12,9 @@ import { CloudStorageController } from './cloud-storage.controller';
 @Module({
   imports: [CloudConnectorModule],
   controllers: [CloudStorageController],
-  providers: [CloudOffloadService],
-  exports: [CloudOffloadService],
+  // CryptoService: o resolvedor decifra o segredo de cada storage cadastrado,
+  // com a mesma chave mestra das senhas de câmera.
+  providers: [CloudStorageResolverService, CloudOffloadService, CryptoService],
+  exports: [CloudStorageResolverService, CloudOffloadService],
 })
 export class CloudStorageModule {}

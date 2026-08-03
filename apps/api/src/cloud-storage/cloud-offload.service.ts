@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { CloudConnectorService, type CloudStorageConfig } from '../cloud-connector/cloud-connector.service';
 import { ensureFileUnderRoot } from '../recordings/helpers/safe-file.helper';
 import { S3Client, S3Error } from './s3-client';
+import { CloudStorageResolverService } from './cloud-storage-resolver.service';
 import { envNumber } from '../common/config/env-number.helper';
 import {
   DEFAULT_STORAGE_POLICY,
@@ -78,6 +79,7 @@ export class CloudOffloadService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly cloudConnector: CloudConnectorService,
+    private readonly resolver: CloudStorageResolverService,
   ) {}
 
   private recordingsRoot(): string {
@@ -143,13 +145,19 @@ export class CloudOffloadService {
     const vazio: OffloadResult = { skipped: true, uploaded: 0, deletedLocal: 0, failed: 0, bytesUploaded: 0 };
     if (this.running) return { ...vazio, reason: 'ciclo anterior ainda em andamento' };
 
-    const cfg = await this.cloudConnector.getCloudStorageConfig();
-    if (!cfg) return { ...vazio, reason: 'sem storage em nuvem provisionado' };
+    // Escreve SEMPRE no storage ATIVO. Antes era a configuração única; agora a
+    // instalação pode ter vários, e o ativo é o destino de tudo que é novo. Sem
+    // nenhum cadastrado, o resolvedor cai na config legada — instalação que
+    // nunca usou a tela nova continua idêntica.
+    const destino = await this.resolver.storageParaEscrita();
+    if (!destino) return { ...vazio, reason: 'sem storage em nuvem provisionado' };
+    const cfg = destino;
+    const storageId = destino.id;
 
     this.running = true;
     try {
-      const client = this.buildClient(cfg);
-      const resultado = await this.uploadPending(client, cfg);
+      const client = this.resolver.clienteDe(destino);
+      const resultado = await this.uploadPending(client, cfg, storageId);
       const apagadas = await this.pruneUploaded(cfg);
       return { ...resultado, skipped: false, deletedLocal: apagadas };
     } finally {
@@ -158,7 +166,7 @@ export class CloudOffloadService {
   }
 
   /** Sobe as gravações que ainda não têm objeto no bucket. */
-  private async uploadPending(client: S3Client, cfg: CloudStorageConfig) {
+  private async uploadPending(client: S3Client, cfg: CloudStorageConfig, storageId: string | null = null) {
     const batch = envNumber('CLOUD_OFFLOAD_BATCH', DEFAULT_BATCH, {
       min: 1,
       max: 500,
@@ -249,7 +257,11 @@ export class CloudOffloadService {
 
         await this.prisma.recording.update({
           where: { id: rec.id },
-          data: { cloudKey: key, cloudUploadedAt: new Date() },
+          // CARIMBA em qual storage o objeto ficou. Sem isso, trocar de
+          // fornecedor faria o playback procurar esta chave no bucket NOVO e o
+          // acervo sumiria da tela — o defeito que a coluna existe para impedir.
+          // `null` = storage legado (a configuração única), e segue válido.
+          data: { cloudKey: key, cloudUploadedAt: new Date(), cloudStorageId: storageId ?? null },
         });
         uploaded += 1;
         bytesUploaded += tamanho;

@@ -15,6 +15,7 @@ import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper'
 import { AccessControlService } from '../access-control/access-control.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
 import { S3Client } from '../cloud-storage/s3-client';
+import { CloudStorageResolverService } from '../cloud-storage/cloud-storage-resolver.service';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
@@ -107,6 +108,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(THUMBNAIL_GENERATION_QUEUE) private readonly thumbnailQueue: Queue,
     @InjectQueue(RECORDING_EXPORT_QUEUE) private readonly rangeExportQueue: Queue,
     private readonly cloudConnector: CloudConnectorService,
+    private readonly storageResolver: CloudStorageResolverService,
   ) {}
 
   async onModuleInit() {
@@ -386,7 +388,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
    * Devolve `null` quando não há cópia na nuvem: quem chamou mantém o 404.
    */
   private async materializeFromCloud(
-    recording: { id: string; filePath: string; cloudKey?: string | null },
+    recording: { id: string; filePath: string; cloudKey?: string | null; cloudStorageId?: string | null },
   ): Promise<string | null> {
     const cloudKey = recording.cloudKey;
     if (!cloudKey) return null;
@@ -399,18 +401,16 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     // Já em cache de uma chamada anterior.
     if (existsSync(destino) && statSync(destino).size > 0) return destino;
 
-    const config = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
+    // Lê do storage DE ORIGEM desta gravação, não do ativo. Usar o ativo aqui
+    // faria o playback procurar a chave antiga no bucket novo depois de uma
+    // troca de fornecedor, e o acervo inteiro sumiria da tela — os dados
+    // continuariam no bucket antigo, inalcançáveis.
+    const config = await this.storageResolver
+      .storageDaGravacao(recording.cloudStorageId ?? null)
+      .catch(() => null);
     if (!config) return null;
 
-    const client = new S3Client({
-      endpoint: config.endpoint,
-      region: config.region,
-      bucket: config.bucket,
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-      prefix: config.prefix,
-      forcePathStyle: config.forcePathStyle,
-    });
+    const client = this.storageResolver.clienteDe(config);
     const semPrefixo = config.prefix && cloudKey.startsWith(`${config.prefix}/`)
       ? cloudKey.slice(config.prefix.length + 1)
       : cloudKey;

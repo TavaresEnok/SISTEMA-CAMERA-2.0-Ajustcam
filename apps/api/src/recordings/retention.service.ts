@@ -6,7 +6,7 @@ import { basename, extname, join } from 'node:path';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
-import { S3Client } from '../cloud-storage/s3-client';
+import { CloudStorageResolverService } from '../cloud-storage/cloud-storage-resolver.service';
 import { ensureFileUnderRoot } from './helpers/safe-file.helper';
 import { envBool, envNumber } from '../common/config/env-number.helper';
 import { buildTimelinePreviewPath } from './helpers/timeline-preview.helper';
@@ -132,6 +132,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly settings: SettingsService,
     private readonly cloudConnector: CloudConnectorService,
+    private readonly storageResolver: CloudStorageResolverService,
   ) {}
 
   // ── RETENÇÃO TAMBÉM VALE PARA A NUVEM ──────────────────────────────────────
@@ -173,75 +174,77 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * câmeras a 30 dias seriam ~800 mil chaves em memória num job periódico.
    */
   private async cleanupOrphanCloudObjects(): Promise<number> {
-    if (!this.cloudConnector) return 0;
-    const cfg = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
-    if (!cfg?.enabled) return 0;
+    if (!this.storageResolver) return 0;
     if (!envBool('RETENTION_CLOUD_ORPHAN_SWEEP', true)) return 0;
 
     const LOTE = envNumber('RETENTION_CLOUD_ORPHAN_BATCH', 500, { min: 50, max: 1000, integer: true });
     const TETO = envNumber('RETENTION_CLOUD_ORPHAN_MAX_PER_CYCLE', 5000, { min: 0, max: 100_000, integer: true });
     if (TETO === 0) return 0;
 
+    // Varre TODOS os storages, não só o ativo. Numa migração é justamente o
+    // ANTIGO que acumula órfãos e precisa esvaziar; varrer só o ativo deixaria o
+    // bucket que se quer desocupar crescendo para sempre.
+    const storages = await this.storageResolver.todosOsStorages().catch(() => []);
     let removidos = 0;
-    try {
-      const client = new S3Client({
-        endpoint: cfg.endpoint,
-        bucket: cfg.bucket,
-        region: cfg.region ?? 'us-east-1',
-        accessKeyId: cfg.accessKeyId,
-        secretAccessKey: cfg.secretAccessKey,
-        forcePathStyle: true,
-      });
 
-      const objetos = await client.listObjects('', LOTE);
-      if (!objetos.length) return 0;
-      const chaves = objetos.map((o) => o.key).filter(Boolean);
+    for (const storage of storages) {
+      if (removidos >= TETO) break;
+      try {
+        const client = this.storageResolver.clienteDe(storage);
+        const objetos = await client.listObjects('', LOTE);
+        if (!objetos.length) continue;
+        const chaves = objetos.map((o: { key: string }) => o.key).filter(Boolean);
 
-      // Quem AINDA tem dono no banco fica. A pergunta é feita ao banco em uma
-      // consulta só, e o resultado define exatamente o que pode sair.
-      const comDono = await this.prisma.recording.findMany({
-        where: { cloudKey: { in: chaves } },
-        select: { cloudKey: true },
-      });
-      const protegidas = new Set(comDono.map((r) => r.cloudKey).filter(Boolean) as string[]);
+        // Quem AINDA tem dono no banco fica. A consulta é por storage: a mesma
+        // chave pode existir em dois buckets após uma migração, e só o par
+        // (chave, storage) identifica o objeto sem ambiguidade.
+        const comDono = await this.prisma.recording.findMany({
+          where: { cloudKey: { in: chaves }, cloudStorageId: storage.id },
+          select: { cloudKey: true },
+        });
+        const protegidas = new Set(comDono.map((r) => r.cloudKey).filter(Boolean) as string[]);
 
-      for (const chave of chaves) {
-        if (removidos >= TETO) break;
-        if (protegidas.has(chave)) continue;   // tem dono ⇒ a retenção ainda não liberou
-        try {
-          await client.deleteObject(chave);
-          removidos += 1;
-        } catch (error) {
-          this.logger.warn(`Órfão na nuvem não pôde ser removido: ${chave} — ${(error as Error).message}`);
+        for (const chave of chaves) {
+          if (removidos >= TETO) break;
+          if (protegidas.has(chave)) continue;   // tem dono ⇒ a retenção ainda não liberou
+          try {
+            await client.deleteObject(chave);
+            removidos += 1;
+          } catch (error) {
+            this.logger.warn(`Órfão na nuvem não pôde ser removido: ${chave} — ${(error as Error).message}`);
+          }
         }
+      } catch (error) {
+        // Um storage fora do ar não pode impedir a varredura dos outros nem
+        // derrubar a retenção local, que é a que libera disco.
+        this.logger.warn(`Varredura falhou no storage "${storage.name}": ${(error as Error).message}`);
       }
-      if (removidos > 0) {
-        this.logger.log(`Varredura da nuvem: ${removidos} objeto(s) órfão(s) removido(s) de ${chaves.length} inspecionado(s).`);
-      }
-    } catch (error) {
-      // Nuvem fora do ar não pode derrubar a retenção local, que é a que libera disco.
-      this.logger.warn(`Varredura de órfãos na nuvem falhou: ${(error as Error).message}`);
+    }
+
+    if (removidos > 0) {
+      this.logger.log(`Varredura da nuvem: ${removidos} objeto(s) órfão(s) removido(s) em ${storages.length} storage(s).`);
     }
     return removidos;
   }
 
-  private async deleteCloudObject(cloudKey: string | null | undefined): Promise<void> {
+  private async deleteCloudObject(
+    cloudKey: string | null | undefined,
+    cloudStorageId?: string | null,
+  ): Promise<void> {
     if (!cloudKey) return;
     // `cloudConnector` pode não existir: a retenção é instanciada sem o
     // contêiner do Nest em teste, e uma instalação sem nuvem provisionada nunca
     // precisa dele. Ausência de conector é "não há nuvem", não erro.
     if (!this.cloudConnector) return;
     try {
-      const cfg = await this.cloudConnector.getCloudStorageConfig();
-      if (!cfg?.enabled) return;
-      const client = new S3Client({
-        endpoint: cfg.endpoint,
-        bucket: cfg.bucket,
-        region: cfg.region ?? 'us-east-1',
-        accessKeyId: cfg.accessKeyId,
-        secretAccessKey: cfg.secretAccessKey,
-        forcePathStyle: true,
-      });
+      // Apaga no storage DE ORIGEM. Usar o ativo deixaria o objeto antigo vivo
+      // no bucket anterior para sempre, que é o vazamento que a retenção da
+      // nuvem existe para fechar.
+      const cfg = this.storageResolver
+        ? await this.storageResolver.storageDaGravacao(cloudStorageId ?? null)
+        : null;
+      if (!cfg) return;
+      const client = this.storageResolver.clienteDe(cfg);
       await client.deleteObject(cloudKey);
     } catch (error) {
       this.logger.warn(
@@ -573,7 +576,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deleteRecording(
-    recording: { id: string; cameraId: string; filePath: string; cloudKey?: string | null },
+    recording: { id: string; cameraId: string; filePath: string; cloudKey?: string | null; cloudStorageId?: string | null },
     protection: ProtectionSets,
   ) {
     if (protection.recordingIds.has(recording.id)) return false;
@@ -611,7 +614,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     // falhar deixaria um registro apontando para um objeto que já não existe —
     // playback quebrado e nenhuma forma de saber que aquilo era prova.
     // A ordem inversa, no pior caso, deixa lixo no bucket, que é recuperável.
-    await this.deleteCloudObject(recording.cloudKey);
+    await this.deleteCloudObject(recording.cloudKey, recording.cloudStorageId);
     return true;
   }
 
@@ -739,6 +742,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
             // ninguém mais sabe que aquele arquivo existe na nuvem. Foi assim que
             // o MinIO encheu e travou o acervo inteiro (medido em 2026-08-03).
             cloudKey: true,
+            cloudStorageId: true,
             ...(this.hasMotionScoreColumn() ? { motionScore: true } : {}),
           },
         });
@@ -1047,7 +1051,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           where: protection.recordingIds.size ? { id: { notIn: [...protection.recordingIds] } } : {},
           orderBy: { startedAt: 'asc' },
           take: 20,
-          select: { id: true, cameraId: true, filePath: true, cloudKey: true },
+          select: { id: true, cameraId: true, filePath: true, cloudKey: true, cloudStorageId: true },
         });
         if (!oldest.length) break;
         let batchDeleted = 0;
