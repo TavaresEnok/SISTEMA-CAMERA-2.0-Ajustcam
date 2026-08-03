@@ -3,7 +3,6 @@ import { UserRole } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CloudOffloadService } from './cloud-offload.service';
 import { CloudStorageAdminService } from './cloud-storage-admin.service';
-import { StorageBenchmarkService } from './storage-benchmark.service';
 
 // Estado do storage em nuvem DESTA instalação.
 //
@@ -19,7 +18,6 @@ export class CloudStorageController {
   constructor(
     private readonly offload: CloudOffloadService,
     private readonly admin: CloudStorageAdminService,
-    private readonly benchmark: StorageBenchmarkService,
   ) {}
 
   @Roles(UserRole.ADMIN)
@@ -72,19 +70,6 @@ export class CloudStorageController {
   @Post('storages/:id/purge')
   purgeStorage(@Param('id') id: string, @Body() body: { confirmacao?: string }) {
     return this.admin.esvaziar(id, String(body?.confirmacao ?? ''));
-  }
-
-  /**
-   * MEDE o desempenho do storage a partir DESTA instalação.
-   *
-   * Aqui e não na Central de propósito: o que interessa é o caminho que o vídeo
-   * percorre de verdade. POST porque não é leitura — sobe e baixa alguns MB,
-   * consome banda e gera requisições cobradas.
-   */
-  @Roles(UserRole.ADMIN)
-  @Post('storages/:id/benchmark')
-  benchmarkStorage(@Param('id') id: string, @Body() body: { tamanhoMb?: number }) {
-    return this.benchmark.medir(id, Number(body?.tamanhoMb) || undefined);
   }
 
   /** Remove só o CADASTRO. Nenhum objeto é tocado no fornecedor. */

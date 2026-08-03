@@ -120,9 +120,9 @@ test('o tamanho ESCOLHIDO é limitado nos dois extremos, sem reajuste', async (t
   t.after(() => srv.stop());
 
   const grande = await measureS3Performance(config(srv.endpoint), { sizeMb: 999, latencySamples: 1 });
-  assert.equal(grande.amostraMb, 64, 'teto para não competir com o envio real das gravações');
+  assert.equal(grande.amostraMb, 256, 'teto: a amostra é gerada inteira em memória');
   const maiorPut = Math.max(...srv.recebidas.filter((r) => r.method === 'PUT').map((r) => r.bytes));
-  assert.equal(maiorPut, 64 * 1024 * 1024);
+  assert.equal(maiorPut, 256 * 1024 * 1024);
 });
 
 test('a carga enviada tem o tamanho pedido e NÃO é vazia', async (t) => {
@@ -139,4 +139,31 @@ test('a carga enviada tem o tamanho pedido e NÃO é vazia', async (t) => {
   await measureS3Performance(config(srv.endpoint), { sizeMb: 1, latencySamples: 1 });
   const put = srv.recebidas.find((r) => r.method === 'PUT');
   assert.equal(put.bytes, 1024 * 1024, 'subiu 1 MB de verdade, não um corpo simbólico');
+});
+
+test('varre e apaga sobras de execuções anteriores', async (t) => {
+  // Um teste que morreu no meio (timeout, restart) deixa a amostra pesando no
+  // bucket do cliente para sempre. A varredura é o que impede isso de virar
+  // custo silencioso — e ela só toca no prefixo próprio da medição.
+  const apagadas = [];
+  const srv = await servidorFalso((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    if (req.method === 'GET' && url.searchParams.get('list-type') === '2') {
+      res.writeHead(200);
+      res.end('<ListBucketResult>'
+        + '<Contents><Key>.drac-central-perf-antiga-1</Key></Contents>'
+        + '<Contents><Key>.drac-central-perf-antiga-2</Key></Contents>'
+        + '<IsTruncated>false</IsTruncated></ListBucketResult>');
+      return;
+    }
+    if (req.method === 'DELETE') { apagadas.push(decodeURIComponent(url.pathname)); res.writeHead(204); res.end(''); return; }
+    res.writeHead(200);
+    res.end(req.method === 'GET' ? Buffer.alloc(16) : '');
+  });
+  t.after(() => srv.stop());
+
+  await measureS3Performance(config(srv.endpoint), { sizeMb: 1, latencySamples: 1 });
+  assert.ok(apagadas.some((k) => k.includes('antiga-1')), 'sobra anterior tem de sair');
+  assert.ok(apagadas.some((k) => k.includes('antiga-2')));
+  assert.ok(!apagadas.some((k) => k.includes('gravacoes/')), 'a varredura nunca sai do prefixo da medição');
 });

@@ -188,15 +188,24 @@ function percentil(valores, p) {
  * Limpa o que criou mesmo quando falha no meio — o teste não pode deixar lixo
  * pago no bucket do cliente.
  */
-async function measureS3Performance(config, { timeoutMs = 120000, sizeMb = null, latencySamples = 7 } = {}) {
+const PREFIXO_PERF = '.drac-central-perf-';
+// Teto de 256 MB. A amostra é gerada inteira em memória (o SigV4 assina o corpo
+// completo), então o teto é sobre a RAM do processo, não sobre a paciência: a
+// 1 Gb/s isso já dura 2s, que é folgado para o TCP acelerar.
+const TETO_MB = 256;
+// Alvo de duração. Abaixo disso a transferência não sai do slow-start e o que
+// se cronometra é a conexão, não a banda.
+const DURACAO_ALVO_MS = 2500;
+
+async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null, latencySamples = 7 } = {}) {
   const explicito = Number(sizeMb) > 0;
-  let mb = Math.min(64, Math.max(1, Number(sizeMb) || 8));
+  let mb = Math.min(TETO_MB, Math.max(1, Number(sizeMb) || 8));
   const criadas = [];
   const notas = [];
   let falhas = 0;
 
   const subir = async (bytes) => {
-    const k = joinKey(config.prefix, `.drac-central-perf-${Date.now()}-${randomBytes(3).toString('hex')}`);
+    const k = joinKey(config.prefix, `${PREFIXO_PERF}${Date.now()}-${randomBytes(3).toString('hex')}`);
     const t = Date.now();
     const r = await call(
       config,
@@ -216,8 +225,8 @@ async function measureS3Performance(config, { timeoutMs = 120000, sizeMb = null,
     // num rápido: se a transferência acaba antes de o TCP acelerar, cronometrou-se
     // a conexão, não a banda. Refaz UMA vez, no máximo — escalar em laço gastaria
     // banda e requisição cobrada a cada rodada.
-    if (!explicito && msSubida < 1500 && mb < 64) {
-      const alvo = Math.min(64, Math.ceil(mb * (1500 / Math.max(1, msSubida))));
+    if (!explicito && msSubida < DURACAO_ALVO_MS && mb < TETO_MB) {
+      const alvo = Math.min(TETO_MB, Math.ceil(mb * (DURACAO_ALVO_MS / Math.max(1, msSubida))));
       if (alvo > mb) {
         notas.push(`A primeira amostra de ${mb} MB subiu em ${(msSubida / 1000).toFixed(2)}s — rápido demais para ser confiável. Repetido com ${alvo} MB.`);
         carga = randomBytes(alvo * 1024 * 1024);
@@ -263,10 +272,48 @@ async function measureS3Performance(config, { timeoutMs = 120000, sizeMb = null,
       medidoEm: new Date().toISOString(),
     };
   } finally {
+    // LIMPEZA. O teste sobe centenas de MB no bucket do cliente; deixar isso lá
+    // é cobrar por lixo. Apaga o que criou AGORA e também qualquer sobra de
+    // execução anterior que tenha morrido no meio — sem a varredura, um timeout
+    // ou um restart deixaria a amostra pesando no bucket para sempre, sem
+    // ninguém suspeitar de onde veio.
     for (const k of criadas) {
       await call(config, { method: 'DELETE', key: k }, timeoutMs).catch(() => undefined);
     }
+    await limparSobras(config, timeoutMs).catch(() => undefined);
   }
+}
+
+/**
+ * Apaga objetos de teste esquecidos por execuções anteriores.
+ *
+ * Só toca em chaves sob o prefixo próprio da medição: é a garantia de que uma
+ * varredura nunca alcança gravação. Percorre a paginação até o fim — parar nas
+ * primeiras 1000 deixaria sobra e relataria limpeza completa.
+ */
+async function limparSobras(config, timeoutMs) {
+  const base = joinKey(config.prefix, '');
+  let token = null;
+  let apagados = 0;
+  do {
+    const query = { 'list-type': '2', 'max-keys': '1000', prefix: joinKey(config.prefix, PREFIXO_PERF) };
+    if (token) query['continuation-token'] = token;
+    const { url, headers } = sign(config, { method: 'GET', query });
+    const res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(timeoutMs) });
+    const xml = await res.text();
+    if (!res.ok) return apagados;
+    const chaves = [...xml.matchAll(/<Key>([^<]*)<\/Key>/g)].map((m) => m[1]);
+    for (const cheia of chaves) {
+      const relativa = base && cheia.startsWith(base) ? cheia.slice(base.length) : cheia;
+      const r = await call(config, { method: 'DELETE', key: cheia }, timeoutMs);
+      if (r.ok) apagados += 1;
+      void relativa;
+    }
+    const truncado = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+    const prox = /<NextContinuationToken>([^<]*)<\/NextContinuationToken>/.exec(xml)?.[1] || null;
+    token = truncado && prox ? prox : null;
+  } while (token);
+  return apagados;
 }
 
 module.exports = { testS3Access, measureS3Performance, __sign: sign, __joinKey: joinKey, __explain: explain };

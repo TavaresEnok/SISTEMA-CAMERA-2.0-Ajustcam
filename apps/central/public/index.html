@@ -2443,12 +2443,13 @@
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
               <button id="cloud-perf">Desempenho</button>
-              <select id="cloud-perf-size" title="Tamanho da amostra. Automático ajusta ao link — amostra pequena num link rápido mede a conexão, não a banda." style="height:29px;padding:0 7px;font-size:11px">
+              <select id="cloud-perf-size" title="Tamanho da amostra. Automático cresce até a transferência durar ~2,5s, que é o mínimo para a medição valer. Tudo o que sobe é apagado no fim." style="height:29px;padding:0 7px;font-size:11px">
                 <option value="">Automático</option>
                 <option value="8">8 MB</option>
-                <option value="16">16 MB</option>
                 <option value="32">32 MB</option>
                 <option value="64">64 MB</option>
+                <option value="128">128 MB</option>
+                <option value="256">256 MB</option>
               </select>
               <button id="cloud-delete">Excluir</button>
               <span id="cloud-feedback"></span>
@@ -2603,7 +2604,7 @@
         const feedback = body.querySelector('#cloud-feedback');
         if (!alvo) return;
         if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
-        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Medindo — a amostra cresce se o link for rápido…</div>';
+        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Medindo — a amostra cresce até a transferência durar o suficiente. O que subir é apagado no fim.</div>';
         try {
           const escolha = body.querySelector('#cloud-perf-size')?.value || '';
           const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/performance`), {
@@ -2650,6 +2651,7 @@
               ${d.falhas ? `<div class="perf-flag">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
               ${(d.notas || []).map((n) => `<div class="perf-flag">${escapeHtml(n)}</div>`).join('')}
               <div class="perf-note">
+                Amostra de ${d.amostraMb} MB, apagada do bucket ao terminar.
                 Isto mede o link <b>da Central</b> até o bucket, e serve para avaliar o fornecedor.
                 Quantas câmeras cabem depende da rede <b>da instalação</b>, que é de onde o vídeo sobe —
                 o mesmo botão existe na tela de Armazenamento dela, e é aquele número que dimensiona.
