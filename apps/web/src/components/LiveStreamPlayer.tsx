@@ -427,6 +427,10 @@ export function LiveStreamPlayer({
   const [displayFps, setDisplayFps] = useState<number | null>(null);
   const [sourceVideoCodec, setSourceVideoCodec] = useState<string | null>(null);
   const [isTranscodedForBrowser, setIsTranscodedForBrowser] = useState(false);
+  // Custo da conversão, medido no servidor. A etiqueta de codec já mostrava
+  // "H265 → H.264", mas sem dizer que isso custa 5× de CPU — o operador não tinha
+  // como saber que o navegador dele é a causa, nem que trocar resolve de graça.
+  const [transcodeCost, setTranscodeCost] = useState<{ cpuMultiplier?: number; reason?: string; hint?: string } | null>(null);
   const [measuredBitrateKbps, setMeasuredBitrateKbps] = useState<number | null>(null);
   const [liveLatencySeconds, setLiveLatencySeconds] = useState<number | null>(null);
   // Suspende a transmissão quando a aba fica oculta por tempo suficiente, para
@@ -820,6 +824,7 @@ export function LiveStreamPlayer({
         mediaAuthTokenRef.current = streamToken;
         setSourceVideoCodec(sourceCodec ?? null);
         setIsTranscodedForBrowser(Boolean(liveDiagnostics?.liveTranscodedForBrowser));
+        setTranscodeCost((liveDiagnostics as { transcodeCost?: typeof transcodeCost } | null)?.transcodeCost ?? null);
         const orderedProtocols = buildProtocolOrder(
           cameraId,
           preferredLiveProtocol,
@@ -2249,8 +2254,22 @@ export function LiveStreamPlayer({
             </span>
           ) : null}
           {!compactLiveOverlay && sourceVideoCodec ? (
-            <span className="inline-flex h-6 items-center rounded border border-white/15 bg-black/55 px-2 text-[10px] font-semibold uppercase tracking-wide text-white/80">
+            <span
+              className={`inline-flex h-6 items-center gap-1 rounded border px-2 text-[10px] font-semibold uppercase tracking-wide ${
+                isTranscodedForBrowser
+                  ? 'border-amber-400/50 bg-amber-500/20 text-amber-100'
+                  : 'border-white/15 bg-black/55 text-white/80'
+              }`}
+              title={
+                transcodeCost
+                  ? `${transcodeCost.reason ?? ''} Custa cerca de ${transcodeCost.cpuMultiplier ?? 5}x mais CPU do servidor. ${transcodeCost.hint ?? ''}`.trim()
+                  : undefined
+              }
+            >
               {sourceVideoCodec}{isTranscodedForBrowser ? ' → H.264' : ''}
+              {isTranscodedForBrowser && transcodeCost?.cpuMultiplier
+                ? ` · ${transcodeCost.cpuMultiplier}x CPU`
+                : ''}
             </span>
           ) : null}
           {!compactLiveOverlay && measuredBitrateKbps != null ? (

@@ -474,6 +474,27 @@ export class CameraStreamController {
         sourceVideoCodec: sourceCodec,
         originalVideoCodec: originalCodec,
         liveTranscodedForBrowser,
+        // ── CUSTO DA CONVERSÃO, EXPLÍCITO ───────────────────────────────────
+        //
+        // Medido na simulação de capacidade (2026-08-03): entregar H.265
+        // convertendo para H.264 custa 6,6% de CPU por câmera, contra 1,3% em
+        // passthrough — CINCO VEZES mais. Numa frota H.265 isso divide a
+        // capacidade do servidor por cinco, e hoje acontece em silêncio.
+        //
+        // O operador não tem como saber que o navegador dele é a causa. Com este
+        // campo a interface pode dizer, e a escolha passa a ser informada:
+        // trocar de navegador sai de graça e devolve 5× de capacidade.
+        transcodeCost: liveTranscodedForBrowser
+          ? {
+            cpuMultiplier: 5,
+            reason: supportsOriginalOnClient
+              ? 'A fonte é H.265 e este modo de entrega exige conversão.'
+              : 'Este navegador não decodifica H.265, então o servidor converte para H.264.',
+            hint: supportsOriginalOnClient
+              ? 'O modo "Máxima qualidade" entrega H.265 sem conversão.'
+              : 'Safari e Edge reproduzem H.265 direto, sem custo de conversão.',
+          }
+          : null,
         liveProfile,
         deliveryProfile,
         deliveryMode: viewMode,

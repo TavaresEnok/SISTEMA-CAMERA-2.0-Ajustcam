@@ -8,6 +8,7 @@ import {
   resolveGridRtspProfile,
   resolveLiveRtspProfile,
 } from '../cameras/helpers/rtsp-url.helper';
+import * as os from 'node:os';
 import { envNumber } from '../common/config/env-number.helper';
 import {
   ingestPathName,
@@ -83,6 +84,29 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
   // Câmeras cuja GRADE comprovadamente emite faixa de metadados (visto pelo
   // MediaMTX, não pelo ffprobe). Alimenta a decisão de sanitização.
   private readonly gridHasGenericTrack = new Set<string>();
+
+  // ── FREIO DE TRANSCODES SIMULTÂNEOS ────────────────────────────────────────
+  //
+  // Medido na simulação de capacidade (2026-08-03), nesta máquina de 15 núcleos:
+  //
+  //     H.264 passthrough .......... 1,3% de CPU por câmera
+  //     H.265 → transcode H.264 .... 6,6% de CPU por câmera   (5× mais)
+  //
+  // Sem freio, um operador que abra um mural com 200 câmeras H.265 dispara 200
+  // FFmpeg de uma vez. O servidor não recusa: ele aceita todos e entrega os 200
+  // travando — e como o transcode fica mais lento que o tempo real, TODAS as
+  // câmeras degradam juntas, inclusive as que já estavam boas.
+  //
+  // Degradar previsivelmente é melhor que colapsar: passado o teto, o tile novo
+  // recebe uma recusa clara em vez de derrubar a experiência de quem já está
+  // assistindo. O padrão sai da medição — ~10 transcodes por núcleo deixa a
+  // máquina em ~66% de CPU só com transcode, com folga para gravação e IA.
+  private activeTranscodes = 0;
+  private readonly maxTranscodes = envNumber(
+    'MEDIAMTX_MAX_CONCURRENT_TRANSCODES',
+    Math.max(8, (os.cpus()?.length ?? 4) * 10),
+    { min: 1, max: 2000, integer: true },
+  );
   // AUTOCURA DA GRADE: DESLIGADA por padrão (restaura o comportamento de 21/07).
   //
   // Ela existe por um motivo real: Cam-03/09 aceitam o RTSP e nunca enviam mídia,
@@ -454,6 +478,15 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     }
 
     await this.reconcileMissingPaths(new Set(items.map((item: any) => String(item?.name ?? ''))));
+
+    // Conta os transcodes VIVOS aqui, aproveitando a listagem que o watchdog já
+    // faz. Contar sob demanda, na criação de cada path, colocaria uma consulta ao
+    // MediaMTX no caminho quente do tile — exatamente o que tiramos de lá ao mover
+    // o ffprobe para fora. O número fica alguns segundos velho, e isso basta: ele
+    // serve de FREIO, não de contabilidade exata.
+    this.activeTranscodes = items.filter(
+      (item: any) => Boolean(item?.ready) && String(item?.source?.type ?? '') === 'publisher',
+    ).length;
 
     const seen = new Set<string>();
     const stuck: Array<{ name: string; ready: boolean; readers: number }> = [];
@@ -1942,6 +1975,25 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
     // reproduz H.265), com latência maior — é o trade-off assumido pelo usuário.
     const needsPublisher =
       deliveryMode === 'original' ? false : (isHevc || transcodeAudioForWebrtc || sanitizeGridSource);
+
+    // FREIO: passado o teto, recusa o transcode NOVO em vez de degradar todos.
+    //
+    // Só vale para quem ainda não tem path — quem JÁ está no ar não é derrubado
+    // por um recém-chegado. Sem essa assimetria o freio viraria um revezamento
+    // onde ninguém assiste nada, que é pior que a recusa honesta.
+    if (needsPublisher && this.activeTranscodes >= this.maxTranscodes) {
+      const jaExiste = await this.getPath(pathName).then(() => true).catch(() => false);
+      if (!jaExiste) {
+        this.logger.warn(
+          `Teto de transcodes atingido (${this.activeTranscodes}/${this.maxTranscodes}): `
+          + `câmera ${cameraId} recusada para proteger quem já está assistindo. `
+          + 'Fonte H.265 sem sub-stream H.264 é o que puxa esse custo.',
+        );
+        throw new BadRequestException(
+          'Servidor no limite de conversões simultâneas. Feche alguma câmera ou use um navegador com suporte a H.265.',
+        );
+      }
+    }
     const gpuAccel =
       needsPublisher && !sanitizeGridSource && (await this.settingsService.isGpuAccelerationEnabled());
     // Só é "transcodificado" quando o publisher FFmpeg existe de fato — no modo
