@@ -1856,6 +1856,64 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
 }
 
 /**
+ * Mostra a Secret Access Key de volta para quem opera a Central.
+ *
+ * A credencial não é do painel: é do CLIENTE, que contratou o storage e um dia
+ * vai precisar dela para conferir com o fornecedor, reconfigurar em outro lugar
+ * ou responder a uma auditoria. Esconder para sempre não protege ninguém —
+ * quem tem sessão de administrador aqui já pode SUBSTITUIR o segredo pelo
+ * formulário, então negar a leitura só obrigava a reemitir a chave no
+ * fornecedor para descobrir o que já está guardado.
+ *
+ * O que protege de verdade é o rastro: cada exibição vira evento de auditoria
+ * com quem, quando e de qual IP. Por isso é uma rota separada, chamada só no
+ * clique do olho, e não um campo a mais no payload da tela — a listagem das
+ * instalações continua sem segredo nenhum.
+ */
+async function handleRevealCloudStorageSecret(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const config = normalizeCloudStorage(item.cloudStorage);
+  if (!config.secretAccessKeyEncrypted) {
+    await saveDb(db);
+    return json(req, res, 404, {
+      error: 'secret_not_set',
+      message: 'Esta instalação ainda não tem uma Secret Access Key guardada.',
+    });
+  }
+
+  let secret = '';
+  try {
+    secret = decryptStorageSecret(config.secretAccessKeyEncrypted);
+  } catch (error) {
+    // Chave mestra da Central trocada depois que o segredo foi guardado: o
+    // texto cifrado virou lixo. Dizer isso é melhor que devolver vazio e deixar
+    // o operador achar que nunca cadastrou nada.
+    await saveDb(db);
+    return json(req, res, 409, {
+      error: 'secret_unreadable',
+      message: 'A credencial guardada não pôde ser decifrada (CENTRAL_STORAGE_SECRET mudou). Cadastre-a novamente.',
+    });
+  }
+  if (!secret) {
+    await saveDb(db);
+    return json(req, res, 409, { error: 'secret_unreadable', message: 'A credencial guardada está vazia.' });
+  }
+
+  addAuditEvent(db, req, {
+    type: 'installation.cloud_storage_secret_revealed',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    bucket: config.bucket,
+    accessKeyId: config.accessKeyId,
+  });
+  await saveDb(db);
+  return json(req, res, 200, { accessKeyId: config.accessKeyId, secretAccessKey: secret });
+}
+
+/**
  * Testa a credencial CONTRA O BUCKET, a partir da Central.
  *
  * Testar aqui (e não só na instalação) é deliberado: o operador está no painel
@@ -2484,6 +2542,10 @@ async function route(req, res) {
       const cloudStorageMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage$/);
       if (req.method === 'PATCH' && cloudStorageMatch) {
         return handlePatchCloudStorage(req, res, db, actor, decodeURIComponent(cloudStorageMatch[1]));
+      }
+      const cloudSecretMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/secret$/);
+      if (req.method === 'GET' && cloudSecretMatch) {
+        return handleRevealCloudStorageSecret(req, res, db, actor, decodeURIComponent(cloudSecretMatch[1]));
       }
       const cloudTestMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/test$/);
       if (req.method === 'POST' && cloudTestMatch) {
