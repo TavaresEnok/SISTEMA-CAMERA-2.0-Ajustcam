@@ -2443,6 +2443,13 @@
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
               <button id="cloud-perf">Desempenho</button>
+              <select id="cloud-perf-size" title="Tamanho da amostra. Automático ajusta ao link — amostra pequena num link rápido mede a conexão, não a banda." style="height:29px;padding:0 7px;font-size:11px">
+                <option value="">Automático</option>
+                <option value="8">8 MB</option>
+                <option value="16">16 MB</option>
+                <option value="32">32 MB</option>
+                <option value="64">64 MB</option>
+              </select>
               <button id="cloud-delete">Excluir</button>
               <span id="cloud-feedback"></span>
             </div>
@@ -2596,10 +2603,13 @@
         const feedback = body.querySelector('#cloud-feedback');
         if (!alvo) return;
         if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
-        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Enviando e baixando 4 MB…</div>';
+        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Medindo — a amostra cresce se o link for rápido…</div>';
         try {
+          const escolha = body.querySelector('#cloud-perf-size')?.value || '';
           const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/performance`), {
             method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(escolha ? { sizeMb: Number(escolha) } : {}),
           });
           const d = await res.json().catch(() => ({}));
           if (!res.ok || !d.ok) {
@@ -2638,6 +2648,7 @@
               </div>
               ${inst ? '<div class="perf-flag">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
               ${d.falhas ? `<div class="perf-flag">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
+              ${(d.notas || []).map((n) => `<div class="perf-flag">${escapeHtml(n)}</div>`).join('')}
               <div class="perf-note">
                 Isto mede o link <b>da Central</b> até o bucket, e serve para avaliar o fornecedor.
                 Quantas câmeras cabem depende da rede <b>da instalação</b>, que é de onde o vídeo sobe —

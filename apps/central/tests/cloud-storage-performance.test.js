@@ -96,7 +96,23 @@ test('escrita recusada vira ERRO, não número', async (t) => {
   assert.equal(r.subida, undefined, 'medição inválida não pode devolver banda nenhuma');
 });
 
-test('o tamanho da amostra é limitado nos dois extremos', async (t) => {
+test('sem tamanho pedido, refaz a medição quando a primeira sobe rápido demais', async (t) => {
+  // Servidor instantâneo = link absurdamente rápido: a primeira amostra não sai
+  // do slow-start e o número seria ruído. Tem de haver uma segunda, maior.
+  const srv = await servidorFalso((req, res) => {
+    res.writeHead(200);
+    res.end(req.method === 'GET' ? Buffer.alloc(16) : '');
+  });
+  t.after(() => srv.stop());
+
+  const r = await measureS3Performance(config(srv.endpoint), { latencySamples: 1 });
+  const grandes = srv.recebidas.filter((x) => x.method === 'PUT' && x.bytes >= 1024 * 1024);
+  assert.equal(grandes.length, 2, 'exatamente duas: uma para descobrir, outra para medir');
+  assert.ok(grandes[1].bytes > grandes[0].bytes);
+  assert.ok(r.notas.some((n) => n.includes('rápido demais')), 'o operador precisa saber que a primeira foi descartada');
+});
+
+test('o tamanho ESCOLHIDO é limitado nos dois extremos, sem reajuste', async (t) => {
   const srv = await servidorFalso((req, res) => {
     if (req.method === 'GET') { res.writeHead(200); res.end(Buffer.alloc(16)); return; }
     res.writeHead(200); res.end('');
@@ -104,9 +120,9 @@ test('o tamanho da amostra é limitado nos dois extremos', async (t) => {
   t.after(() => srv.stop());
 
   const grande = await measureS3Performance(config(srv.endpoint), { sizeMb: 999, latencySamples: 1 });
-  assert.equal(grande.amostraMb, 16, 'teto para não competir com o envio real das gravações');
+  assert.equal(grande.amostraMb, 64, 'teto para não competir com o envio real das gravações');
   const maiorPut = Math.max(...srv.recebidas.filter((r) => r.method === 'PUT').map((r) => r.bytes));
-  assert.equal(maiorPut, 16 * 1024 * 1024);
+  assert.equal(maiorPut, 64 * 1024 * 1024);
 });
 
 test('a carga enviada tem o tamanho pedido e NÃO é vazia', async (t) => {

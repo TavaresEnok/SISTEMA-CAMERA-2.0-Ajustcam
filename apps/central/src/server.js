@@ -2044,6 +2044,8 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
     });
   }
 
+  const corpo = await readBody(req).catch(() => null);
+  const pedido = Number(corpo && typeof corpo === 'object' ? corpo.sizeMb : 0);
   const medicao = await measureS3Performance({
     endpoint: config.endpoint,
     region: config.region,
@@ -2052,7 +2054,7 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
     accessKeyId: config.accessKeyId,
     secretAccessKey: secret,
     forcePathStyle: config.forcePathStyle,
-  });
+  }, pedido > 0 ? { sizeMb: pedido } : {});
 
   addAuditEvent(db, req, {
     type: 'installation.cloud_storage_measured',

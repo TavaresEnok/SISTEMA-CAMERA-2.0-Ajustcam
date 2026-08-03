@@ -37,6 +37,11 @@ const PREFIXO_TESTE = '__drac_perf__';
 const AMOSTRAS_LATENCIA = 7;
 const OPERACOES_PEQUENAS = 10;
 const TAMANHO_PADRAO_MB = 8;
+const TAMANHO_MAXIMO_MB = 64;
+// Abaixo disto a transferência não sai do TCP slow-start e o número medido é o
+// tempo de estabelecer a conexão, não a banda. Foi o que aconteceu num link
+// rápido: 4 MB em 0,08s viraram "414 Mb/s" — ruído, não capacidade sustentada.
+const DURACAO_MINIMA_CONFIAVEL_MS = 1500;
 
 export type MedicaoDesempenho = {
   storageId: string;
@@ -67,7 +72,7 @@ export class StorageBenchmarkService {
     private readonly resolver: CloudStorageResolverService,
   ) {}
 
-  async medir(storageId: string, tamanhoMb = TAMANHO_PADRAO_MB): Promise<MedicaoDesempenho> {
+  async medir(storageId: string, tamanhoMb?: number): Promise<MedicaoDesempenho> {
     if (this.rodando) {
       throw new BadRequestException('Já há uma medição em andamento. Duas ao mesmo tempo dividiriam a banda e mediriam errado.');
     }
@@ -80,9 +85,11 @@ export class StorageBenchmarkService {
       throw new BadRequestException('A credencial deste storage não pôde ser decifrada; não há como medir nada nele.');
     }
 
-    // Entre 1 e 32 MB. Abaixo de 1 MB a medição vira ruído de latência; acima de
-    // 32 MB o custo do teste começa a competir com o próprio envio das gravações.
-    const mb = Math.min(32, Math.max(1, Math.round(tamanhoMb) || TAMANHO_PADRAO_MB));
+    // Teto de 64 MB: acima disso o custo do teste começa a competir com o envio
+    // real das gravações. Tamanho informado pelo operador é respeitado sem
+    // ajuste — quem escolheu sabe o que quer medir.
+    const tamanhoExplicito = Number.isFinite(tamanhoMb) && Number(tamanhoMb) > 0;
+    const mb = Math.min(TAMANHO_MAXIMO_MB, Math.max(1, Math.round(Number(tamanhoMb)) || TAMANHO_PADRAO_MB));
     const cliente = this.resolver.clienteDe(storage);
     const criadas: string[] = [];
     const observacoes: string[] = [];
@@ -93,13 +100,37 @@ export class StorageBenchmarkService {
       // Conteúdo ALEATÓRIO, nunca zeros: alguns storages e proxies comprimem, e
       // um bloco de zeros mediria a compressão, não a rede — devolvendo uma
       // banda fantástica que nenhum vídeo real alcança.
-      const carga = randomBytes(mb * 1024 * 1024);
-      const chaveGrande = `${PREFIXO_TESTE}/${Date.now()}-${randomBytes(4).toString('hex')}.bin`;
+      const subir = async (bytes: Buffer, chave: string) => {
+        const inicio = Date.now();
+        await cliente.putObject(chave, bytes, 'application/octet-stream');
+        criadas.push(chave);
+        return Date.now() - inicio;
+      };
 
-      const t0 = Date.now();
-      await cliente.putObject(chaveGrande, carga, 'application/octet-stream');
-      const msSubida = Date.now() - t0;
-      criadas.push(chaveGrande);
+      let carga = randomBytes(mb * 1024 * 1024);
+      let chaveGrande = `${PREFIXO_TESTE}/${Date.now()}-${randomBytes(4).toString('hex')}.bin`;
+      let msSubida = await subir(carga, chaveGrande);
+      let mbEfetivo = mb;
+
+      // AJUSTE À VELOCIDADE DO LINK. Uma amostra fixa mede bem um link lento e
+      // mente num rápido: se a transferência acaba antes do TCP acelerar, o que
+      // se cronometrou foi a conexão. Aqui, quando a primeira sobe rápido demais,
+      // o tamanho necessário é extrapolado e a medição refeita UMA vez — no
+      // máximo duas subidas, para não gastar banda e requisição do cliente à toa.
+      if (!tamanhoExplicito && msSubida < DURACAO_MINIMA_CONFIAVEL_MS && mb < TAMANHO_MAXIMO_MB) {
+        const proporcao = DURACAO_MINIMA_CONFIAVEL_MS / Math.max(1, msSubida);
+        const alvo = Math.min(TAMANHO_MAXIMO_MB, Math.ceil(mb * proporcao));
+        if (alvo > mb) {
+          observacoes.push(
+            `A primeira amostra de ${mb} MB subiu em ${(msSubida / 1000).toFixed(2)}s — rápido demais para ser confiável. ` +
+              `Repetido com ${alvo} MB.`,
+          );
+          carga = randomBytes(alvo * 1024 * 1024);
+          chaveGrande = `${PREFIXO_TESTE}/${Date.now()}-${randomBytes(4).toString('hex')}.bin`;
+          msSubida = await subir(carga, chaveGrande);
+          mbEfetivo = alvo;
+        }
+      }
 
       const t1 = Date.now();
       const baixado = await cliente.getObject(chaveGrande);
@@ -164,7 +195,7 @@ export class StorageBenchmarkService {
         bucket: linha.bucket,
         endpoint: linha.endpoint,
         medidoEm: new Date().toISOString(),
-        amostraMb: mb,
+        amostraMb: mbEfetivo,
         latencia: {
           medianaMs: Math.round(medianaMs),
           p95Ms: Math.round(p95Ms),

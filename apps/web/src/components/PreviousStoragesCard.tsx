@@ -139,6 +139,9 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
   // depois de uma troca de fornecedor é justamente o uso do botão.
   const [medicoes, setMedicoes] = useState<Record<string, Medicao>>({});
   const [medindo, setMedindo] = useState<string | null>(null);
+  // Vazio = automático: a amostra cresce se o link for rápido. Amostra pequena
+  // num link rápido cronometra a conexão, não a banda.
+  const [tamanhoAmostra, setTamanhoAmostra] = useState('');
 
   const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined;
 
@@ -220,8 +223,8 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
     try {
       const { data } = await axios.post<Medicao>(
         `${apiUrl}/cloud-storage/storages/${s.id}/benchmark`,
-        {},
-        { headers, timeout: 180000 },
+        tamanhoAmostra ? { tamanhoMb: Number(tamanhoAmostra) } : {},
+        { headers, timeout: 300000 },
       );
       setMedicoes((atual) => ({ ...atual, [s.id]: data }));
     } catch (erro) {
@@ -288,6 +291,18 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
 
               {!aberto && (
                 <div className="flex flex-wrap justify-end gap-2">
+                  <select
+                    value={tamanhoAmostra}
+                    onChange={(e) => setTamanhoAmostra(e.target.value)}
+                    title="Tamanho da amostra. Automático ajusta ao link."
+                    className="rounded border border-border bg-background px-1.5 py-1.5 text-xs"
+                  >
+                    <option value="">Automático</option>
+                    <option value="8">8 MB</option>
+                    <option value="16">16 MB</option>
+                    <option value="32">32 MB</option>
+                    <option value="64">64 MB</option>
+                  </select>
                   <button
                     type="button"
                     disabled={!s.credencialLegivel || medindo !== null}

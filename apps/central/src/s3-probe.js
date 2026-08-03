@@ -188,23 +188,43 @@ function percentil(valores, p) {
  * Limpa o que criou mesmo quando falha no meio — o teste não pode deixar lixo
  * pago no bucket do cliente.
  */
-async function measureS3Performance(config, { timeoutMs = 60000, sizeMb = 4, latencySamples = 7 } = {}) {
-  const mb = Math.min(16, Math.max(1, Number(sizeMb) || 4));
-  const carga = randomBytes(mb * 1024 * 1024);
-  const chave = joinKey(config.prefix, `.drac-central-perf-${Date.now()}`);
+async function measureS3Performance(config, { timeoutMs = 120000, sizeMb = null, latencySamples = 7 } = {}) {
+  const explicito = Number(sizeMb) > 0;
+  let mb = Math.min(64, Math.max(1, Number(sizeMb) || 8));
   const criadas = [];
+  const notas = [];
   let falhas = 0;
 
-  try {
-    const t0 = Date.now();
-    const put = await call(
+  const subir = async (bytes) => {
+    const k = joinKey(config.prefix, `.drac-central-perf-${Date.now()}-${randomBytes(3).toString('hex')}`);
+    const t = Date.now();
+    const r = await call(
       config,
-      { method: 'PUT', key: chave, payload: carga, extraHeaders: { 'content-type': 'application/octet-stream', 'content-length': String(carga.length) } },
+      { method: 'PUT', key: k, payload: bytes, extraHeaders: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) } },
       timeoutMs,
     );
-    const msSubida = Date.now() - t0;
+    if (r.ok) criadas.push(k);
+    return { r, ms: Date.now() - t, chave: k };
+  };
+
+  try {
+    let carga = randomBytes(mb * 1024 * 1024);
+    let { r: put, ms: msSubida, chave } = await subir(carga);
     if (!put.ok) return { ok: false, error: `Escrita falhou: ${explain(put.status, put.code)}` };
-    criadas.push(chave);
+
+    // AJUSTE À VELOCIDADE DO LINK. Amostra fixa mede bem um link lento e mente
+    // num rápido: se a transferência acaba antes de o TCP acelerar, cronometrou-se
+    // a conexão, não a banda. Refaz UMA vez, no máximo — escalar em laço gastaria
+    // banda e requisição cobrada a cada rodada.
+    if (!explicito && msSubida < 1500 && mb < 64) {
+      const alvo = Math.min(64, Math.ceil(mb * (1500 / Math.max(1, msSubida))));
+      if (alvo > mb) {
+        notas.push(`A primeira amostra de ${mb} MB subiu em ${(msSubida / 1000).toFixed(2)}s — rápido demais para ser confiável. Repetido com ${alvo} MB.`);
+        carga = randomBytes(alvo * 1024 * 1024);
+        const nova = await subir(carga);
+        if (nova.r.ok) { msSubida = nova.ms; chave = nova.chave; mb = alvo; }
+      }
+    }
 
     const t1 = Date.now();
     const get = await call(config, { method: 'GET', key: chave }, timeoutMs);
@@ -239,6 +259,7 @@ async function measureS3Performance(config, { timeoutMs = 60000, sizeMb = 4, lat
       subida: { mbps: mbps(carga.length, msSubida), segundos: Number((msSubida / 1000).toFixed(2)) },
       descida: { mbps: mbps(carga.length, msDescida), segundos: Number((msDescida / 1000).toFixed(2)) },
       falhas,
+      notas,
       medidoEm: new Date().toISOString(),
     };
   } finally {

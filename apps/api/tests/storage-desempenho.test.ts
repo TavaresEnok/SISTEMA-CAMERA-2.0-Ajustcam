@@ -149,7 +149,9 @@ test('recusa storage com credencial ilegível', async () => {
   await assert.rejects(() => svc.medir('st-1', 1), /não pôde ser decifrada/);
 });
 
-test('o tamanho da amostra é limitado nos dois extremos', async () => {
+test('o tamanho ESCOLHIDO é limitado nos dois extremos', async () => {
+  // Tamanho explícito não passa pelo ajuste automático — o que se trava aqui é
+  // só o intervalo aceito.
   let maiorCarga = 0;
   const cliente = {
     putObject: async (_k: string, p: Buffer) => { maiorCarga = Math.max(maiorCarga, p.length); },
@@ -159,13 +161,13 @@ test('o tamanho da amostra é limitado nos dois extremos', async () => {
   };
   const svc = makeBenchmark({ resolver: { materializar: (r: any) => r, clienteDe: () => cliente } });
 
-  const pequeno = await svc.medir('st-1', 0);
-  assert.equal(pequeno.amostraMb, 8, 'zero cai no padrão, não vira medição de nada');
+  const pequeno = await svc.medir('st-1', 1);
+  assert.equal(pequeno.amostraMb, 1, 'piso: 1 MB é o menor que ainda mede alguma coisa');
 
   maiorCarga = 0;
   const grande = await svc.medir('st-1', 999);
-  assert.equal(grande.amostraMb, 32, 'teto: acima disso o teste competiria com o envio das gravações');
-  assert.equal(maiorCarga, 32 * 1024 * 1024);
+  assert.equal(grande.amostraMb, 64, 'teto: acima disso o teste competiria com o envio das gravações');
+  assert.equal(maiorCarga, 64 * 1024 * 1024);
 });
 
 test('a medição conta as falhas e AVISA que os números ficaram otimistas', async () => {
@@ -204,4 +206,80 @@ test('objeto que volta truncado invalida a descida em vez de virar banda alta', 
   const r = await svc.medir('st-1', 1);
   assert.ok(r.observacoes.some((o: string) => o.includes('não é confiável')));
   assert.ok(r.falhas > 0);
+});
+
+// ── TAMANHO DA AMOSTRA SE AJUSTA AO LINK ────────────────────────────────────
+//
+// Amostra fixa mede bem um link lento e MENTE num rápido: se a transferência
+// acaba antes de o TCP sair do slow-start, o que se cronometrou foi a conexão,
+// não a banda. Medido em produção: 4 MB em 0,08s viraram "414 Mb/s".
+
+/** Cliente que simula uma banda dada, para a duração ser previsível. */
+function clienteComBanda(mbps: number, registro: number[] = []) {
+  // `registro` recebe SÓ as amostras grandes: os 10 objetos de 1 KB do teste de
+  // operações/s entrariam na conta e fariam "duas subidas" virar doze.
+  return {
+    putObject: async (_k: string, p: Buffer) => {
+      if (p.length >= 1024 * 1024) registro.push(p.length);
+      const ms = (p.length * 8) / (mbps * 1e6) * 1000;
+      if (ms > 0) await new Promise((r) => setTimeout(r, Math.min(ms, 1800)));
+    },
+    getObject: async () => Buffer.alloc(0),
+    headObject: async () => ({ exists: true }),
+    deleteObject: async () => {},
+  };
+}
+
+test('link RÁPIDO: repete com amostra maior em vez de reportar ruído', async () => {
+  const enviados: number[] = [];
+  const svc = makeBenchmark({
+    resolver: { materializar: (r: any) => r, clienteDe: () => clienteComBanda(10_000, enviados) },
+  });
+  const r = await svc.medir('st-1');
+
+  assert.ok(enviados.length >= 2, 'a primeira amostra rápida demais tem de ser refeita');
+  assert.ok(enviados[1] > enviados[0], 'e a segunda tem de ser MAIOR');
+  assert.equal(r.amostraMb * 1024 * 1024, enviados[enviados.length - 1],
+    'o tamanho relatado é o da medição que valeu, não o da tentativa descartada');
+  assert.ok(r.observacoes.some((o: string) => o.includes('rápido demais')),
+    'o operador precisa saber que a primeira leitura foi descartada');
+});
+
+test('no máximo DUAS subidas — o teste não pode virar consumo de banda do cliente', async () => {
+  const enviados: number[] = [];
+  const svc = makeBenchmark({
+    resolver: { materializar: (r: any) => r, clienteDe: () => clienteComBanda(100_000, enviados) },
+  });
+  await svc.medir('st-1');
+  assert.equal(enviados.length, 2, 'escalar em laço custaria banda e requisição cobrada a cada rodada');
+});
+
+test('o teto de 64 MB é respeitado mesmo num link absurdo', async () => {
+  const enviados: number[] = [];
+  const svc = makeBenchmark({
+    resolver: { materializar: (r: any) => r, clienteDe: () => clienteComBanda(1_000_000, enviados) },
+  });
+  const r = await svc.medir('st-1');
+  assert.ok(r.amostraMb <= 64);
+  assert.equal(Math.max(...enviados), 64 * 1024 * 1024);
+});
+
+test('link LENTO: não repete — a primeira medição já é confiável', async () => {
+  const enviados: number[] = [];
+  const svc = makeBenchmark({
+    resolver: { materializar: (r: any) => r, clienteDe: () => clienteComBanda(1, enviados) },
+  });
+  const r = await svc.medir('st-1');
+  assert.equal(enviados.length, 1, 'repetir num link lento dobraria o custo sem ganhar precisão');
+  assert.equal(r.amostraMb, 8);
+});
+
+test('tamanho ESCOLHIDO pelo operador é respeitado, sem reajuste', async () => {
+  const enviados: number[] = [];
+  const svc = makeBenchmark({
+    resolver: { materializar: (r: any) => r, clienteDe: () => clienteComBanda(10_000, enviados) },
+  });
+  const r = await svc.medir('st-1', 16);
+  assert.equal(enviados.length, 1, 'quem escolheu o tamanho sabe o que quer medir');
+  assert.equal(r.amostraMb, 16);
 });
