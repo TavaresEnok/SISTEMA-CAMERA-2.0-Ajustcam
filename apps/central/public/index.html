@@ -858,6 +858,12 @@
       <div class="main">
         <header class="topbar">
           <div class="crumbs"><b>Central</b><span class="sep">/</span><span id="crumb-view">Operação</span></div>
+            <!-- Carimbo da versão SERVIDA. A Central é uma página só, carregada
+                 uma vez: depois de um deploy, quem já estava com a aba aberta
+                 segue rodando o JS antigo e jura que o recurso novo não
+                 apareceu. Com o carimbo, "você recarregou?" vira comparação de
+                 dois números — e um clique recarrega. -->
+            <button id="build-stamp" class="omni" style="padding:3px 9px;font-size:11px;opacity:.65" title="Versão servida agora. Clique para recarregar a página."></button>
           <div class="topbar-spacer"></div>
           <button id="omni-open" class="omni" title="Buscar cliente ou tela">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
@@ -2466,6 +2472,44 @@
           modeSel.addEventListener('change', pintar);
         }
       }
+      // ── Versão carregada nesta aba ─────────────────────────────────────────
+      // Compara o que o NAVEGADOR tem com o que o SERVIDOR serve. Diferentes =
+      // a aba está velha, e o clique recarrega. Sem isto, "não apareceu" e "já
+      // está no ar" são duas afirmações verdadeiras que ninguém consegue
+      // conciliar.
+      // A aba guarda o build que viu ao abrir. Se o servidor passar a servir
+      // outro, houve deploy com esta aba aberta — que é exatamente o caso em
+      // que o operador procura um botão que o JS carregado não tem.
+      //
+      // Comparar com `document.lastModified` seria mais direto e NÃO funciona:
+      // a página vai com `no-store` e sem `Last-Modified`, então o navegador
+      // devolve a hora atual e a comparação daria sempre igual.
+      let buildAoAbrir = null;
+      async function marcarVersao() {
+        const el = document.getElementById('build-stamp');
+        if (!el) return;
+        if (!el.dataset.ligado) {
+          el.dataset.ligado = '1';
+          el.addEventListener('click', () => location.reload());
+        }
+        try {
+          const res = await fetch(centralUrl('/api/health'));
+          const { build } = await res.json();
+          if (!build) { el.textContent = 'v —'; return; }
+          if (buildAoAbrir === null) buildAoAbrir = build;
+          if (buildAoAbrir !== build) {
+            el.textContent = 'versão nova disponível — recarregar';
+            el.style.opacity = '1';
+            el.style.borderColor = 'var(--amber-line)';
+            el.style.color = 'var(--amber)';
+          } else {
+            el.textContent = `v ${build}`;
+          }
+        } catch {
+          el.textContent = 'v —';
+        }
+      }
+
       // ── Desempenho do bucket ───────────────────────────────────────────────
       // O QUE ESTE NÚMERO É: o link da CENTRAL até o bucket. Serve para avaliar
       // o FORNECEDOR — está lento hoje? este candidato é melhor que aquele? —
@@ -3563,6 +3607,9 @@
         }
       }
       async function load() {
+        // Piggyback no ciclo que já existe: o painel se atualiza sozinho, então
+        // um deploy feito com a aba aberta aparece sem ninguém precisar olhar.
+        void marcarVersao();
         try {
           if (!state.user) {
             const me = await fetch(centralUrl('/api/auth/me'), { credentials: 'include' }).catch(() => null);

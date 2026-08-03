@@ -412,6 +412,26 @@ function resetLoginFailures(key) {
   loginAttempts.delete(key);
 }
 
+/**
+ * Carimbo da versão SERVIDA, derivado da data do arquivo que o navegador baixa.
+ *
+ * Deliberadamente não é a versão do package.json: o que importa aqui não é o
+ * número da release, é se o HTML/JS na tela do operador é o mesmo que está no
+ * disco. Um deploy que só troca a página não muda a versão do pacote, e é
+ * exatamente nesse caso que a dúvida aparece.
+ *
+ * Calculado a cada chamada porque o arquivo é montado por bind mount e pode
+ * mudar sob o processo em execução, sem reinício.
+ */
+function buildStamp() {
+  try {
+    const alvo = path.join(__dirname, '..', 'public', 'index.html');
+    return new Date(fsSync.statSync(alvo).mtimeMs).toISOString().slice(0, 16).replace('T', ' ');
+  } catch {
+    return 'desconhecido';
+  }
+}
+
 function addAuditEvent(db, req, event) {
   const auditEvents = Array.isArray(db.auditEvents) ? db.auditEvents : [];
   auditEvents.push({
@@ -2454,7 +2474,19 @@ async function route(req, res) {
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/health') {
-      return json(req, res, 200, { status: 'ok', service: 'drac-central', time: new Date().toISOString() });
+      // `build` é a data de modificação do arquivo servido ao navegador.
+      //
+      // Existe por um motivo concreto: a Central é uma página só, carregada uma
+      // vez. Depois de um deploy, quem já estava com a aba aberta continua
+      // rodando o JS ANTIGO e jura que o recurso novo "não apareceu" — sem
+      // nenhuma forma de provar quem está certo. Com o carimbo na tela, a
+      // pergunta "você recarregou?" vira uma comparação de dois números.
+      return json(req, res, 200, {
+        status: 'ok',
+        service: 'drac-central',
+        time: new Date().toISOString(),
+        build: buildStamp(),
+      });
     }
     if (req.method === 'GET' && url.pathname === '/favicon.ico') {
       return empty(req, res, 204);
