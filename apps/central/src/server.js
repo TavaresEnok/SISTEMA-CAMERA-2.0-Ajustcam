@@ -1500,7 +1500,13 @@ async function handleQuickInstaller(req, res, installationId) {
 }
 
 async function serveStatic(req, res) {
-  const file = req.url === '/' ? 'index.html' : req.url.replace(/^\/+/, '');
+  // Só o CAMINHO vira nome de arquivo. Usar `req.url` cru fazia `/?v=1` virar o
+  // arquivo "?v=1" e devolver 404 — ou seja, qualquer URL com parâmetro
+  // quebrava, inclusive o `?v=` que é a forma padrão de furar cache de página.
+  // Justamente a saída de emergência quando o navegador está preso na versão
+  // antiga não funcionava.
+  const pathname = decodeURIComponent(new URL(req.url, 'http://local').pathname);
+  const file = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const safe = path.normalize(file).replace(/^(\.\.(\/|\\|$))+/, '');
   const fullPath = path.join(PUBLIC_DIR, safe);
   try {
