@@ -48,12 +48,33 @@ export class CameraHealthCheckProcessor extends WorkerHost {
     if (staleCameras.length > 0) {
       this.logger.warn(`${staleCameras.length} câmera(s) sem heartbeat recente; executando reteste ativo antes de marcar offline.`);
 
-      for (const cam of staleCameras) {
+      // ── RETESTE EM PARALELO, COM TETO ───────────────────────────────────────
+      //
+      // Este laço era SEQUENCIAL (`for...await`), e cada reteste custa ~11 s de
+      // sonda RTSP+ONVIF. Medido em simulação de capacidade (2026-08-03): com 25
+      // câmeras, 10 entraram em reteste = 110 s de fila dentro de um ciclo que
+      // roda a cada 60 s. A fila não fechava, e o efeito prático não é CPU — é
+      // DEMORA PARA PERCEBER CÂMERA CAÍDA: extrapolado, ~7 minutos numa
+      // instalação de 200 câmeras. Num sistema de segurança, esse é o número que
+      // define a promessa comercial.
+      //
+      // O teto existe porque o oposto também quebra: disparar N sondas de uma vez
+      // contra o mesmo DVR esgota as sessões RTSP do equipamento do cliente e
+      // derruba justamente as câmeras que se queria testar — foi o que aconteceu
+      // com a tempestade de ffprobe em 30/07. Quatro por vez é o mesmo valor já
+      // usado em `recoverStuckPaths`, pelo mesmo motivo.
+      const CONCURRENCY = envNumber('HEALTH_RETEST_CONCURRENCY', 4, {
+        min: 1,
+        max: 16,
+        integer: true,
+      });
+
+      const retestar = async (cam: (typeof staleCameras)[number]) => {
         try {
           const result = await this.camerasService.getStatus(cam.id);
           if (result.status === CameraStatus.ONLINE) {
             this.logger.debug(`Heartbeat renovado por reteste ativo: ${cam.name} (${cam.id})`);
-            continue;
+            return;
           }
         } catch (error) {
           this.logger.warn(`Reteste ativo falhou camera=${cam.id}: ${(error as Error).message}`);
@@ -74,7 +95,19 @@ export class CameraHealthCheckProcessor extends WorkerHost {
           },
         );
         this.logger.debug(`Status atualizado para OFFLINE: ${cam.name} (${cam.id})`);
+      };
+
+      const inicio = Date.now();
+      for (let i = 0; i < staleCameras.length; i += CONCURRENCY) {
+        // `allSettled` e não `all`: uma câmera que estoure de forma inesperada não
+        // pode abortar o lote e deixar as demais sem reteste — elas seriam
+        // marcadas offline no ciclo seguinte sem nunca terem sido testadas.
+        await Promise.allSettled(staleCameras.slice(i, i + CONCURRENCY).map(retestar));
       }
+      this.logger.log(
+        `Reteste ativo concluído: ${staleCameras.length} câmera(s) em ${Math.round((Date.now() - inicio) / 1000)}s `
+        + `(concorrência ${CONCURRENCY}).`,
+      );
     } else {
       this.logger.log('Todas as câmeras online estão reportando normalmente.');
     }
