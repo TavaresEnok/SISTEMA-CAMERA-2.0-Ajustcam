@@ -1903,6 +1903,25 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
   }
 
   item.cloudStorage = validation.value;
+
+  // TESTA JÁ, na mesma ação. Antes o painel aceitava qualquer credencial em
+  // silêncio e a única pista era um selo vermelho discreto no cartão, horas
+  // depois — o operador ficava procurando erro no endpoint quando o problema
+  // era a chave. Testar aqui transforma "salvou" em "salvou e funciona", que é
+  // a única coisa que ele queria saber.
+  //
+  // Falhar NÃO impede de salvar: storage que ainda vai subir, ou firewall no
+  // caminho, precisam poder ser configurados antes. O resultado desce junto e a
+  // tela mostra.
+  const verificacao = await verificarStorage(validation.value).catch(() => null);
+  if (verificacao) {
+    item.cloudStorage = {
+      ...validation.value,
+      lastTestAt: new Date().toISOString(),
+      lastTestOk: verificacao.ok,
+    };
+  }
+
   item.updatedAt = new Date().toISOString();
   bumpConfigRevision(item);
   addAuditEvent(db, req, {
@@ -1911,10 +1930,14 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
     result: 'accepted',
     installationId,
     from: describeCloudStorage(previous),
-    to: describeCloudStorage(validation.value),
+    to: describeCloudStorage(item.cloudStorage),
+    testeOk: verificacao ? verificacao.ok : null,
   });
   await saveDb(db);
-  return json(req, res, 200, { cloudStorage: describeCloudStorage(validation.value) });
+  return json(req, res, 200, {
+    cloudStorage: describeCloudStorage(item.cloudStorage),
+    teste: verificacao,
+  });
 }
 
 /**
@@ -2075,6 +2098,32 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
   });
   await saveDb(db);
   return json(req, res, medicao.ok ? 200 : 502, medicao);
+}
+
+/**
+ * Roda o teste de acesso sobre uma configuração já validada.
+ *
+ * Devolve `null` quando não há o que testar (desabilitado ou incompleto): nesse
+ * caso não existe resposta honesta, e inventar "falhou" assustaria sem motivo.
+ */
+async function verificarStorage(config) {
+  if (!config.enabled) return null;
+  let secret = '';
+  try {
+    secret = decryptStorageSecret(config.secretAccessKeyEncrypted);
+  } catch {
+    secret = '';
+  }
+  if (!config.endpoint || !config.bucket || !config.accessKeyId || !secret) return null;
+  return testS3Access({
+    endpoint: config.endpoint,
+    region: config.region,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: secret,
+    forcePathStyle: config.forcePathStyle,
+  }, { timeoutMs: 12000 });
 }
 
 async function handleTestCloudStorage(req, res, db, actor, installationId) {

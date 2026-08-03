@@ -2817,7 +2817,17 @@
             feedback.innerHTML = `<span class="badge warn">${escapeHtml(detalhes)}</span>`;
             return;
           }
-          feedback.innerHTML = '<span class="badge ok">Salvo</span>';
+          // O teste vem junto do save: dizer só "Salvo" quando a credencial não
+          // funciona é o que fazia o operador procurar erro no endpoint por
+          // horas. Aqui ele já sai sabendo.
+          const t = data.teste;
+          if (t && t.ok) {
+            feedback.innerHTML = '<span class="badge ok">Salvo · conexão OK (leitura e escrita)</span>';
+          } else if (t && !t.ok) {
+            feedback.innerHTML = `<span class="badge warn">Salvo, mas a conexão FALHOU: ${escapeHtml(String(t.error || 'motivo não informado'))}</span>`;
+          } else {
+            feedback.innerHTML = '<span class="badge ok">Salvo</span>';
+          }
           state.cloudEditing = null;
         } catch {
           feedback.innerHTML = '<span class="badge warn">Falha ao salvar</span>';
