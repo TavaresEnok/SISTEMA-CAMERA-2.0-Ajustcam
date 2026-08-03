@@ -307,3 +307,83 @@ test('sem storage provisionado nada novo sobe, mas os anteriores continuam legí
   const leitura = await svc.storageDaGravacao('st-antigo');
   assert.equal(leitura.bucket, 'acervo-1t', 'mas o que já subiu continua alcançável');
 });
+
+// ── EXCLUIR NA CENTRAL: PARA ONDE VÃO AS GRAVAÇÕES ──────────────────────────
+//
+// Antes, sem storage provisionado, isto caía no registro que ESTAVA ativo e
+// continuava enviando para ele — excluir na Central não parava nada. O registro
+// só é "o ativo" porque a Central um dia disse que era; quando ela para de
+// dizer, ele deixa de ser.
+
+function comEstado(estado: string, storages: any[], over: Record<string, unknown> = {}) {
+  const svc = makeResolver({ cloudConnector: { getCloudStorageConfig: async () => null, getCloudStorageState: async () => estado } });
+  const desativados: string[] = [];
+  const ativados: string[] = [];
+  svc.prisma = {
+    cloudStorage: {
+      findFirst: async (args: any) => (args?.where?.isActive ? storages.find((s) => s.isActive) ?? null : storages[0] ?? null),
+      findUnique: async () => storages[0] ?? null,
+      updateMany: async () => { desativados.push('todos'); return { count: 1 }; },
+      update: async (args: any) => { ativados.push(args.where.id); return storages[0]; },
+      count: async () => storages.length,
+    },
+    recording: { updateMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: any) => fn(svc.prisma),
+  };
+  Object.assign(svc, over);
+  return { svc, desativados, ativados };
+}
+
+test('excluído COM outro storage: o outro assume as gravações novas', async () => {
+  const outro = { ...ANTIGO, id: 'st-outro', name: 'Backblaze 10T', bucket: 'acervo-10t', isActive: false };
+  const { svc, ativados } = comEstado('absent', [outro]);
+  const r = await svc.storageParaEscrita();
+  assert.equal(r.bucket, 'acervo-10t');
+  assert.deepEqual(ativados, ['st-outro'], 'assumir significa virar o ativo, não só ser devolvido uma vez');
+});
+
+test('excluído SEM outro storage: nada sobe e as gravações ficam no disco local', async () => {
+  const { svc, desativados } = comEstado('absent', []);
+  assert.equal(await svc.storageParaEscrita(), null);
+  assert.deepEqual(desativados, [], 'sem registro nenhum não há o que desativar');
+});
+
+test('excluído, mas o candidato tem credencial ilegível: disco local, sem laço de erro', async () => {
+  const quebrado = { ...ANTIGO, secretAccessKeyEncrypted: 'ilegivel' };
+  const { svc } = comEstado('absent', [quebrado], {
+    crypto: { decrypt: () => { throw new Error('chave mestra trocada'); }, encrypt: (v: string) => v },
+  });
+  assert.equal(await svc.storageParaEscrita(), null,
+    'promover um storage que não abre faria o upload falhar em laço sem ninguém saber por quê');
+});
+
+test('DESABILITADO não promove ninguém — pausa não é exclusão', async () => {
+  const outro = { ...ANTIGO, id: 'st-outro', bucket: 'acervo-10t', isActive: false };
+  const { svc, ativados } = comEstado('disabled', [outro]);
+  assert.equal(await svc.storageParaEscrita(), null);
+  assert.deepEqual(ativados, [], 'se outro assumisse, desligar o envio não desligaria nada');
+});
+
+test('pausado, o storage que estava ativo DEIXA de receber', async () => {
+  const ativo = { ...ANTIGO, isActive: true };
+  const { svc, desativados } = comEstado('disabled', [ativo]);
+  assert.equal(await svc.storageParaEscrita(), null);
+  assert.deepEqual(desativados, ['todos'],
+    'antes isto continuava devolvendo o ativo, e excluir/desligar na Central não parava o envio');
+});
+
+test('Central antiga (sem o campo) é tratada como PAUSA, nunca como exclusão', async () => {
+  const outro = { ...ANTIGO, id: 'st-outro', isActive: false };
+  const { svc, ativados } = comEstado('', [outro]);
+  assert.equal(await svc.storageParaEscrita(), null);
+  assert.deepEqual(ativados, [],
+    'promover storage sozinho ressuscitaria contrato cancelado e voltaria a gerar custo — o erro caro é esse');
+});
+
+test('excluir NÃO torna o acervo ilegível: a leitura continua resolvendo pela origem', async () => {
+  const { svc } = comEstado('absent', []);
+  svc.prisma.cloudStorage.findUnique = async () => ANTIGO;
+  const leitura = await svc.storageDaGravacao('st-antigo');
+  assert.equal(leitura.bucket, 'acervo-1t',
+    'excluir tira o DESTINO das gravações novas, não o acesso ao que já foi gravado');
+});

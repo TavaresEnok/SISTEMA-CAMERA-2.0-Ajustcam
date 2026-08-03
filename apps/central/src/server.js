@@ -1119,9 +1119,35 @@ function licenseResponse(item) {
     // A política de IA do painel restringe ABAIXO do teto da licença (nunca acima).
     restrictions: applyAiPolicyToRestrictions(restrictions, item.aiPolicy),
     cloudStorage,
+    cloudStorageState: cloudStorageState(item, status),
     // Revisão DESEJADA. A instalação devolve a que aplicou no próximo heartbeat.
     configRevision: Number(item.configRevision || 0) || 0,
   };
+}
+
+/**
+ * POR QUE o storage não desceu — três motivos que exigem reações OPOSTAS.
+ *
+ * Até aqui os três colapsavam em `cloudStorage: null`, e a instalação não tinha
+ * como distinguir "o operador desligou o envio" de "o storage foi EXCLUÍDO".
+ * São coisas diferentes:
+ *
+ *   configured — desceu credencial; é o destino das gravações novas.
+ *   disabled   — existe storage, mas o envio está desligado (ou a licença está
+ *                suspensa). É uma PAUSA: nada sobe, e nenhum outro storage deve
+ *                assumir o lugar, senão desligar não desligaria nada.
+ *   absent     — não há storage nenhum cadastrado. O destino sumiu de vez, e a
+ *                instalação deve seguir com outro storage que ainda tenha, ou
+ *                ficar só no disco local.
+ */
+function cloudStorageState(item, status) {
+  const c = normalizeCloudStorage(item.cloudStorage);
+  const cadastrado = Boolean(c.endpoint || c.bucket || c.accessKeyId || c.secretAccessKeyEncrypted);
+  if (!cadastrado) return 'absent';
+  if (status === 'SUSPENDED' || !c.enabled) return 'disabled';
+  // Cadastrado e habilitado, mas incompleto (falta bucket, credencial ilegível):
+  // é pausa, não exclusão — o operador está no meio de configurar.
+  return buildCloudStoragePayload(c) ? 'configured' : 'disabled';
 }
 
 async function handleHeartbeat(req, res) {
@@ -1856,6 +1882,46 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
 }
 
 /**
+ * EXCLUI o armazenamento em nuvem desta instalação.
+ *
+ * Não é o mesmo que desabilitar. Desabilitar é pausa — o cadastro fica, e
+ * religar volta tudo ao que era. Excluir diz "este destino acabou", e a
+ * instalação reage escolhendo outro storage que ainda tenha ou voltando a
+ * gravar só no disco local.
+ *
+ * O QUE ACONTECE COM AS GRAVAÇÕES: nada é apagado. Os objetos continuam no
+ * fornecedor e a instalação continua sabendo ler dali, porque ela guarda o
+ * vínculo de cada gravação com o storage de origem. Excluir aqui tira o
+ * DESTINO, não o acervo. Quem quiser apagar de verdade usa "Esvaziar" na tela
+ * de Armazenamento da instalação, que é uma decisão separada e irreversível.
+ */
+async function handleDeleteCloudStorage(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const anterior = normalizeCloudStorage(item.cloudStorage);
+  if (!anterior.endpoint && !anterior.bucket && !anterior.accessKeyId) {
+    await saveDb(db);
+    return json(req, res, 404, { error: 'storage_not_set', message: 'Esta instalação não tem armazenamento em nuvem.' });
+  }
+
+  item.cloudStorage = normalizeCloudStorage(null);
+  item.updatedAt = new Date().toISOString();
+  // Sem bump de revisão a instalação não saberia que precisa reagir: ela compara
+  // a revisão desejada com a aplicada para decidir se houve mudança.
+  bumpConfigRevision(item);
+  addAuditEvent(db, req, {
+    type: 'installation.cloud_storage_deleted',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    from: describeCloudStorage(anterior),
+  });
+  await saveDb(db);
+  return json(req, res, 200, { cloudStorage: describeCloudStorage(item.cloudStorage) });
+}
+
+/**
  * Mostra a Secret Access Key de volta para quem opera a Central.
  *
  * A credencial não é do painel: é do CLIENTE, que contratou o storage e um dia
@@ -2542,6 +2608,9 @@ async function route(req, res) {
       const cloudStorageMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage$/);
       if (req.method === 'PATCH' && cloudStorageMatch) {
         return handlePatchCloudStorage(req, res, db, actor, decodeURIComponent(cloudStorageMatch[1]));
+      }
+      if (req.method === 'DELETE' && cloudStorageMatch) {
+        return handleDeleteCloudStorage(req, res, db, actor, decodeURIComponent(cloudStorageMatch[1]));
       }
       const cloudSecretMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/secret$/);
       if (req.method === 'GET' && cloudSecretMatch) {

@@ -2384,8 +2384,10 @@
             <div class="license-actions" style="margin-top:12px">
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
+              <button id="cloud-delete">Excluir</button>
               <span id="cloud-feedback"></span>
             </div>
+            <div id="cloud-delete-confirm"></div>
           </div>`;
 
         const formulario = !editando ? '' : `
@@ -2442,6 +2444,7 @@
         body.querySelector('#cloud-cancel')?.addEventListener('click', () => { state.cloudEditing = null; renderCloudSection(item); });
         body.querySelector('#cloud-test')?.addEventListener('click', () => testCloudStorage(item.id, body));
         body.querySelector('#cloud-save')?.addEventListener('click', () => saveCloudStorage(item.id, body));
+        body.querySelector('#cloud-delete')?.addEventListener('click', () => confirmarExclusaoStorage(item, body));
         body.querySelector('#cloud-reveal')?.addEventListener('click', (ev) => revelarSegredo(item.id, body, ev.currentTarget));
         body.querySelector('#cloud-secret-reveal')?.addEventListener('click', (ev) => revelarSegredoNoFormulario(item.id, body, ev.currentTarget));
 
@@ -2460,6 +2463,62 @@
           modeSel.addEventListener('change', pintar);
         }
       }
+      // ── Excluir o armazenamento ────────────────────────────────────────────
+      // Excluir NÃO é desabilitar. Desabilitar é pausa: o cadastro fica e
+      // religar volta tudo. Excluir diz "este destino acabou", e a instalação
+      // reage escolhendo outro storage que ainda tenha ou voltando a gravar só
+      // no disco local.
+      //
+      // NENHUMA gravação é apagada: os objetos ficam no fornecedor e a
+      // instalação continua sabendo ler dali, porque guarda o vínculo de cada
+      // gravação com o storage de origem. Isso precisa estar ESCRITO na
+      // confirmação — "excluir armazenamento" soa como "apagar as gravações", e
+      // quem hesita aqui é justamente quem tem prova guardada.
+      function confirmarExclusaoStorage(item, body) {
+        const alvo = body.querySelector('#cloud-delete-confirm');
+        if (!alvo) return;
+        const c = item.cloudStorage || {};
+        alvo.innerHTML = `
+          <div class="alert-item" style="margin-top:11px;border-color:var(--amber-line);background:var(--amber-soft)">
+            <div style="font-weight:500">Excluir o armazenamento <b>${escapeHtml(c.bucket || '')}</b> desta instalação?</div>
+            <div style="margin-top:7px">
+              Nenhuma gravação é apagada — os arquivos continuam no fornecedor e a instalação
+              continua conseguindo reproduzi-los, porque sabe de qual storage cada gravação veio.
+            </div>
+            <div style="margin-top:7px">
+              O que muda é o DESTINO das gravações novas: se a instalação tiver outro storage
+              cadastrado, ele assume; se não tiver, elas ficam apenas no disco local.
+            </div>
+            <div class="license-actions" style="margin-top:11px">
+              <button id="cloud-delete-yes" class="primary">Excluir armazenamento</button>
+              <button id="cloud-delete-no">Cancelar</button>
+              <span id="cloud-delete-feedback"></span>
+            </div>
+          </div>`;
+        alvo.querySelector('#cloud-delete-no').addEventListener('click', () => { alvo.innerHTML = ''; });
+        alvo.querySelector('#cloud-delete-yes').addEventListener('click', () => excluirStorage(item.id, alvo));
+      }
+      async function excluirStorage(installationId, alvo) {
+        const feedback = alvo.querySelector('#cloud-delete-feedback');
+        feedback.textContent = 'Excluindo…';
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage`), {
+            method: 'DELETE', credentials: 'include',
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(data.message || data.error || `erro ${res.status}`))}</span>`;
+            return;
+          }
+          state.cloudEditing = null;
+        } catch {
+          feedback.innerHTML = '<span class="badge warn">Falha ao excluir</span>';
+          return;
+        }
+        await load().catch(() => undefined);
+        renderDetail();
+      }
+
       // ── Ver a credencial guardada ──────────────────────────────────────────
       // A Secret Access Key é do CLIENTE, não do painel: um dia ele precisa
       // conferir com o fornecedor, reconfigurar em outro lugar ou responder a

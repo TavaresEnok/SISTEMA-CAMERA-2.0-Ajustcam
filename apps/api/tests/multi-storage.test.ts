@@ -36,9 +36,24 @@ function makeResolver(over: Record<string, unknown> = {}) {
   return svc;
 }
 
-test('a ESCRITA vai para o storage ativo', async () => {
+test('a ESCRITA vai para o storage que a Central provisiona', async () => {
+  // A versão antiga deste teste montava só uma linha `isActive` e nem
+  // provisionava nada — codificando a precedência que deixava a EXCLUSÃO sem
+  // efeito: sem configuração da Central, o registro que estava ativo continuava
+  // recebendo, e excluir o storage no painel não parava o envio. Um registro só
+  // é "o ativo" porque a Central um dia disse que era.
+  const novo = { ...REGISTRO, id: 'st-novo', name: 'Contabo 10T', bucket: 'acervo-10t', isActive: true };
   const svc = makeResolver({
-    prisma: { cloudStorage: { findFirst: async () => ({ ...REGISTRO, id: 'st-novo', name: 'Contabo 10T', bucket: 'acervo-10t' }) } },
+    cloudConnector: {
+      getCloudStorageConfig: async () => ({
+        enabled: true, mode: 'tier', name: 'Contabo 10T', provider: 's3',
+        endpoint: novo.endpoint, region: 'us-east-1', bucket: 'acervo-10t', prefix: '',
+        accessKeyId: 'AK', secretAccessKey: 'SEGREDO', localWindowHours: 24,
+        forcePathStyle: true, updatedAt: null,
+      }),
+      getCloudStorageState: async () => 'configured',
+    },
+    prisma: { cloudStorage: { findFirst: async () => novo, findUnique: async () => novo, count: async () => 1 } },
   });
   const destino = await svc.storageParaEscrita();
   assert.equal(destino.id, 'st-novo');

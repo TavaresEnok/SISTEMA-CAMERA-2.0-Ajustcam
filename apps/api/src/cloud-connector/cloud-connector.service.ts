@@ -21,6 +21,13 @@ import {
 type LicenseStatus = 'UNKNOWN' | 'ACTIVE' | 'GRACE' | 'RESTRICTED' | 'SUSPENDED';
 
 /**
+ * POR QUE não há storage provisionado. `disabled` é PAUSA (nada assume o
+ * lugar); `absent` é EXCLUSÃO (a instalação segue com outro storage que ainda
+ * tenha, ou volta a gravar só no disco local).
+ */
+export type CloudStorageState = 'configured' | 'disabled' | 'absent';
+
+/**
  * Storage em nuvem provisionado pela Central. Carrega a credencial porque é a
  * instalação que fala com o bucket — a Central só a repassa.
  */
@@ -51,6 +58,9 @@ const SETTING_KEYS = [
   // variável de ambiente) justamente para poder mudar sem recriar container —
   // que é o ponto do provisionamento remoto.
   'cloud.storage',
+  // POR QUE não há storage. Sem isto a instalação não distingue "o operador
+  // desligou o envio" de "o storage foi EXCLUÍDO" — reações opostas.
+  'cloud.storageState',
   // CONFIRMAÇÃO DE APLICAÇÃO. Sem isto, a Central só sabe que a instalação
   // esteve online depois da mudança — não que ela APLICOU a mudança. Uma
   // instalação antiga que ignore um campo desconhecido sumiria da lista de
@@ -145,6 +155,13 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
           this.writeSetting('cloud.restrictions', JSON.stringify(restrictions)),
           this.writeSetting('cloud.lastPayloadSummary', JSON.stringify(payload.summary)),
           this.writeSetting('cloud.storage', cloudStorage ? JSON.stringify(cloudStorage) : ''),
+          // POR QUE não desceu credencial. `disabled` é pausa (o operador
+          // desligou, ou a licença suspendeu) e nada deve assumir o lugar;
+          // `absent` é exclusão, e a instalação segue com outro storage que
+          // ainda tenha, ou volta a gravar só no disco local. Central antiga não
+          // manda o campo: nesse caso `disabled` é o palpite conservador —
+          // promover storage sozinho é o erro caro.
+          this.writeSetting('cloud.storageState', this.normalizeStorageState(response.data?.cloudStorageState)),
         ]);
         await this.enforceRuntimeRestrictions(restrictions);
       } catch (applyFailure) {
@@ -780,6 +797,25 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Config vigente, para quem precisa falar com o bucket. */
+  /**
+   * Valor do estado, com o padrão CONSERVADOR para Central antiga.
+   *
+   * Central que não manda o campo cai em `disabled`: sem storage provisionado,
+   * a instalação para de enviar e ninguém assume o lugar. O erro caro seria o
+   * inverso — promover um storage arquivado sozinho, ressuscitando um contrato
+   * que o cliente já cancelou e voltando a gerar custo.
+   */
+  private normalizeStorageState(raw: unknown): CloudStorageState {
+    const valor = String(raw ?? '').trim();
+    return valor === 'configured' || valor === 'absent' ? valor : 'disabled';
+  }
+
+  /** Por que não há storage provisionado — veja `normalizeStorageState`. */
+  async getCloudStorageState(): Promise<CloudStorageState> {
+    const settings = await this.readSettings();
+    return this.normalizeStorageState(settings['cloud.storageState']);
+  }
+
   async getCloudStorageConfig(): Promise<CloudStorageConfig | null> {
     const settings = await this.readSettings();
     const raw = settings['cloud.storage'];

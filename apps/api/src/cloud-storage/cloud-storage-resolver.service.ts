@@ -90,10 +90,91 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
       if (reconciliado) return reconciliado;
       return provisionado;
     }
-    const ativo = await this.prisma.cloudStorage
-      .findFirst({ where: { isActive: true } })
+    return this.semStorageProvisionado();
+  }
+
+  /**
+   * O que fazer quando a Central não manda mais credencial.
+   *
+   * Antes isto caía no registro que ESTAVA ativo e continuava enviando para
+   * ele — ou seja, excluir o storage na Central não parava nada. O registro só
+   * é "o ativo" porque a Central um dia disse que era; quando ela para de
+   * dizer, ele deixa de ser.
+   *
+   * A partir daí depende do MOTIVO:
+   *
+   *   disabled  — pausa. Nada sobe e nenhum outro storage assume, senão
+   *               desligar não desligaria nada. As gravações ficam no disco
+   *               local, e o que já subiu continua legível.
+   *   absent    — o destino foi excluído. Se ainda houver outro storage
+   *               cadastrado, ele assume; se não houver, fica só o disco local.
+   *
+   * Em nenhum dos dois o acervo é tocado: os registros permanecem na tabela e a
+   * leitura continua resolvendo pelo storage de origem de cada gravação.
+   */
+  private async semStorageProvisionado(): Promise<StorageResolvido | null> {
+    // `try` e não só `.catch`: um conector sem o método lança de forma SÍNCRONA,
+    // e a promessa nem chega a existir para ter catch. O erro subiria até o
+    // offload e derrubaria o envio inteiro por causa de um campo novo.
+    let estado: string;
+    try {
+      estado = await this.cloudConnector.getCloudStorageState();
+    } catch {
+      estado = 'disabled';
+    }
+    const ativo = await this.prisma.cloudStorage.findFirst({ where: { isActive: true } }).catch(() => null);
+
+    if (estado !== 'absent') {
+      if (ativo) {
+        await this.prisma.cloudStorage
+          .updateMany({ where: { isActive: true }, data: { isActive: false } })
+          .catch(() => undefined);
+        this.logger.log(
+          `Envio para a nuvem pausado; "${ativo.name}" deixou de receber gravações. O acervo dele continua legível.`,
+        );
+      }
+      return null;
+    }
+
+    // Excluído: o mais recente entre os que sobraram assume. Mais recente, e não
+    // o mais antigo, porque numa sequência de trocas é o penúltimo fornecedor
+    // que ainda tem contrato vivo — o primeiro provavelmente já foi cancelado.
+    const candidato = await this.prisma.cloudStorage
+      .findFirst({ orderBy: { createdAt: 'desc' } })
       .catch(() => null);
-    return ativo ? this.materializar(ativo) : null;
+    if (!candidato) {
+      if (ativo) {
+        await this.prisma.cloudStorage
+          .updateMany({ where: { isActive: true }, data: { isActive: false } })
+          .catch(() => undefined);
+      }
+      this.logger.log('Armazenamento em nuvem excluído e não há outro cadastrado; as gravações ficam no disco local.');
+      return null;
+    }
+
+    const resolvido = this.materializar(candidato);
+    if (!resolvido) {
+      // Candidato com credencial ilegível não pode virar destino: o upload
+      // falharia em laço e ninguém saberia por quê.
+      this.logger.warn(
+        `Armazenamento excluído; o storage "${candidato.name}" assumiria, mas a credencial dele não abre. ` +
+          'As gravações ficam no disco local.',
+      );
+      return null;
+    }
+
+    if (!candidato.isActive) {
+      await this.prisma
+        .$transaction(async (tx) => {
+          await tx.cloudStorage.updateMany({ where: { isActive: true }, data: { isActive: false } });
+          await tx.cloudStorage.update({ where: { id: candidato.id }, data: { isActive: true } });
+        })
+        .catch(() => undefined);
+      this.logger.log(
+        `Armazenamento excluído na Central; "${candidato.name}" (${candidato.bucket}) passou a receber as gravações.`,
+      );
+    }
+    return resolvido;
   }
 
   /**
