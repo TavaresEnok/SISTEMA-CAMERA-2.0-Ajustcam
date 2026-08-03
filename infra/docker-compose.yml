@@ -131,7 +131,15 @@ services:
       - DRAC_CENTRAL_PORT=9765
       - DRAC_CENTRAL_DATA_FILE=/app/data/installations.json
       - DRAC_CENTRAL_BACKUP_DIR=/app/data/backups
-      - DRAC_CENTRAL_DATABASE_URL=postgresql://${POSTGRES_USER:-vms}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-vms_db}
+      # BANCO DA CENTRAL, nunca o da aplicação. Esta linha FIXAVA
+      # `@postgres:5432/vms_db` — o banco do VMS. O painel mestre passaria a
+      # gravar as instalações dentro da base das câmeras, em modo dual, sem
+      # nenhum aviso. O próprio datastore documenta esse risco e exige a URL
+      # explícita justamente para não trocar de banco sozinho.
+      #
+      # Vazio = só JSON, que é o padrão seguro: melhor a Central não usar
+      # Postgres do que usar o Postgres errado.
+      - DRAC_CENTRAL_DATABASE_URL=${DRAC_CENTRAL_DATABASE_URL:-}
       - DRAC_CENTRAL_STORE_MODE=${DRAC_CENTRAL_STORE_MODE:-dual}
       - DRAC_CENTRAL_ADMIN_EMAIL=${DRAC_CENTRAL_ADMIN_EMAIL:-admin@drac.local}
       - DRAC_CENTRAL_ADMIN_PASSWORD_HASH=${DRAC_CENTRAL_ADMIN_PASSWORD_HASH:-}
