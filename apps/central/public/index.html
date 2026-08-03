@@ -2503,11 +2503,17 @@
 
         // Os dois painéis ficam FORA do cartão de propósito: `.resource.allowed`
         // pinta todo o texto de verde e apaga a hierarquia dos números medidos.
-        body.innerHTML = `${cartao}
+        const html = `${cartao}
           <div id="cloud-perf-result"></div>
           <div id="cloud-delete-confirm"></div>
           ${!editando ? `<div class="license-actions" style="margin-top:11px"><button id="cloud-add" class="primary">${configurado ? 'Trocar armazenamento' : 'Adicionar armazenamento'}</button></div>` : ''}
           ${formulario}`;
+
+        // Sem mudança, sem troca de DOM: reescrever aqui apagaria a medição de
+        // desempenho já na tela e faria a aba piscar duas vezes por minuto sem
+        // nenhum dado ter mudado. Sair antes também evita empilhar listeners
+        // repetidos nos MESMOS nós, que dispararia cada clique várias vezes.
+        if (!pintarSeMudou(body, html)) return;
 
         body.querySelector('#cloud-add')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
         body.querySelector('#cloud-edit')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
@@ -3037,7 +3043,7 @@
             <div class="deploy-step pending"><div class="deploy-dot">3</div><div><strong>Primeiro heartbeat</strong><span>A Central muda para conectado automaticamente.</span></div></div>
           </div>`;
 
-        els.detail.innerHTML = `
+        const html = `
           <div class="detail-tab-panel active" data-tab-panel="visao">
             ${item.policyPending ? '<div class="alert-item" style="margin-bottom:14px;border-color:var(--amber-line);background:var(--amber-soft)"><span class="badge warn">Aguardando sincronização</span><div style="margin-top:6px">A política foi alterada na Central e será aplicada quando a instalação enviar o próximo sinal.</div></div>' : ''}
             <div class="grid-2">
@@ -3163,9 +3169,16 @@
             </section>
           </div>`;
 
+        // Só troca o DOM quando o HTML mudou. Reescrever a cada 30s destruía e
+        // recriava tudo: a tela piscava, a rolagem se perdia e quem estava lendo
+        // o rodapé era jogado para o topo — duas vezes por minuto, com dados
+        // idênticos. As subseções têm guarda própria e continuam sendo chamadas.
+        const trocou = pintarSeMudou(els.detail, html);
+
         renderAiSection(item);
         renderCloudSection(item);
         renderScaleSection(item.id);
+        if (!trocou) return;
         // O innerHTML acima recriou os painéis; sem reaplicar, a aba escolhida
         // some e o operador volta para "Visão geral" a cada atualização.
         setDetailTab(state.detailTab || 'visao');
@@ -3540,6 +3553,26 @@
        * layout, então repõe-se também no quadro seguinte. `instant` porque um
        * scroll suave aqui seria justamente a animação que incomoda.
        */
+      /**
+       * Troca o conteúdo SÓ quando ele mudou.
+       *
+       * O ciclo de 30s reescrevia o `innerHTML` de cada painel toda vez, mesmo
+       * com dados idênticos. Reescrever destrói e recria os nós: a tela pisca,
+       * a rolagem se perde e qualquer coisa que o operador estivesse lendo salta.
+       * Numa aba parada, como a de Armazenamento, isso acontecia duas vezes por
+       * minuto sem NADA ter mudado.
+       *
+       * Comparar a string é barato perto de reconstruir o DOM, e o ganho é
+       * grande: painel estático deixa de piscar por completo.
+       */
+      function pintarSeMudou(elemento, html) {
+        if (!elemento) return false;
+        if (elemento.dataset.assinatura === html) return false;
+        elemento.dataset.assinatura = html;
+        elemento.innerHTML = html;
+        return true;
+      }
+
       async function atualizarSemPular(fn) {
         const y = window.scrollY;
         const x = window.scrollX;

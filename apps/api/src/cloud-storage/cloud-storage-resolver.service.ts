@@ -196,14 +196,24 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
     };
     const existente = await this.prisma.cloudStorage.findFirst({ where: endereco });
 
+    const nomeDesejado = config.name || config.bucket;
     if (existente?.isActive && existente.accessKeyId === config.accessKeyId) {
-      // Caminho quente: nada mudou. É o que roda a cada gravação enviada.
+      // Caminho quente: nada mudou no ENDEREÇO. É o que roda a cada gravação
+      // enviada, então não faz escrita à toa — exceto pelo nome, que o operador
+      // pode ter corrigido na Central e que só aparece na tela. Sem isto, um
+      // storage renomeado ficava com o rótulo antigo para sempre.
+      if (existente.name !== nomeDesejado) {
+        await this.prisma.cloudStorage
+          .update({ where: { id: existente.id }, data: { name: nomeDesejado } })
+          .catch(() => undefined);
+        return this.materializar({ ...existente, name: nomeDesejado });
+      }
       return this.materializar(existente);
     }
 
     const dados = {
       ...endereco,
-      name: config.name || config.bucket,
+      name: nomeDesejado,
       provider: config.provider || 's3',
       region: config.region || 'us-east-1',
       accessKeyId: config.accessKeyId,
@@ -345,6 +355,10 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
   private async legado(): Promise<StorageResolvido | null> {
     const cfg = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
     if (!cfg?.enabled) return null;
-    return { ...cfg, id: null, name: 'Storage principal' };
+    // O NOME vem da Central. Fixar 'Storage principal' aqui fazia todos os
+    // storages nascerem com o mesmo rótulo: depois de uma troca, o antigo e o
+    // novo ficavam lado a lado idênticos na tela, e o operador concluía que a
+    // exclusão não tinha funcionado.
+    return { ...cfg, id: null, name: cfg.name || 'Storage principal' };
   }
 }

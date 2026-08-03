@@ -33,6 +33,8 @@ export type CloudStorageState = 'configured' | 'disabled' | 'absent';
  */
 export type CloudStorageConfig = {
   enabled: true;
+  /** Nome que o operador deu na Central. Sem ele, todo storage vira "Storage principal". */
+  name: string;
   /** `tier` = grava local e envia; `mount` = grava direto no bucket montado. */
   mode: 'tier' | 'mount';
   provider: string;
@@ -780,6 +782,10 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
     const windowHours = Number(source.localWindowHours);
     return {
       enabled: true,
+      // Preservado do payload da Central: era descartado aqui, e por isso o
+      // resolvedor rotulava TODOS os storages de "Storage principal" — depois
+      // de uma troca, o antigo e o novo ficavam idênticos na tela.
+      name: text('name'),
       mode,
       provider: text('provider') || 's3',
       endpoint,
