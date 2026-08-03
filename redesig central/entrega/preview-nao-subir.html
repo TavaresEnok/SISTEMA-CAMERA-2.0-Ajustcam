@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DRAC Central</title>
+    <title>DRAC Central — preview do redesign</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2216%22%20fill%3D%22%23161826%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%2260%22%20height%3D%2260%22%20rx%3D%2214%22%20fill%3D%22none%22%20stroke%3D%22%239184d9%22%20stroke-opacity%3D%22.55%22%20stroke-width%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%2217%22%20fill%3D%22none%22%20stroke%3D%22%239184d9%22%20stroke-width%3D%223%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%226.5%22%20fill%3D%22%23b5abfc%22%2F%3E%3Ccircle%20cx%3D%2247%22%20cy%3D%2217%22%20r%3D%223.5%22%20fill%3D%22%236fc79b%22%2F%3E%3C%2Fsvg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1326,6 +1326,119 @@
          Caminho RELATIVO de propósito: a Central também é servida sob /central/.
          Se o arquivo não vier, window.DracChartUtils fica indefinido e o painel
          segue funcionando sem a seção de gráfico. -->
+    <script>
+    /* ── HARNESS DE PREVIEW (apenas neste arquivo) ─────────────────────────
+       preview.html é uma CÓPIA do index.html com o fetch interceptado por
+       dados de exemplo, para revisar o desenho sem servidor. O index.html
+       de produção não contém nada disto. */
+    (() => {
+      const now = Date.now();
+      const hist = (n, base, spread, max) => Array.from({ length: n }, (_, i) => Math.max(0, Math.min(max ?? 9999,
+        Math.round(base + Math.sin(i / 3.1) * spread + (i % 5 === 0 ? spread / 2 : 0)))));
+      const heartbeats = (n, camTotal, camOnline, disk) => Array.from({ length: n }, (_, i) => ({
+        at: new Date(now - (n - i) * 15 * 60000).toISOString(),
+        cameraTotal: camTotal,
+        cameraOnline: Math.max(0, camOnline - (i % 7 === 0 ? 2 : 0)),
+        diskUsagePercent: Math.min(99, disk + Math.round(Math.sin(i / 4) * 3)),
+        memoryUsagePercent: 52 + Math.round(Math.sin(i / 5) * 9),
+        streamLiveFailuresLast24h: i % 6 === 0 ? 2 : 0,
+        streamHighCpuRiskCameras: i % 9 === 0 ? 1 : 0,
+      }));
+      const inst = (o) => ({
+        licenseStatus: 'ACTIVE', version: '2.4.1', ageSeconds: 41,
+        lastHeartbeatAt: new Date(now - 41000).toISOString(),
+        server: { hostname: 'srv-drac', platform: 'linux', cpuCount: 8, totalMemoryBytes: 16 * 2 ** 30, freeMemoryBytes: 6 * 2 ** 30 },
+        storage: { disk: { usedBytes: 1.6 * 2 ** 40, totalBytes: 3 * 2 ** 40 } },
+        licenseHistory: [{ from: 'ACTIVE', to: 'GRACE', at: new Date(now - 86400000 * 12).toISOString(), by: 'admin@drac.local', message: 'Pendência de boleto.' }],
+        alerts: [], alertHistory: [], computeNodes: [], ...o,
+      });
+      const installations = [
+        inst({ id: 'condominio-alfa-001', customerName: 'Condomínio Alfa', status: 'OFFLINE', ageSeconds: 5400,
+          lastHeartbeatAt: new Date(now - 5400000).toISOString(),
+          metrics: { cameraTotal: 24, cameraOnline: 0, cameraOffline: 24, diskUsagePercent: 91, openAlarms: 3, activeRecordingCount: 0, recordingCount: 18422, productionReadiness: 'blocked', streamLiveFailuresLast24h: 14, recordingAttentionCameras: 6, streamHighCpuRiskCameras: 4, recordingGapSecondsLast24h: 5400, infraHealth: { issues: ['live: 502 em /live/cam-3', 'container: mediamtx reiniciando'], selfHealed: [] } },
+          heartbeatHistory: heartbeats(40, 24, 21, 88),
+          configDelivery: { desiredRevision: 7, appliedRevision: 5, status: 'PENDING' },
+          alerts: [{ code: 'disk_usage_high', level: 'critical', message: 'Disco em 91% — retenção em risco.' }, { code: 'no_online_cameras', level: 'critical' }],
+          alertHistory: [{ code: 'disk_usage_high', status: 'ACTIVE', level: 'critical', message: 'Disco acima de 90%.', firstSeenAt: new Date(now - 86400000 * 3).toISOString(), lastSeenAt: new Date(now - 600000).toISOString(), occurrences: 41 }],
+          server: { hostname: 'alfa-vms', platform: 'linux', cpuCount: 8, totalMemoryBytes: 16 * 2 ** 30, freeMemoryBytes: 1.2 * 2 ** 30 },
+          app: { appName: 'Alfa Seguro', slug: 'alfa-seguro', packageId: 'com.ajustconsulting.alfa', lastBuildAt: new Date(now - 86400000 * 4).toISOString() } }),
+        inst({ id: 'residencial-boavista', customerName: 'Residencial Boa Vista', status: 'ONLINE', licenseStatus: 'RESTRICTED',
+          metrics: { cameraTotal: 16, cameraOnline: 14, cameraOffline: 2, diskUsagePercent: 78, openAlarms: 1, activeRecordingCount: 14, recordingCount: 9120, productionReadiness: 'attention', streamLiveTranscodeLikely: 3, streamLiveFailuresLast24h: 2, recordingAttentionCameras: 2, streamHighCpuRiskCameras: 1, streamOptimizationSafeActions: 4, infraHealth: { issues: [], selfHealed: ['container: ai-service'] } },
+          heartbeatHistory: heartbeats(40, 16, 14, 74), restrictions: { addCameras: false, aiAdvanced: false, updates: false },
+          licenseMessage: 'Contrato restrito por inadimplência de 45 dias.',
+          configDelivery: { desiredRevision: 4, appliedRevision: 4, status: 'APPLIED' },
+          cloudStorage: { name: 'MinIO do escritório', displayName: 'MinIO do escritório', endpoint: 'http://10.0.0.9:9000', bucket: 'boavista-vms', prefix: 'residencial-boavista', region: 'us-east-1', accessKeyId: 'AKIAEXEMPLO', hasSecret: true, enabled: true, mode: 'tier', localWindowHours: 48, forcePathStyle: true, lastTestOk: true },
+          aiPolicy: { motion: true, object: false, face: false },
+          app: { appName: 'Boa Vista', slug: 'boa-vista', packageId: 'com.ajustconsulting.boavista', lastBuildAt: new Date(now - 86400000).toISOString() } }),
+        inst({ id: 'industria-nordeste', customerName: 'Indústria Nordeste S.A.', status: 'ONLINE',
+          metrics: { cameraTotal: 96, cameraOnline: 96, diskUsagePercent: 64, openAlarms: 0, activeRecordingCount: 96, recordingCount: 74310, productionReadiness: 'ready', streamHighCpuRiskCameras: 2, streamLiveFailuresLast24h: 0, infraHealth: { issues: [], selfHealed: [] } },
+          heartbeatHistory: heartbeats(40, 96, 94, 62),
+          computeNodes: [{ id: 'primario', label: 'Primário', host: '10.2.0.1', role: 'primary', capacity: 48 }, { id: 'worker-1', label: 'Worker 1', host: '10.2.0.7', role: 'worker', capacity: 48 }],
+          server: { hostname: 'nordeste-core', platform: 'linux', cpuCount: 32, totalMemoryBytes: 128 * 2 ** 30, freeMemoryBytes: 70 * 2 ** 30 },
+          storage: { disk: { usedBytes: 12 * 2 ** 40, totalBytes: 20 * 2 ** 40 } },
+          app: { appName: 'Nordeste Vigia', slug: 'nordeste-vigia', packageId: 'com.ajustconsulting.nordeste', lastBuildAt: new Date(now - 3600000).toISOString() } }),
+        inst({ id: 'escola-municipal-12', customerName: 'Escola Municipal 12', status: 'ONLINE', licenseStatus: 'GRACE',
+          metrics: { cameraTotal: 8, cameraOnline: 8, diskUsagePercent: 42, openAlarms: 0, activeRecordingCount: 8, recordingCount: 3980, productionReadiness: 'ready' },
+          heartbeatHistory: heartbeats(30, 8, 8, 40) }),
+        inst({ id: 'shopping-central', customerName: 'Shopping Central', status: 'ONLINE', licenseStatus: 'SUSPENDED',
+          licenseMessage: 'Suspensão administrativa — contrato encerrado.',
+          metrics: { cameraTotal: 42, cameraOnline: 39, cameraOffline: 3, diskUsagePercent: 86, openAlarms: 2, activeRecordingCount: 0, recordingCount: 51002, productionReadiness: 'attention', streamLiveFailuresLast24h: 6, recordingAttentionCameras: 3 },
+          heartbeatHistory: heartbeats(40, 42, 38, 84),
+          configDelivery: { desiredRevision: 9, appliedRevision: 8, status: 'FAILED', error: 'timeout ao aplicar política de IA' },
+          app: { appName: 'Central Mall', slug: 'central-mall', packageId: 'com.ajustconsulting.centralmall', lastBuildAt: new Date(now - 86400000 * 9).toISOString() } }),
+        inst({ id: 'fazenda-sao-jorge', customerName: 'Fazenda São Jorge', status: 'PENDING_INSTALL', ageSeconds: null,
+          lastHeartbeatAt: null, provisionedAt: new Date(now - 3600000 * 5).toISOString(), metrics: {}, heartbeatHistory: [] }),
+        inst({ id: 'clinica-vida', customerName: 'Clínica Vida', status: 'ONLINE',
+          metrics: { cameraTotal: 12, cameraOnline: 11, cameraError: 1, diskUsagePercent: 71, openAlarms: 0, activeRecordingCount: 11, recordingCount: 6210, productionReadiness: 'ready' },
+          heartbeatHistory: heartbeats(36, 12, 11, 69) }),
+      ];
+      const series = (n, step, keys) => ({ points: Array.from({ length: n }, (_, i) => ({
+        t: new Date(now - (n - i) * step).toISOString(), ...keys(i) })) });
+      const routes = [
+        [/\/api\/auth\/me$/, () => ({ authenticated: true, user: { email: 'admin@drac.local', name: 'Administrador' } })],
+        [/\/api\/auth\/login$/, () => ({ user: { email: 'admin@drac.local' } })],
+        [/\/api\/auth\/logout$/, () => ({ ok: true })],
+        [/\/api\/admin\/installations$/, () => ({ items: installations })],
+        [/\/api\/admin\/summary$/, () => ({ totals: { installations: installations.length, online: 5, cameraOnline: 168, cameraTotal: 198, openAlarms: 6, maxDiskUsagePercent: 91, streamHighCpuRiskCameras: 7, recordingAttentionCameras: 11, attention: 4 } })],
+        [/\/api\/admin\/fleet\/timeseries/, () => series(120, 5 * 60000, (i) => ({
+          camerasOnline: 160 + Math.round(Math.sin(i / 9) * 12), recordingsActive: 140 + Math.round(Math.cos(i / 7) * 14),
+          camerasStalled: i % 17 === 0 ? 3 : i % 5 === 0 ? 1 : 0, diskUsagePercent: 78 + Math.round(Math.sin(i / 15) * 9) }))],
+        [/\/api\/admin\/installations\/[^/]+\/timeseries/, () => ({ ...series(90, 5 * 60000, (i) => ({
+          camerasOnline: 20 + Math.round(Math.sin(i / 8) * 4), recordingsActive: 18 + Math.round(Math.cos(i / 6) * 4),
+          camerasStalled: i % 13 === 0 ? 2 : 0, diskUsagePercent: 84 + Math.round(Math.sin(i / 11) * 6) })),
+          cameras: [
+            { id: 'cam-3', name: 'Portaria – frente', status: 'offline', reasons: ['offline'], secondsSinceLastSegment: 5400 },
+            { id: 'cam-11', name: 'Garagem G2', status: 'recording_stalled', reasons: ['recording_stalled'], secondsSinceLastSegment: 1820 },
+            { id: 'cam-19', name: 'Corredor bloco B', status: 'error', reasons: ['error', 'recording_inactive'], secondsSinceLastSegment: null },
+          ] })],
+        [/\/scheduler$/, () => ({ enabled: true, planned: true, stale: false, nodes: installations[2].computeNodes, plan: { assignments: Array.from({ length: 96 }, (_, i) => ({ nodeId: i % 2 ? 'worker-1' : 'primario' })) } })],
+        [/\/api\/admin\/audit$/, () => ({ items: [
+          { at: new Date(now - 120000).toISOString(), type: 'auth.login_success', actor: 'admin@drac.local', result: 'accepted', ip: '187.0.0.4' },
+          { at: new Date(now - 900000).toISOString(), type: 'installation.license_changed', actor: 'admin@drac.local', result: 'accepted', installationId: 'shopping-central', ip: '187.0.0.4' },
+          { at: new Date(now - 3600000).toISOString(), type: 'agent.heartbeat_denied', actor: 'agent', result: 'denied', installationId: 'condominio-alfa-001', ip: '10.9.0.2' },
+          { at: new Date(now - 7200000).toISOString(), type: 'auth.login_failed', actor: 'tecnico@parceiro.com', result: 'denied', ip: '201.4.9.71' },
+          { at: new Date(now - 86400000).toISOString(), type: 'installation.provision_created', actor: 'admin@drac.local', result: 'accepted', installationId: 'fazenda-sao-jorge', ip: '187.0.0.4' },
+        ] })],
+        [/\/api\/admin\/users$/, () => ({ users: [
+          { email: 'admin@drac.local', name: 'Administrador', builtin: true },
+          { email: 'suporte@ajustcam.com.br', name: 'Suporte N1' },
+          { email: 'campo@ajustcam.com.br', name: 'Equipe de campo' },
+        ] })],
+        [/\/api\/admin\/apk\/clients$/, () => ({ clients: [
+          { slug: 'alfa-seguro', apiUrl: 'http://187.4.2.9:5173/api', apkUrl: '#', aabUrl: '#', kitUrl: '#', lastBuild: { status: 'done' } },
+          { slug: 'boa-vista', apiUrl: 'http://10.0.0.4:5173/api', apkUrl: '#', lastBuild: { status: 'building' } },
+          { slug: 'central-mall', apiUrl: 'http://200.1.2.3:5173/api', lastBuild: { status: 'failed' } },
+        ] })],
+      ];
+      window.fetch = async (url) => {
+        const path = String(url);
+        for (const [re, handler] of routes) {
+          if (re.test(path)) return { ok: true, status: 200, json: async () => handler() };
+        }
+        return { ok: false, status: 404, json: async () => ({ message: 'preview: rota não simulada' }) };
+      };
+    })();
+    </script>
     <script src="chart-utils.js"></script>
     <script>
       const CENTRAL_BASE_PATH = window.location.pathname === '/central' || window.location.pathname.startsWith('/central/')
@@ -2333,10 +2446,8 @@
       // Provisiona um bucket S3-compatível (MinIO, Backblaze, Eveo, AWS) para
       // ESTA instalação. A config desce pelo mesmo canal da política de IA (a
       // resposta do heartbeat), então não é preciso abrir porta na instalação.
-      // O segredo não vem no payload da listagem — apenas `hasSecret` — e campo
-      // em branco no save significa "mantenha o que já está lá". Para VER a
-      // credencial existe uma chamada dedicada, no clique de "Mostrar", que
-      // registra auditoria (veja `revelarSegredo`).
+      // O segredo NUNCA volta do servidor: o painel recebe apenas `hasSecret`;
+      // campo em branco no save significa "mantenha o que já está lá".
       // NÃO existe seletor de provedor: MinIO, Backblaze, Eveo, Wasabi e AWS
       // falam o mesmo protocolo S3 — a única diferença que muda o código é o
       // estilo de URL, que é um interruptor técnico.
@@ -2369,18 +2480,6 @@
             <div class="subtext" style="color:inherit;opacity:.85">
               ${c.mode === 'mount' ? 'Modo direto — grava no bucket montado' : `Camada — mantém ${Number(c.localWindowHours) || 24}h no disco local depois de enviar`}
             </div>
-            <div style="margin-top:11px;padding-top:11px;border-top:1px solid var(--line);display:grid;gap:5px">
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Access Key ID</span>
-                <b class="mono" style="word-break:break-all">${escapeHtml(c.accessKeyId || '—')}</b>
-              </div>
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Secret Access Key</span>
-                <b class="mono" id="cloud-secret-value" style="word-break:break-all">••••••••••••••••</b>
-                <button id="cloud-reveal" style="padding:2px 9px;font-size:11px">Mostrar</button>
-                <span id="cloud-secret-feedback"></span>
-              </div>
-            </div>
             <div class="license-actions" style="margin-top:12px">
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
@@ -2398,13 +2497,7 @@
               <div class="field"><label for="cloud-bucket">Bucket</label><input id="cloud-bucket" class="mono" placeholder="meu-storage" value="${escapeHtml(c.bucket || '')}"/></div>
               <div class="field"><label for="cloud-prefix">Prefixo</label><input id="cloud-prefix" class="mono" placeholder="${escapeHtml(item.id || '')}" value="${escapeHtml(c.prefix || '')}"/><small class="subtext">Isola instalações que dividem o mesmo bucket.</small></div>
               <div class="field"><label for="cloud-access-key">Access Key ID</label><input id="cloud-access-key" class="mono" value="${escapeHtml(c.accessKeyId || '')}"/></div>
-              <div class="field"><label for="cloud-secret">Secret Access Key</label>
-                <div style="display:flex;gap:6px">
-                  <input id="cloud-secret" type="password" style="flex:1;min-width:0" placeholder="${c.hasSecret ? 'em branco mantém a atual' : 'obrigatório para habilitar'}"/>
-                  ${c.hasSecret ? '<button id="cloud-secret-reveal" type="button" style="padding:0 11px;white-space:nowrap">Mostrar</button>' : ''}
-                </div>
-                ${c.hasSecret ? '<small class="subtext" id="cloud-secret-form-feedback">Deixe em branco para manter a credencial atual.</small>' : ''}
-              </div>
+              <div class="field"><label for="cloud-secret">Secret Access Key</label><input id="cloud-secret" type="password" placeholder="${c.hasSecret ? 'em branco mantém a atual' : 'obrigatório para habilitar'}"/></div>
               <!-- O rótulo antigo era "Janela local ANTES de enviar", e mentia: o
                    upload acontece assim que o segmento fecha. O que a janela
                    controla é por quanto tempo a cópia local SOBREVIVE. -->
@@ -2442,8 +2535,6 @@
         body.querySelector('#cloud-cancel')?.addEventListener('click', () => { state.cloudEditing = null; renderCloudSection(item); });
         body.querySelector('#cloud-test')?.addEventListener('click', () => testCloudStorage(item.id, body));
         body.querySelector('#cloud-save')?.addEventListener('click', () => saveCloudStorage(item.id, body));
-        body.querySelector('#cloud-reveal')?.addEventListener('click', (ev) => revelarSegredo(item.id, body, ev.currentTarget));
-        body.querySelector('#cloud-secret-reveal')?.addEventListener('click', (ev) => revelarSegredoNoFormulario(item.id, body, ev.currentTarget));
 
         // O risco do modo direto aparece NA HORA da escolha, não escondido em
         // documentação: escrever segmento direto no bucket trava, gera arquivo
@@ -2460,70 +2551,6 @@
           modeSel.addEventListener('change', pintar);
         }
       }
-      // ── Ver a credencial guardada ──────────────────────────────────────────
-      // A Secret Access Key é do CLIENTE, não do painel: um dia ele precisa
-      // conferir com o fornecedor, reconfigurar em outro lugar ou responder a
-      // uma auditoria. Ela continua fora do payload da listagem — só vem por
-      // uma chamada dedicada, no clique, e cada exibição fica na auditoria.
-      // Sai da tela sozinha na próxima renderização da seção.
-      async function buscarSegredo(installationId) {
-        const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/secret`), { credentials: 'include' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(String(data.message || data.error || `erro ${res.status}`));
-        return String(data.secretAccessKey || '');
-      }
-      async function revelarSegredo(installationId, body, botao) {
-        const alvo = body.querySelector('#cloud-secret-value');
-        const feedback = body.querySelector('#cloud-secret-feedback');
-        if (!alvo || !botao) return;
-        if (botao.dataset.mostrando === '1') {
-          alvo.textContent = '••••••••••••••••';
-          botao.dataset.mostrando = '';
-          botao.textContent = 'Mostrar';
-          if (feedback) feedback.innerHTML = '';
-          return;
-        }
-        botao.disabled = true;
-        try {
-          alvo.textContent = await buscarSegredo(installationId);
-          botao.dataset.mostrando = '1';
-          botao.textContent = 'Ocultar';
-          if (feedback) feedback.innerHTML = '';
-        } catch (error) {
-          if (feedback) feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(error.message || error))}</span>`;
-        } finally {
-          botao.disabled = false;
-        }
-      }
-      async function revelarSegredoNoFormulario(installationId, body, botao) {
-        const campo = body.querySelector('#cloud-secret');
-        const feedback = body.querySelector('#cloud-secret-form-feedback');
-        if (!campo || !botao) return;
-        if (botao.dataset.mostrando === '1') {
-          // Volta ao estado neutro: campo vazio significa "mantenha a atual", e
-          // deixar o texto lá depois de ocultar faria o operador salvar sem ver
-          // o que está enviando.
-          campo.value = '';
-          campo.type = 'password';
-          botao.dataset.mostrando = '';
-          botao.textContent = 'Mostrar';
-          if (feedback) feedback.textContent = 'Deixe em branco para manter a credencial atual.';
-          return;
-        }
-        botao.disabled = true;
-        try {
-          campo.value = await buscarSegredo(installationId);
-          campo.type = 'text';
-          botao.dataset.mostrando = '1';
-          botao.textContent = 'Ocultar';
-          if (feedback) feedback.textContent = 'Credencial atual — salvar sem alterar mantém a mesma.';
-        } catch (error) {
-          if (feedback) feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(error.message || error))}</span>`;
-        } finally {
-          botao.disabled = false;
-        }
-      }
-
       function cloudFormValues(body) {
         return {
           enabled: body.querySelector('#cloud-enabled').checked,
@@ -3368,14 +3395,7 @@
         const items = filteredItems();
         if (!items.length) { showToast('Nada para exportar neste recorte.'); return; }
         const head = ['cliente', 'instalacao', 'comunicacao', 'contrato', 'cameras_online', 'cameras_total', 'disco_percent', 'alarmes', 'servidor', 'versao', 'ultimo_sinal'];
-        const escapeCsv = (value) => {
-          const raw = String(value ?? '');
-          // Planilhas executam células iniciadas por =, +, - ou @ como fórmulas.
-          // Dados textuais vêm das instalações, então neutralize esse prefixo
-          // sem alterar os campos numéricos legítimos do relatório.
-          const safe = typeof value === 'string' && /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
-          return `"${safe.replace(/"/g, '""')}"`;
-        };
+        const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
         const lines = [head.join(';')];
         for (const item of items) {
           lines.push([
@@ -3956,3 +3976,4 @@
     </script>
   </body>
 </html>
+

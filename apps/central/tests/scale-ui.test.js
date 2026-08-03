@@ -13,7 +13,8 @@ const path = require('node:path');
 const PANEL = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 
 test('a seção de escala existe e é renderizada a partir do detalhe', () => {
-  assert.match(PANEL, /id="scale-section"/, 'a seção precisa existir no detalhe da instalação');
+  assert.match(PANEL, /data-tab-panel="escala"/, 'a aba de escala precisa existir no detalhe da instalação');
+  assert.match(PANEL, /id="scale-body"/, 'a seção precisa ter um destino próprio de renderização');
   assert.match(PANEL, /renderScaleSection\(item\.id\)/, 'o detalhe precisa disparar a renderização');
   assert.match(PANEL, /async function renderScaleSection\(/);
 });
@@ -58,7 +59,7 @@ test('os três controles do operador existem: ligar, cadastrar nó e replanejar'
   assert.match(PANEL, /id="scale-toggle"/, 'interruptor do scheduler');
   assert.match(PANEL, /id="scale-add"/, 'cadastro de nó');
   assert.match(PANEL, /id="scale-replan"/, 'replanejamento');
-  assert.match(PANEL, /class="ghost scale-del"/, 'remoção de nó');
+  assert.match(PANEL, /class="[^"]*\bscale-del\b[^"]*"/, 'remoção de nó');
   // E cada um fala com o endpoint certo.
   assert.match(PANEL, /scaleRequest\(installationId, '\/scheduler', 'PATCH'/);
   assert.match(PANEL, /scaleRequest\(installationId, '\/compute-nodes', 'PATCH'/);
@@ -75,7 +76,8 @@ test('o id do nó é derivado de forma segura (sem quebrar a validação do serv
 
 // ── Tela de IA por instalação ───────────────────────────────────────────────
 test('IA: a seção existe e é renderizada a partir do detalhe', () => {
-  assert.match(PANEL, /id="ai-section"/);
+  assert.match(PANEL, /data-tab-panel="ia"/);
+  assert.match(PANEL, /id="ai-body"/);
   assert.match(PANEL, /renderAiSection\(item\)/);
   assert.match(PANEL, /async function aiPolicyRequest\(/);
 });
@@ -116,5 +118,6 @@ test('IA: dado do servidor escapado e estado recarregado do servidor', () => {
   const req = PANEL.slice(inicio, proxima > inicio ? proxima : inicio + 2000);
   assert.match(req, /await load\(\)/, 'o teto da licença é aplicado no servidor: recarregue');
   // A falha precisa ser VISÍVEL: silêncio aqui é lido como "o botão não funciona".
-  assert.match(req, /alert\(/, 'erro de política de IA tem que avisar o operador');
+  assert.match(req, /(?:alert|showToast)\(/, 'erro de política de IA tem que avisar o operador');
+  assert.match(req, /Não foi possível alterar a política de IA/, 'o aviso precisa explicar qual operação falhou');
 });

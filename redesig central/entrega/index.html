@@ -2333,10 +2333,8 @@
       // Provisiona um bucket S3-compatível (MinIO, Backblaze, Eveo, AWS) para
       // ESTA instalação. A config desce pelo mesmo canal da política de IA (a
       // resposta do heartbeat), então não é preciso abrir porta na instalação.
-      // O segredo não vem no payload da listagem — apenas `hasSecret` — e campo
-      // em branco no save significa "mantenha o que já está lá". Para VER a
-      // credencial existe uma chamada dedicada, no clique de "Mostrar", que
-      // registra auditoria (veja `revelarSegredo`).
+      // O segredo NUNCA volta do servidor: o painel recebe apenas `hasSecret`;
+      // campo em branco no save significa "mantenha o que já está lá".
       // NÃO existe seletor de provedor: MinIO, Backblaze, Eveo, Wasabi e AWS
       // falam o mesmo protocolo S3 — a única diferença que muda o código é o
       // estilo de URL, que é um interruptor técnico.
@@ -2369,18 +2367,6 @@
             <div class="subtext" style="color:inherit;opacity:.85">
               ${c.mode === 'mount' ? 'Modo direto — grava no bucket montado' : `Camada — mantém ${Number(c.localWindowHours) || 24}h no disco local depois de enviar`}
             </div>
-            <div style="margin-top:11px;padding-top:11px;border-top:1px solid var(--line);display:grid;gap:5px">
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Access Key ID</span>
-                <b class="mono" style="word-break:break-all">${escapeHtml(c.accessKeyId || '—')}</b>
-              </div>
-              <div class="subtext" style="color:inherit;opacity:.85;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-                <span style="min-width:96px">Secret Access Key</span>
-                <b class="mono" id="cloud-secret-value" style="word-break:break-all">••••••••••••••••</b>
-                <button id="cloud-reveal" style="padding:2px 9px;font-size:11px">Mostrar</button>
-                <span id="cloud-secret-feedback"></span>
-              </div>
-            </div>
             <div class="license-actions" style="margin-top:12px">
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
@@ -2398,13 +2384,7 @@
               <div class="field"><label for="cloud-bucket">Bucket</label><input id="cloud-bucket" class="mono" placeholder="meu-storage" value="${escapeHtml(c.bucket || '')}"/></div>
               <div class="field"><label for="cloud-prefix">Prefixo</label><input id="cloud-prefix" class="mono" placeholder="${escapeHtml(item.id || '')}" value="${escapeHtml(c.prefix || '')}"/><small class="subtext">Isola instalações que dividem o mesmo bucket.</small></div>
               <div class="field"><label for="cloud-access-key">Access Key ID</label><input id="cloud-access-key" class="mono" value="${escapeHtml(c.accessKeyId || '')}"/></div>
-              <div class="field"><label for="cloud-secret">Secret Access Key</label>
-                <div style="display:flex;gap:6px">
-                  <input id="cloud-secret" type="password" style="flex:1;min-width:0" placeholder="${c.hasSecret ? 'em branco mantém a atual' : 'obrigatório para habilitar'}"/>
-                  ${c.hasSecret ? '<button id="cloud-secret-reveal" type="button" style="padding:0 11px;white-space:nowrap">Mostrar</button>' : ''}
-                </div>
-                ${c.hasSecret ? '<small class="subtext" id="cloud-secret-form-feedback">Deixe em branco para manter a credencial atual.</small>' : ''}
-              </div>
+              <div class="field"><label for="cloud-secret">Secret Access Key</label><input id="cloud-secret" type="password" placeholder="${c.hasSecret ? 'em branco mantém a atual' : 'obrigatório para habilitar'}"/></div>
               <!-- O rótulo antigo era "Janela local ANTES de enviar", e mentia: o
                    upload acontece assim que o segmento fecha. O que a janela
                    controla é por quanto tempo a cópia local SOBREVIVE. -->
@@ -2442,8 +2422,6 @@
         body.querySelector('#cloud-cancel')?.addEventListener('click', () => { state.cloudEditing = null; renderCloudSection(item); });
         body.querySelector('#cloud-test')?.addEventListener('click', () => testCloudStorage(item.id, body));
         body.querySelector('#cloud-save')?.addEventListener('click', () => saveCloudStorage(item.id, body));
-        body.querySelector('#cloud-reveal')?.addEventListener('click', (ev) => revelarSegredo(item.id, body, ev.currentTarget));
-        body.querySelector('#cloud-secret-reveal')?.addEventListener('click', (ev) => revelarSegredoNoFormulario(item.id, body, ev.currentTarget));
 
         // O risco do modo direto aparece NA HORA da escolha, não escondido em
         // documentação: escrever segmento direto no bucket trava, gera arquivo
@@ -2460,70 +2438,6 @@
           modeSel.addEventListener('change', pintar);
         }
       }
-      // ── Ver a credencial guardada ──────────────────────────────────────────
-      // A Secret Access Key é do CLIENTE, não do painel: um dia ele precisa
-      // conferir com o fornecedor, reconfigurar em outro lugar ou responder a
-      // uma auditoria. Ela continua fora do payload da listagem — só vem por
-      // uma chamada dedicada, no clique, e cada exibição fica na auditoria.
-      // Sai da tela sozinha na próxima renderização da seção.
-      async function buscarSegredo(installationId) {
-        const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/secret`), { credentials: 'include' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(String(data.message || data.error || `erro ${res.status}`));
-        return String(data.secretAccessKey || '');
-      }
-      async function revelarSegredo(installationId, body, botao) {
-        const alvo = body.querySelector('#cloud-secret-value');
-        const feedback = body.querySelector('#cloud-secret-feedback');
-        if (!alvo || !botao) return;
-        if (botao.dataset.mostrando === '1') {
-          alvo.textContent = '••••••••••••••••';
-          botao.dataset.mostrando = '';
-          botao.textContent = 'Mostrar';
-          if (feedback) feedback.innerHTML = '';
-          return;
-        }
-        botao.disabled = true;
-        try {
-          alvo.textContent = await buscarSegredo(installationId);
-          botao.dataset.mostrando = '1';
-          botao.textContent = 'Ocultar';
-          if (feedback) feedback.innerHTML = '';
-        } catch (error) {
-          if (feedback) feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(error.message || error))}</span>`;
-        } finally {
-          botao.disabled = false;
-        }
-      }
-      async function revelarSegredoNoFormulario(installationId, body, botao) {
-        const campo = body.querySelector('#cloud-secret');
-        const feedback = body.querySelector('#cloud-secret-form-feedback');
-        if (!campo || !botao) return;
-        if (botao.dataset.mostrando === '1') {
-          // Volta ao estado neutro: campo vazio significa "mantenha a atual", e
-          // deixar o texto lá depois de ocultar faria o operador salvar sem ver
-          // o que está enviando.
-          campo.value = '';
-          campo.type = 'password';
-          botao.dataset.mostrando = '';
-          botao.textContent = 'Mostrar';
-          if (feedback) feedback.textContent = 'Deixe em branco para manter a credencial atual.';
-          return;
-        }
-        botao.disabled = true;
-        try {
-          campo.value = await buscarSegredo(installationId);
-          campo.type = 'text';
-          botao.dataset.mostrando = '1';
-          botao.textContent = 'Ocultar';
-          if (feedback) feedback.textContent = 'Credencial atual — salvar sem alterar mantém a mesma.';
-        } catch (error) {
-          if (feedback) feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(error.message || error))}</span>`;
-        } finally {
-          botao.disabled = false;
-        }
-      }
-
       function cloudFormValues(body) {
         return {
           enabled: body.querySelector('#cloud-enabled').checked,
@@ -3368,14 +3282,7 @@
         const items = filteredItems();
         if (!items.length) { showToast('Nada para exportar neste recorte.'); return; }
         const head = ['cliente', 'instalacao', 'comunicacao', 'contrato', 'cameras_online', 'cameras_total', 'disco_percent', 'alarmes', 'servidor', 'versao', 'ultimo_sinal'];
-        const escapeCsv = (value) => {
-          const raw = String(value ?? '');
-          // Planilhas executam células iniciadas por =, +, - ou @ como fórmulas.
-          // Dados textuais vêm das instalações, então neutralize esse prefixo
-          // sem alterar os campos numéricos legítimos do relatório.
-          const safe = typeof value === 'string' && /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
-          return `"${safe.replace(/"/g, '""')}"`;
-        };
+        const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
         const lines = [head.join(';')];
         for (const item of items) {
           lines.push([
@@ -3956,3 +3863,4 @@
     </script>
   </body>
 </html>
+

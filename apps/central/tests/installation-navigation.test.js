@@ -41,21 +41,23 @@ test('AS DUAS tabelas abrem o detalhe ao clicar na linha', () => {
     );
     assert.match(
       corpo,
-      /openInstallationDetail\(state\.selectedId\)/,
-      `${fn}: o clique precisa NAVEGAR para a instalação, não só marcar seleção`,
+      /openInstallationDetail\(row\.dataset\.id\)/,
+      `${fn}: o clique precisa passar a instalação da linha para a navegação`,
     );
   }
 });
 
-test('o clique persiste a seleção (a página sobrevive a um F5)', () => {
-  for (const fn of ['renderRows', 'renderInventory']) {
-    const corpo = corpoDaFuncao(fn);
-    assert.match(
-      corpo,
-      /localStorage\.setItem\('drac-central-selected'/,
-      `${fn}: sem persistir, recarregar a página joga o operador de volta para a lista`,
-    );
-  }
+test('a navegação centralizada persiste a seleção e abre a tela de detalhe', () => {
+  // As duas tabelas delegam para a mesma função. A persistência pertence a
+  // essa fronteira, não deve ser duplicada em cada origem de navegação.
+  const corpo = corpoDaFuncao('openInstallationDetail');
+  assert.match(corpo, /state\.selectedId = installationId/);
+  assert.match(
+    corpo,
+    /localStorage\.setItem\('drac-central-selected', installationId\)/,
+    'sem persistir, recarregar a página joga o operador de volta para a lista',
+  );
+  assert.match(corpo, /setView\('detalhe'\)/, 'a seleção também precisa abrir a página da instalação');
 });
 
 test('botões de ação NÃO disparam a navegação da linha', () => {
