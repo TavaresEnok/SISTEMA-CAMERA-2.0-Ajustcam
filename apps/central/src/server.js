@@ -13,7 +13,7 @@ const {
   buildInstallationPayload: buildCloudStoragePayload,
   decryptSecret: decryptStorageSecret,
 } = require('./cloud-storage');
-const { testS3Access } = require('./s3-probe');
+const { testS3Access, measureS3Performance } = require('./s3-probe');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
 const {
@@ -1989,6 +1989,56 @@ async function handleRevealCloudStorageSecret(req, res, db, actor, installationI
  * O teste faz LIST **e** PUT+DELETE: credencial somente-leitura passaria num
  * teste de listagem e falharia na primeira gravação.
  */
+/**
+ * DESEMPENHO do bucket, a partir da Central.
+ *
+ * O NÚMERO NÃO É O MESMO da tela de Armazenamento da instalação, e a diferença
+ * importa: aqui se mede o link da CENTRAL até o bucket. Serve para avaliar o
+ * FORNECEDOR — está lento hoje? este candidato é melhor que aquele? — e para
+ * comparar antes de contratar. NÃO serve para dimensionar quantas câmeras a
+ * instalação aguenta, porque a instalação está em outra rede.
+ *
+ * Custa banda e requisições cobradas, então é botão e nunca automático.
+ */
+async function handleCloudStoragePerformance(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const config = normalizeCloudStorage(item.cloudStorage);
+  let secret = '';
+  try {
+    secret = decryptStorageSecret(config.secretAccessKeyEncrypted);
+  } catch {
+    secret = '';
+  }
+  if (!config.endpoint || !config.bucket || !config.accessKeyId || !secret) {
+    return json(req, res, 400, {
+      error: 'cloud_storage_incomplete',
+      message: 'Configure endpoint, bucket e credencial antes de medir.',
+    });
+  }
+
+  const medicao = await measureS3Performance({
+    endpoint: config.endpoint,
+    region: config.region,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: secret,
+    forcePathStyle: config.forcePathStyle,
+  });
+
+  addAuditEvent(db, req, {
+    type: 'installation.cloud_storage_measured',
+    actor: actor.email,
+    result: medicao.ok ? 'accepted' : 'rejected',
+    installationId,
+    bucket: config.bucket,
+  });
+  await saveDb(db);
+  return json(req, res, medicao.ok ? 200 : 502, medicao);
+}
+
 async function handleTestCloudStorage(req, res, db, actor, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
@@ -2615,6 +2665,10 @@ async function route(req, res) {
       const cloudSecretMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/secret$/);
       if (req.method === 'GET' && cloudSecretMatch) {
         return handleRevealCloudStorageSecret(req, res, db, actor, decodeURIComponent(cloudSecretMatch[1]));
+      }
+      const cloudPerfMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/performance$/);
+      if (req.method === 'POST' && cloudPerfMatch) {
+        return handleCloudStoragePerformance(req, res, db, actor, decodeURIComponent(cloudPerfMatch[1]));
       }
       const cloudTestMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/test$/);
       if (req.method === 'POST' && cloudTestMatch) {

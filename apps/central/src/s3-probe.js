@@ -1,6 +1,6 @@
 'use strict';
 
-const { createHash, createHmac } = require('node:crypto');
+const { createHash, createHmac, randomBytes } = require('node:crypto');
 
 // ── Teste de acesso a bucket S3, a partir da Central ────────────────────────
 //
@@ -153,4 +153,99 @@ async function testS3Access(config, { timeoutMs = 10000 } = {}) {
   return { ok: true, canWrite: true, error: null };
 }
 
-module.exports = { testS3Access, __sign: sign, __joinKey: joinKey, __explain: explain };
+/** Mediana — a média esconderia justamente a trava intermitente. */
+function mediana(valores) {
+  if (!valores.length) return 0;
+  const o = [...valores].sort((a, b) => a - b);
+  const m = Math.floor(o.length / 2);
+  return o.length % 2 ? o[m] : (o[m - 1] + o[m]) / 2;
+}
+
+/** Percentil por interpolação linear, para não dar degraus com poucas amostras. */
+function percentil(valores, p) {
+  if (!valores.length) return 0;
+  if (valores.length === 1) return valores[0];
+  const o = [...valores].sort((a, b) => a - b);
+  const pos = (o.length - 1) * p;
+  const baixo = Math.floor(pos);
+  const alto = Math.ceil(pos);
+  return baixo === alto ? o[baixo] : o[baixo] + (o[alto] - o[baixo]) * (pos - baixo);
+}
+
+/**
+ * DESEMPENHO do bucket, medido a partir da CENTRAL.
+ *
+ * ATENÇÃO ao que este número significa. Ele mede o link da CENTRAL até o
+ * bucket, não o da instalação — que é por onde o vídeo realmente sobe. Serve
+ * para avaliar o FORNECEDOR (o bucket está saudável? o provedor está lento
+ * hoje?) e para comparar candidatos antes de contratar. Não serve para
+ * dimensionar quantas câmeras a instalação aguenta; para isso existe o botão
+ * Desempenho na tela de Armazenamento da própria instalação.
+ *
+ * Conteúdo ALEATÓRIO e nunca zeros: proxy ou storage que comprime mediria a
+ * compressão, não a rede, e devolveria uma banda que vídeo nenhum alcança.
+ *
+ * Limpa o que criou mesmo quando falha no meio — o teste não pode deixar lixo
+ * pago no bucket do cliente.
+ */
+async function measureS3Performance(config, { timeoutMs = 60000, sizeMb = 4, latencySamples = 7 } = {}) {
+  const mb = Math.min(16, Math.max(1, Number(sizeMb) || 4));
+  const carga = randomBytes(mb * 1024 * 1024);
+  const chave = joinKey(config.prefix, `.drac-central-perf-${Date.now()}`);
+  const criadas = [];
+  let falhas = 0;
+
+  try {
+    const t0 = Date.now();
+    const put = await call(
+      config,
+      { method: 'PUT', key: chave, payload: carga, extraHeaders: { 'content-type': 'application/octet-stream', 'content-length': String(carga.length) } },
+      timeoutMs,
+    );
+    const msSubida = Date.now() - t0;
+    if (!put.ok) return { ok: false, error: `Escrita falhou: ${explain(put.status, put.code)}` };
+    criadas.push(chave);
+
+    const t1 = Date.now();
+    const get = await call(config, { method: 'GET', key: chave }, timeoutMs);
+    const msDescida = Date.now() - t1;
+    if (!get.ok) return { ok: false, error: `Leitura falhou: ${explain(get.status, get.code)}` };
+
+    const amostras = [];
+    for (let i = 0; i < latencySamples; i += 1) {
+      const inicio = Date.now();
+      const head = await call(config, { method: 'HEAD', key: chave }, timeoutMs);
+      if (head.ok) amostras.push(Date.now() - inicio);
+      else falhas += 1;
+    }
+
+    const medianaMs = Math.round(mediana(amostras));
+    const p95Ms = Math.round(percentil(amostras, 0.95));
+    // Mb/s (megaBITS), a unidade em que banda é contratada. Devolver MB/s faria
+    // o operador comparar com o "100 mega" do provedor e errar por 8x.
+    const mbps = (bytes, ms) => (ms > 0 ? Number(((bytes * 8) / (ms / 1000) / 1e6).toFixed(2)) : 0);
+
+    return {
+      ok: true,
+      error: null,
+      amostraMb: mb,
+      latencia: {
+        medianaMs,
+        p95Ms,
+        minMs: amostras.length ? Math.min(...amostras) : 0,
+        maxMs: amostras.length ? Math.max(...amostras) : 0,
+        amostras: amostras.length,
+      },
+      subida: { mbps: mbps(carga.length, msSubida), segundos: Number((msSubida / 1000).toFixed(2)) },
+      descida: { mbps: mbps(carga.length, msDescida), segundos: Number((msDescida / 1000).toFixed(2)) },
+      falhas,
+      medidoEm: new Date().toISOString(),
+    };
+  } finally {
+    for (const k of criadas) {
+      await call(config, { method: 'DELETE', key: k }, timeoutMs).catch(() => undefined);
+    }
+  }
+}
+
+module.exports = { testS3Access, measureS3Performance, __sign: sign, __joinKey: joinKey, __explain: explain };

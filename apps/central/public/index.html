@@ -2384,9 +2384,11 @@
             <div class="license-actions" style="margin-top:12px">
               <button id="cloud-edit" class="primary">Editar</button>
               <button id="cloud-test">Testar conexão</button>
+              <button id="cloud-perf">Desempenho</button>
               <button id="cloud-delete">Excluir</button>
               <span id="cloud-feedback"></span>
             </div>
+            <div id="cloud-perf-result"></div>
             <div id="cloud-delete-confirm"></div>
           </div>`;
 
@@ -2444,6 +2446,7 @@
         body.querySelector('#cloud-cancel')?.addEventListener('click', () => { state.cloudEditing = null; renderCloudSection(item); });
         body.querySelector('#cloud-test')?.addEventListener('click', () => testCloudStorage(item.id, body));
         body.querySelector('#cloud-save')?.addEventListener('click', () => saveCloudStorage(item.id, body));
+        body.querySelector('#cloud-perf')?.addEventListener('click', (ev) => medirDesempenhoStorage(item.id, body, ev.currentTarget));
         body.querySelector('#cloud-delete')?.addEventListener('click', () => confirmarExclusaoStorage(item, body));
         body.querySelector('#cloud-reveal')?.addEventListener('click', (ev) => revelarSegredo(item.id, body, ev.currentTarget));
         body.querySelector('#cloud-secret-reveal')?.addEventListener('click', (ev) => revelarSegredoNoFormulario(item.id, body, ev.currentTarget));
@@ -2463,6 +2466,59 @@
           modeSel.addEventListener('change', pintar);
         }
       }
+      // ── Desempenho do bucket ───────────────────────────────────────────────
+      // O QUE ESTE NÚMERO É: o link da CENTRAL até o bucket. Serve para avaliar
+      // o FORNECEDOR — está lento hoje? este candidato é melhor que aquele? —
+      // e para comparar antes de contratar.
+      //
+      // O QUE ELE NÃO É: a capacidade da instalação. Ela está em outra rede, e
+      // é de lá que o vídeo sobe. Para dimensionar câmeras existe o mesmo botão
+      // na tela de Armazenamento da instalação. Confundir os dois faria alguém
+      // vender 40 câmeras porque a CENTRAL tem link bom.
+      //
+      // Mediana E p95 juntos, sempre: a mediana sozinha esconde a trava
+      // intermitente, e é ela que forma fila.
+      async function medirDesempenhoStorage(installationId, body, botao) {
+        const alvo = body.querySelector('#cloud-perf-result');
+        const feedback = body.querySelector('#cloud-feedback');
+        if (!alvo) return;
+        if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
+        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Enviando e baixando 4 MB…</div>';
+        try {
+          const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/performance`), {
+            method: 'POST', credentials: 'include',
+          });
+          const d = await res.json().catch(() => ({}));
+          if (!res.ok || !d.ok) {
+            alvo.innerHTML = '';
+            if (feedback) feedback.innerHTML = `<span class="badge warn">${escapeHtml(String(d.error || d.message || `erro ${res.status}`))}</span>`;
+            return;
+          }
+          if (feedback) feedback.innerHTML = '';
+          const inst = d.latencia.medianaMs > 0 && d.latencia.p95Ms / d.latencia.medianaMs >= 4;
+          alvo.innerHTML = `
+            <div class="resource" style="text-align:left;padding:12px;margin-top:11px">
+              <div class="grid-3">
+                <div><label>Latência (mediana)</label><strong class="mono">${d.latencia.medianaMs} ms</strong><small>p95 ${d.latencia.p95Ms} ms · ${d.latencia.amostras} amostras</small></div>
+                <div><label>Subida</label><strong class="mono">${d.subida.mbps} Mb/s</strong><small>${d.amostraMb} MB em ${d.subida.segundos}s</small></div>
+                <div><label>Descida</label><strong class="mono">${d.descida.mbps} Mb/s</strong><small>${d.descida.segundos}s</small></div>
+              </div>
+              ${inst ? '<div class="subtext" style="margin-top:8px;color:var(--amber)">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
+              ${d.falhas ? `<div class="subtext" style="margin-top:8px;color:var(--amber)">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
+              <div class="subtext" style="margin-top:8px">
+                Medido <b>a partir da Central</b>, que avalia o FORNECEDOR. A capacidade da instalação
+                depende da rede DELA — o mesmo botão existe na tela de Armazenamento da instalação,
+                e é aquele número que diz quantas câmeras cabem.
+              </div>
+            </div>`;
+        } catch {
+          alvo.innerHTML = '';
+          if (feedback) feedback.innerHTML = '<span class="badge warn">Falha ao medir</span>';
+        } finally {
+          if (botao) { botao.disabled = false; botao.textContent = 'Desempenho'; }
+        }
+      }
+
       // ── Excluir o armazenamento ────────────────────────────────────────────
       // Excluir NÃO é desabilitar. Desabilitar é pausa: o cadastro fica e
       // religar volta tudo. Excluir diz "este destino acabou", e a instalação
