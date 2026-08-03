@@ -5,6 +5,8 @@ import { statfs } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
+import { S3Client } from '../cloud-storage/s3-client';
 import { ensureFileUnderRoot } from './helpers/safe-file.helper';
 import { envBool, envNumber } from '../common/config/env-number.helper';
 import { buildTimelinePreviewPath } from './helpers/timeline-preview.helper';
@@ -89,6 +91,8 @@ type ExpiringRecording = {
   filePath: string;
   startedAt: Date;
   sizeBytes: bigint | number | null;
+  /** Chave do objeto no bucket; null = nunca subiu. Guiada pela retenção da nuvem. */
+  cloudKey?: string | null;
   /** Ausente quando o cliente Prisma é anterior à migração ⇒ DESCONHECIDO. */
   motionScore?: number;
 };
@@ -125,7 +129,46 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly settings: SettingsService,
+    private readonly cloudConnector: CloudConnectorService,
   ) {}
+
+  // ── RETENÇÃO TAMBÉM VALE PARA A NUVEM ──────────────────────────────────────
+  //
+  // Até aqui a retenção apagava o registro e o arquivo LOCAL, e o objeto no
+  // bucket ficava órfão para sempre. Medido em campo (2026-08-03): o MinIO
+  // encheu e passou a recusar todo upload com `XMinioStorageFull (507)`,
+  // travando o acervo inteiro — 421 gravações presas no disco local, sem cópia
+  // externa, por 38 horas.
+  //
+  // Delegar isso ao S3 (lifecycle rule) não serve: quem sabe o que pode sair é
+  // o DRAC, não o bucket. A retenção daqui é POR CÂMERA, respeita gravação
+  // protegida por incidente, e mantém em quarentena o segmento cujo movimento é
+  // DESCONHECIDO. Uma regra de idade no bucket apagaria justamente a prova que
+  // o operador marcou para guardar.
+  //
+  // Falha ao apagar na nuvem NÃO impede a limpeza local: disco cheio é
+  // emergência operacional, objeto órfão é desperdício. O órfão é registrado
+  // para uma varredura posterior recolher.
+  private async deleteCloudObject(cloudKey: string | null | undefined): Promise<void> {
+    if (!cloudKey) return;
+    try {
+      const cfg = await this.cloudConnector.getCloudStorageConfig();
+      if (!cfg?.enabled) return;
+      const client = new S3Client({
+        endpoint: cfg.endpoint,
+        bucket: cfg.bucket,
+        region: cfg.region ?? 'us-east-1',
+        accessKeyId: cfg.accessKeyId,
+        secretAccessKey: cfg.secretAccessKey,
+        forcePathStyle: true,
+      });
+      await client.deleteObject(cloudKey);
+    } catch (error) {
+      this.logger.warn(
+        `Objeto na nuvem não pôde ser removido (segue órfão no bucket): ${cloudKey} — ${(error as Error).message}`,
+      );
+    }
+  }
 
   onModuleInit() {
     this.logger.log('Retention Service inicializado.');
@@ -450,7 +493,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deleteRecording(
-    recording: { id: string; cameraId: string; filePath: string },
+    recording: { id: string; cameraId: string; filePath: string; cloudKey?: string | null },
     protection: ProtectionSets,
   ) {
     if (protection.recordingIds.has(recording.id)) return false;
@@ -484,6 +527,11 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
         await tx.recording.delete({ where: { id: recording.id } });
       },
     );
+    // DEPOIS de a linha sair, não antes: apagar o objeto primeiro e a transação
+    // falhar deixaria um registro apontando para um objeto que já não existe —
+    // playback quebrado e nenhuma forma de saber que aquilo era prova.
+    // A ordem inversa, no pior caso, deixa lixo no bucket, que é recuperável.
+    await this.deleteCloudObject(recording.cloudKey);
     return true;
   }
 
@@ -607,6 +655,10 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
             filePath: true,
             startedAt: true,
             sizeBytes: true,
+            // Sem o cloudKey aqui o objeto no bucket vira ÓRFÃO: a linha some e
+            // ninguém mais sabe que aquele arquivo existe na nuvem. Foi assim que
+            // o MinIO encheu e travou o acervo inteiro (medido em 2026-08-03).
+            cloudKey: true,
             ...(this.hasMotionScoreColumn() ? { motionScore: true } : {}),
           },
         });
@@ -910,7 +962,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           where: protection.recordingIds.size ? { id: { notIn: [...protection.recordingIds] } } : {},
           orderBy: { startedAt: 'asc' },
           take: 20,
-          select: { id: true, cameraId: true, filePath: true },
+          select: { id: true, cameraId: true, filePath: true, cloudKey: true },
         });
         if (!oldest.length) break;
         let batchDeleted = 0;
