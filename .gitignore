@@ -78,3 +78,6 @@ package-lock.json
 # Clone de referência do estado ESTÁVEL (21/07, DRAC.git @ 00e7f24) para
 # comparar contra a regressão de live/fps. Não é código do projeto.
 sistema antigo - drac/
+
+# Vídeos gerados pela bancada de simulação (42 MB, recriáveis com gerar-fontes.sh).
+infra/simulacao/media/

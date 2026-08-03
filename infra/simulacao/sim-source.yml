@@ -1,0 +1,25 @@
+# ── SERVIDOR-FONTE DA SIMULAÇÃO ────────────────────────────────────────────
+#
+# Faz o papel dos DVRs/câmeras do cliente: recebe os publicadores sintéticos e
+# serve RTSP para o DRAC puxar, exatamente como uma câmera real faria.
+#
+# Por que um MediaMTX SEPARADO em vez de publicar no de produção: o objetivo é
+# MEDIR o custo do DRAC. Se as fontes vivessem no mesmo processo, o consumo do
+# gerador entraria na conta e a medição mediria a si mesma. Em container à
+# parte, o `docker stats` separa as duas coisas e dá para subtrair.
+#
+# Sem autenticação de propósito: aqui não há nada a proteger — é vídeo
+# sintético, e o container não publica porta nenhuma para fora do host.
+logLevel: warn
+rtspAddress: :8554
+rtsp: yes
+rtspTransports: [tcp]
+hls: no
+webrtc: no
+rtmp: no
+srt: no
+api: yes
+apiAddress: :9997
+
+paths:
+  all_others:

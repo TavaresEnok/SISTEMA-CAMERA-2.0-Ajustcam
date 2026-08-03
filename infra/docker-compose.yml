@@ -190,6 +190,49 @@ services:
       - ./offsite-backup.sh:/offsite-backup.sh:ro
     entrypoint: ["/bin/sh", "/offsite-backup.sh"]
 
+  # ── TRADUTOR DE DIALETO RTMP (SRS) ────────────────────────────────────────
+  #
+  # Atende a porta pública 1935 e repassa ao MediaMTX interno. Existe porque
+  # câmera legada Adobe/FMLE (medido: Positivo CIP-B1312-M) exige a resposta
+  # `onFCPublish` antes de enviar vídeo, e o MediaMTX 1.18.2 não a envia — a
+  # câmera conecta, é aceita e desliga em ~150 ms sem um quadro. O SRS responde
+  # e repassa; provado em laboratório com a câmera de teste ficando ONLINE.
+  #
+  # NÃO é fronteira de segurança: a autorização de publicação continua no
+  # MediaMTX → mediamtx-auth do DRAC. Path não vinculado a uma câmera é recusado
+  # lá e vira tentativa pendente, igual a antes. Aqui é só tradução de protocolo.
+  #
+  # Imagem fixada por digest; API/HTTP/DVR do SRS desligados na srs.conf.
+  rtmp-ingest:
+    image: ossrs/srs@sha256:4e293846ad2448ff1a0157aa2c694e7c451fff5046c93b5bc6da0fa0384ef998
+    container_name: vms-rtmp-ingest
+    restart: unless-stopped
+    # Endurecido em paridade com api/mediamtx: este é um parser RTMP em C++
+    # exposto direto à internet na 1935, então minimiza-se o que um bug de
+    # memória no handshake poderia alcançar.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 256m
+    # O SRS escreve só o pid; read_only + este tmpfs cobre isso.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    logging: *default-logging
+    command: ["./objs/srs", "-c", "conf/srs.conf"]
+    ports:
+      - "${MEDIAMTX_RTMP_PORT:-1935}:1935/tcp"
+    volumes:
+      - ./rtmp-ingest/srs.conf:/usr/local/srs/conf/srs.conf:ro
+    depends_on:
+      - mediamtx
+    # SÓ rtmp-net: o tradutor alcança o MediaMTX e nada mais. Sem acesso a
+    # postgres/redis/api, um SRS comprometido não tem para onde se mover.
+    networks:
+      - rtmp-net
+
   adminer:
     image: adminer:latest
     container_name: vms-adminer
@@ -600,21 +643,12 @@ services:
       # Mídia WebRTC (ICE/UDP): PRECISA ser pública — o browser conecta direto no IP anunciado
       # (mediamtx.yml webrtcAdditionalHosts) nesta porta. Sem ela o vídeo WebRTC não flui.
       - "8189:8189/udp"
-      # INGESTÃO RTMP: a câmera é que disca para cá.
-      #
-      # Precisa ser pública pelo mesmo motivo que a mídia WebRTC acima — só que
-      # no sentido contrário: é o equipamento em campo que abre a conexão. É
-      # justamente isso que faz o modo push atravessar CGNAT e 4G, onde não há
-      # como redirecionar porta nenhuma no lado do cliente.
-      #
-      # Publicar aqui NÃO abre o acervo: quem chega nesta porta só consegue
-      # PUBLICAR, e apenas no path `drac/<chave>` da própria câmera. Assistir
-      # continua exigindo streamToken (ver mediamtx-auth na API). Sem chave
-      # cadastrada, toda publicação é recusada — a porta nasce inerte.
-      #
-      # Para desligar por completo, basta comentar esta linha: o modo pull das
-      # instalações existentes não depende dela.
-      - "${MEDIAMTX_RTMP_PORT:-1935}:1935/tcp"
+      # INGESTÃO RTMP: a porta pública 1935 é atendida pelo serviço `rtmp-ingest`
+      # (SRS, tradutor de dialeto), NÃO diretamente pelo MediaMTX. Medido em
+      # campo: câmera legada Adobe/FMLE exige `onFCPublish`, que o MediaMTX não
+      # envia — ver o comentário no serviço rtmp-ingest. O MediaMTX segue
+      # escutando RTMP na rede interna (:1935 dentro do compose), que é por onde
+      # o SRS repassa, e é lá que a publicação é autorizada contra o cadastro.
       # TCP na mesma porta: REMOVIDO a pedido do dono, restaurando o transporte
       # de 21/07 (só UDP), que rodava estável.
       #
@@ -660,6 +694,9 @@ services:
       start_period: 20s
     networks:
       - vms-net
+      # rtmp-net: rede dedicada só entre o SRS e o MediaMTX, para o tradutor
+      # RTMP alcançar mediamtx:1935 SEM enxergar postgres/redis/api.
+      - rtmp-net
 
   # ── AVALIAÇÃO go2rtc (Fase 0 do plano híbrido, 2026-07-21) ──────────────────
   # Sidecar ISOLADO para comparação A/B com o MediaMTX. NÃO serve produção:
@@ -693,4 +730,9 @@ volumes:
 
 networks:
   vms-net:
+    driver: bridge
+  # Rede dedicada só entre o tradutor RTMP (SRS) e o MediaMTX. O SRS fica SÓ
+  # aqui; o MediaMTX fica nas duas. Assim o parser RTMP em C++ exposto à
+  # internet alcança apenas mediamtx:1935 — nunca postgres, redis ou api.
+  rtmp-net:
     driver: bridge
