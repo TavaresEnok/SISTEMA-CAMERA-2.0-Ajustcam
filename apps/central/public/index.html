@@ -503,6 +503,37 @@
       .kv > div:nth-child(even) { text-align: right; font-weight: 450; padding-left: 12px; }
       .kv > div:nth-last-child(1), .kv > div:nth-last-child(2) { border-bottom: 0; }
 
+      /* ── Medição de desempenho do storage ──────────────────────────────
+         Aqui o conteúdo É o número, então ele manda na hierarquia: valor
+         grande em tabular-nums sobre --ink, rótulo apagado em --quiet.
+         A primeira versão reusava `.resource`, que força `color: var(--muted)`
+         no bloco inteiro e reduz `strong` a 12px — o número saía do tamanho e
+         da cor do rótulo, sobre fundo suave. Ilegível.
+         A cor da latência é SEMÂNTICA (verde/âmbar/vermelho) e não se confunde
+         com o roxo da marca, que aqui não significa nada. */
+      .perf { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-soft);
+        color: var(--ink); padding: 13px; margin-top: 11px; }
+      .perf-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 11px; }
+      .perf-head strong { font-size: 12px; font-weight: 500; }
+      .perf-head span { font-size: 11px; color: var(--quiet); font-variant-numeric: tabular-nums; }
+      .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 9px; }
+      .perf-metric { border: 1px solid var(--line-hair); border-radius: 10px; background: var(--surface-2); padding: 11px 12px; }
+      /* --muted e não --quiet: no tema claro o --quiet dá ~2,6:1 sobre
+         --surface-2, abaixo do mínimo legível a 10,5px. A hierarquia aqui vem do
+         TAMANHO (21px contra 10,5px) e da cor do valor, não de apagar o rótulo
+         até o ponto de não se ler. */
+      .perf-metric label { display: block; color: var(--muted); font-size: 10.5px; letter-spacing: .02em; }
+      .perf-metric b { display: block; margin-top: 5px; font-size: 21px; font-weight: 500; line-height: 1.1;
+        font-variant-numeric: tabular-nums; color: var(--ink); }
+      .perf-metric b i { font-style: normal; font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+      .perf-metric small { display: block; margin-top: 4px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; opacity: .85; }
+      .perf-metric.good b { color: var(--green); }
+      .perf-metric.warn b { color: var(--amber); }
+      .perf-metric.bad b { color: var(--red); }
+      .perf-flag { margin-top: 9px; border: 1px solid var(--amber-line); background: var(--amber-soft); color: var(--amber);
+        border-radius: 8px; padding: 8px 10px; font-size: 11px; line-height: 1.45; }
+      .perf-note { margin-top: 10px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+
       .resource-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 7px; }
       .resource { border: 1px solid var(--line-hair); border-radius: 10px; padding: 10px 11px; font-size: 11.5px;
         background: var(--surface-soft); color: var(--muted); }
@@ -2394,8 +2425,6 @@
               <button id="cloud-delete">Excluir</button>
               <span id="cloud-feedback"></span>
             </div>
-            <div id="cloud-perf-result"></div>
-            <div id="cloud-delete-confirm"></div>
           </div>`;
 
         const formulario = !editando ? '' : `
@@ -2443,7 +2472,11 @@
             </div>
           </div>`;
 
+        // Os dois painéis ficam FORA do cartão de propósito: `.resource.allowed`
+        // pinta todo o texto de verde e apaga a hierarquia dos números medidos.
         body.innerHTML = `${cartao}
+          <div id="cloud-perf-result"></div>
+          <div id="cloud-delete-confirm"></div>
           ${!editando ? `<div class="license-actions" style="margin-top:11px"><button id="cloud-add" class="primary">${configurado ? 'Trocar armazenamento' : 'Adicionar armazenamento'}</button></div>` : ''}
           ${formulario}`;
 
@@ -2540,19 +2573,39 @@
           }
           if (feedback) feedback.innerHTML = '';
           const inst = d.latencia.medianaMs > 0 && d.latencia.p95Ms / d.latencia.medianaMs >= 4;
+          // Classe de latência com os mesmos cortes do serviço da instalação:
+          // abaixo de 80ms o upload é dominado pela transferência; acima de
+          // 400ms cada objeto paga pedágio que vira fila com muitas câmeras.
+          const classe = d.latencia.medianaMs <= 80 ? 'good' : d.latencia.medianaMs <= 400 ? 'warn' : 'bad';
           alvo.innerHTML = `
-            <div class="resource" style="text-align:left;padding:12px;margin-top:11px">
-              <div class="grid-3">
-                <div><label>Latência (mediana)</label><strong class="mono">${d.latencia.medianaMs} ms</strong><small>p95 ${d.latencia.p95Ms} ms · ${d.latencia.amostras} amostras</small></div>
-                <div><label>Subida</label><strong class="mono">${d.subida.mbps} Mb/s</strong><small>${d.amostraMb} MB em ${d.subida.segundos}s</small></div>
-                <div><label>Descida</label><strong class="mono">${d.descida.mbps} Mb/s</strong><small>${d.descida.segundos}s</small></div>
+            <div class="perf">
+              <div class="perf-head">
+                <strong>Desempenho a partir da Central</strong>
+                <span>${new Date(d.medidoEm).toLocaleString('pt-BR')}</span>
               </div>
-              ${inst ? '<div class="subtext" style="margin-top:8px;color:var(--amber)">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
-              ${d.falhas ? `<div class="subtext" style="margin-top:8px;color:var(--amber)">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
-              <div class="subtext" style="margin-top:8px">
-                Medido <b>a partir da Central</b>, que avalia o FORNECEDOR. A capacidade da instalação
-                depende da rede DELA — o mesmo botão existe na tela de Armazenamento da instalação,
-                e é aquele número que diz quantas câmeras cabem.
+              <div class="perf-grid">
+                <div class="perf-metric ${classe}">
+                  <label>Latência (mediana)</label>
+                  <b>${d.latencia.medianaMs}<i>ms</i></b>
+                  <small>p95 ${d.latencia.p95Ms} ms · ${d.latencia.amostras} amostras</small>
+                </div>
+                <div class="perf-metric">
+                  <label>Subida</label>
+                  <b>${d.subida.mbps}<i>Mb/s</i></b>
+                  <small>${d.amostraMb} MB em ${d.subida.segundos}s</small>
+                </div>
+                <div class="perf-metric">
+                  <label>Descida</label>
+                  <b>${d.descida.mbps}<i>Mb/s</i></b>
+                  <small>${d.descida.segundos}s</small>
+                </div>
+              </div>
+              ${inst ? '<div class="perf-flag">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
+              ${d.falhas ? `<div class="perf-flag">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
+              <div class="perf-note">
+                Isto mede o link <b>da Central</b> até o bucket, e serve para avaliar o fornecedor.
+                Quantas câmeras cabem depende da rede <b>da instalação</b>, que é de onde o vídeo sobe —
+                o mesmo botão existe na tela de Armazenamento dela, e é aquele número que dimensiona.
               </div>
             </div>`;
         } catch {
