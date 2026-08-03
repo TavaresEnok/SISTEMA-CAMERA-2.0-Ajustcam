@@ -2552,10 +2552,25 @@
           if (!build) { el.textContent = 'v —'; return; }
           if (buildAoAbrir === null) buildAoAbrir = build;
           if (buildAoAbrir !== build) {
-            el.textContent = 'versão nova disponível — recarregar';
+            el.textContent = 'versão nova — recarregando…';
             el.style.opacity = '1';
             el.style.borderColor = 'var(--amber-line)';
             el.style.color = 'var(--amber)';
+            // RECARREGA SOZINHA. Avisar não bastava: a Central é uma página só,
+            // o operador navega dentro dela por horas e continua rodando o JS de
+            // antes do deploy — procurando botão que a cópia dele não tem, com
+            // razão em dizer que "não apareceu". Um painel de operação não pode
+            // exigir que se saiba disso.
+            //
+            // Exceção: se alguém está DIGITANDO, recarregar apagaria o que foi
+            // escrito. Aí só avisa, e recarrega no ciclo seguinte em que o campo
+            // estiver livre.
+            const digitando = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+            if (digitando) {
+              el.textContent = 'versão nova — recarregar';
+              return;
+            }
+            setTimeout(() => location.reload(), 400);
           } else {
             el.textContent = `v ${build}`;
           }
