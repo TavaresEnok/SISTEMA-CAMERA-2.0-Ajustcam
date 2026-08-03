@@ -13,7 +13,7 @@ const {
   buildInstallationPayload: buildCloudStoragePayload,
   decryptSecret: decryptStorageSecret,
 } = require('./cloud-storage');
-const { testS3Access, measureS3Performance } = require('./s3-probe');
+const { testS3Access, measureS3Performance, diagnosticarConexao, localizarServidor } = require('./s3-probe');
 const { resolverEndpoint } = require('./endpoint-scheme');
 const scheduler = require('./scheduler');
 const timeseries = require('./datastore/timeseries');
@@ -2088,6 +2088,16 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
     secretAccessKey: secret,
     forcePathStyle: config.forcePathStyle,
   }, pedido > 0 ? { sizeMb: pedido } : {});
+
+  // Contexto que transforma o número em resposta: 143ms parece distância e não
+  // é. Decompor mostra que a REDE são ~35ms e o resto é abrir a conexão — e o
+  // keep-alive diz se esse custo se repete a cada objeto.
+  const rede = await diagnosticarConexao(config.endpoint).catch(() => null);
+  const local = rede && rede.ip ? await localizarServidor(rede.ip).catch(() => null) : null;
+  if (medicao && typeof medicao === 'object') {
+    medicao.rede = rede;
+    medicao.local = local;
+  }
 
   addAuditEvent(db, req, {
     type: 'installation.cloud_storage_measured',

@@ -2650,6 +2650,23 @@
               ${inst ? '<div class="perf-flag">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
               ${d.falhas ? `<div class="perf-flag">${d.falhas} operações falharam — os números acima são otimistas.</div>` : ''}
               ${(d.notas || []).map((n) => `<div class="perf-flag">${escapeHtml(n)}</div>`).join('')}
+              ${d.rede ? `
+              <div class="perf-grid" style="margin-top:9px">
+                <div class="perf-metric"><label>DNS</label><b>${d.rede.dnsMs ?? '—'}<i>ms</i></b><small>resolver o nome</small></div>
+                <div class="perf-metric"><label>Rede (TCP)</label><b>${d.rede.tcpMs ?? '—'}<i>ms</i></b><small>ida e volta real</small></div>
+                <div class="perf-metric"><label>TLS</label><b>${d.rede.tlsMs ?? '—'}<i>ms</i></b><small>aperto de mão</small></div>
+              </div>` : ''}
+              ${d.fechaConexao ? `<div class="perf-flag">
+                O servidor <b>fecha a conexão a cada requisição</b>. Por isso a latência acima não é distância:
+                cada objeto paga DNS + TCP + TLS de novo. Com arquivos pequenos esse custo domina — arquivos
+                maiores diluem o mesmo aperto de mão.
+              </div>` : ''}
+              ${(d.rede || d.local) ? `
+              <div class="perf-note">
+                Servidor <b class="mono">${escapeHtml(d.rede?.ip || '—')}</b>${d.local
+                  ? ` · ${escapeHtml([d.local.cidade, d.local.regiao, d.local.pais].filter(Boolean).join(', '))} · ${escapeHtml(d.local.isp || '')}`
+                  : ' · localização não obtida'}
+              </div>` : ''}
               <div class="perf-note">
                 Amostra de ${d.amostraMb} MB, apagada do bucket ao terminar.
                 Isto mede o link <b>da Central</b> até o bucket, e serve para avaliar o fornecedor.
@@ -3510,13 +3527,40 @@
         paintPulse();
         showToast(state.paused ? 'Atualização automática pausada.' : 'Atualização automática retomada.');
       }
+      /**
+       * Atualiza sem tirar o operador do lugar.
+       *
+       * O ciclo de 30s reescreve o `innerHTML` dos painéis. Durante a
+       * substituição o documento fica momentaneamente mais curto, o navegador
+       * corta a rolagem para o novo máximo — e quando o conteúdo volta, a
+       * posição já se perdeu. Quem estava lendo o rodapé era jogado para o topo
+       * a cada meio minuto.
+       *
+       * Restaurar uma vez não basta: a altura só se estabiliza depois do
+       * layout, então repõe-se também no quadro seguinte. `instant` porque um
+       * scroll suave aqui seria justamente a animação que incomoda.
+       */
+      async function atualizarSemPular(fn) {
+        const y = window.scrollY;
+        const x = window.scrollX;
+        try {
+          await fn();
+        } finally {
+          const repor = () => {
+            if (window.scrollY !== y || window.scrollX !== x) window.scrollTo({ top: y, left: x, behavior: 'instant' });
+          };
+          repor();
+          requestAnimationFrame(repor);
+        }
+      }
+
       setInterval(() => {
         if (wallOn) updateWallClock();
         if (!state.user || state.paused || document.hidden) { paintPulse(); return; }
         state.countdown -= 1;
         if (state.countdown <= 0) {
           state.countdown = REFRESH_SECONDS;
-          void load();
+          void atualizarSemPular(load);
         }
         paintPulse();
       }, 1000);

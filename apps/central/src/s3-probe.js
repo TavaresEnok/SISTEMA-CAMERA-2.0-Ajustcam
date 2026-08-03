@@ -1,6 +1,9 @@
 'use strict';
 
 const { createHash, createHmac, randomBytes } = require('node:crypto');
+const dns = require('node:dns').promises;
+const net = require('node:net');
+const tls = require('node:tls');
 
 // ── Teste de acesso a bucket S3, a partir da Central ────────────────────────
 //
@@ -114,10 +117,11 @@ async function call(config, params, timeoutMs) {
       signal: controller.signal,
     });
     const text = await res.text();
-    return { ok: res.ok, status: res.status, code: res.ok ? null : errorCode(text) };
+    return { ok: res.ok, status: res.status, code: res.ok ? null : errorCode(text),
+      conexao: String(res.headers.get('connection') || '').toLowerCase() };
   } catch (error) {
     // Timeout/DNS/conexão recusada: não vaza credencial, só a natureza da falha.
-    return { ok: false, status: 0, code: 'NetworkError' };
+    return { ok: false, status: 0, code: 'NetworkError', conexao: '' };
   } finally {
     clearTimeout(timer);
   }
@@ -241,9 +245,14 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
     if (!get.ok) return { ok: false, error: `Leitura falhou: ${explain(get.status, get.code)}` };
 
     const amostras = [];
+    // Keep-alive medido nas requisições REAIS, assinadas. Um GET anônimo na raiz
+    // é respondido de outro jeito pelo gateway e diz keep-alive quando as
+    // operações de verdade recebem `close`.
+    let fechaConexao = false;
     for (let i = 0; i < latencySamples; i += 1) {
       const inicio = Date.now();
       const head = await call(config, { method: 'HEAD', key: chave }, timeoutMs);
+      if (head.conexao === 'close') fechaConexao = true;
       if (head.ok) amostras.push(Date.now() - inicio);
       else falhas += 1;
     }
@@ -268,6 +277,7 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
       subida: { mbps: mbps(carga.length, msSubida), segundos: Number((msSubida / 1000).toFixed(2)) },
       descida: { mbps: mbps(carga.length, msDescida), segundos: Number((msDescida / 1000).toFixed(2)) },
       falhas,
+      fechaConexao,
       notas,
       medidoEm: new Date().toISOString(),
     };
@@ -316,4 +326,83 @@ async function limparSobras(config, timeoutMs) {
   return apagados;
 }
 
-module.exports = { testS3Access, measureS3Performance, __sign: sign, __joinKey: joinKey, __explain: explain };
+/**
+ * DE ONDE VEM A LATÊNCIA — separa rede de aperto de mão.
+ *
+ * Sem esta decomposição, "143 ms" parecia distância e assustava: o operador
+ * olhava um servidor na mesma cidade e concluía que a rede estava ruim. Não
+ * estava. Medido no Eveo: DNS 34 + TCP 34 + TLS 40 + requisição 35. A REDE são
+ * os 34 ms do TCP; o resto é o custo de ABRIR a conexão.
+ *
+ * E esse custo se repete a cada objeto quando o servidor responde
+ * `connection: close` — que é o caso do gateway Ceph do Eveo. Por isso o
+ * keep-alive é medido e mostrado: com ele desligado, subir mil arquivos
+ * pequenos paga mil apertos de mão, e isso decide se vale agrupar gravações.
+ */
+async function diagnosticarConexao(endpoint, { timeoutMs = 8000 } = {}) {
+  let alvo;
+  try {
+    alvo = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  const seguro = alvo.protocol === 'https:';
+  const porta = Number(alvo.port) || (seguro ? 443 : 80);
+  const resultado = { host: alvo.hostname, ip: null, dnsMs: null, tcpMs: null, tlsMs: null, keepAlive: null };
+
+  const t0 = Date.now();
+  try {
+    const { address } = await dns.lookup(alvo.hostname);
+    resultado.ip = address;
+    resultado.dnsMs = Date.now() - t0;
+  } catch {
+    return resultado;
+  }
+
+  await new Promise((resolve) => {
+    const inicio = Date.now();
+    const soquete = seguro
+      ? tls.connect({ host: resultado.ip, port: porta, servername: alvo.hostname, timeout: timeoutMs })
+      : net.connect({ host: resultado.ip, port: porta, timeout: timeoutMs });
+    let tcpEm = null;
+    soquete.on('connect', () => { tcpEm = Date.now() - inicio; resultado.tcpMs = tcpEm; });
+    const encerrar = () => { try { soquete.destroy(); } catch { /* já morto */ } resolve(); };
+    if (seguro) {
+      soquete.on('secureConnect', () => {
+        // O evento `connect` do tls não dispara antes do `secureConnect` em todas
+        // as versões; quando não dispara, o TCP fica embutido no total.
+        resultado.tlsMs = Date.now() - inicio - (tcpEm ?? 0);
+        encerrar();
+      });
+    }
+    soquete.on('ready', () => { if (!seguro) encerrar(); });
+    soquete.on('error', encerrar);
+    soquete.on('timeout', encerrar);
+  });
+
+  return resultado;
+}
+
+/**
+ * Onde fica o servidor, pelo IP.
+ *
+ * Consulta um serviço público e falha em silêncio: é informação de contexto,
+ * não pode derrubar a medição nem travar a tela se a Central estiver sem saída
+ * para a internet. Só o IP sai daqui — nenhuma credencial.
+ */
+async function localizarServidor(ip, { timeoutMs = 5000 } = {}) {
+  if (!ip) return null;
+  try {
+    const campos = 'status,country,regionName,city,isp,org,lat,lon';
+    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=${campos}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const d = await res.json();
+    if (d.status !== 'success') return null;
+    return { pais: d.country, regiao: d.regionName, cidade: d.city, isp: d.isp || d.org || null, lat: d.lat, lon: d.lon };
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { testS3Access, measureS3Performance, diagnosticarConexao, localizarServidor, __sign: sign, __joinKey: joinKey, __explain: explain };
