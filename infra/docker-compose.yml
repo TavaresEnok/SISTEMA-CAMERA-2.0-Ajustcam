@@ -135,6 +135,12 @@ services:
       - DRAC_CENTRAL_STORE_MODE=${DRAC_CENTRAL_STORE_MODE:-dual}
       - DRAC_CENTRAL_ADMIN_EMAIL=${DRAC_CENTRAL_ADMIN_EMAIL:-admin@drac.local}
       - DRAC_CENTRAL_ADMIN_PASSWORD_HASH=${DRAC_CENTRAL_ADMIN_PASSWORD_HASH:-}
+      # Chave que cifra a credencial S3 de cada instalação. Estava AUSENTE aqui
+      # e presente só no container que roda hoje: se este serviço subisse, a
+      # credencial guardada viraria texto ilegível — a instalação pararia de
+      # receber configuração de storage e a tela devolveria "não pôde ser
+      # decifrada". Faltar esta linha era um defeito latente, não um detalhe.
+      - CENTRAL_STORAGE_SECRET=${CENTRAL_STORAGE_SECRET:-}
       - DRAC_CENTRAL_ADMIN_TOKEN=${DRAC_CENTRAL_ADMIN_TOKEN:-}
       - DRAC_CENTRAL_SESSION_HOURS=${DRAC_CENTRAL_SESSION_HOURS:-8}
       - DRAC_CENTRAL_ALLOWED_ORIGINS=${DRAC_CENTRAL_ALLOWED_ORIGINS:-https://localhost}
