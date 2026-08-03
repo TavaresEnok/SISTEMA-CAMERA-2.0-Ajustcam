@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Central de Ajuda do AjustCam: orientações práticas para monitoramento, reprodução, alertas, câmeras, usuários e armazenamento."
+    />
+    <meta name="theme-color" content="#07111f" />
+    <title>Central de Ajuda — AjustCam</title>
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="reading-progress" aria-hidden="true"><span id="reading-progress"></span></div>
+
+    <header class="topbar">
+      <button id="menu-toggle" class="icon-button menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+      </button>
+      <a class="brand" href="#inicio" aria-label="Central de Ajuda do AjustCam">
+        <svg class="brand-mark" viewBox="0 0 44 44" aria-hidden="true">
+          <circle cx="22" cy="22" r="18" />
+          <circle cx="22" cy="22" r="8" />
+          <path d="M22 4v10M22 30v10M4 22h10M30 22h10" />
+        </svg>
+        <span><strong>AjustCam</strong><small>Central de Ajuda</small></span>
+      </a>
+      <div class="topbar-actions">
+        <button id="print-button" class="topbar-link" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7z" /></svg>
+          Imprimir
+        </button>
+        <a class="topbar-link primary" href="/live">
+          Abrir o AjustCam
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+        </a>
+      </div>
+    </header>
+
+    <div class="page-shell">
+      <aside id="sidebar" class="sidebar" aria-label="Navegação da ajuda">
+        <div class="sidebar-search">
+          <label for="help-search">Buscar na ajuda</label>
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+            <input id="help-search" type="search" placeholder="Ex.: baixar gravação" autocomplete="off" />
+            <kbd>/</kbd>
+          </div>
+          <div id="search-results" class="search-results" hidden></div>
+        </div>
+        <nav id="help-navigation" class="help-navigation"></nav>
+        <div class="sidebar-footer">
+          <p>Precisa dimensionar o disco?</p>
+          <a href="/armazenamento/">Abrir guia de armazenamento <span aria-hidden="true">→</span></a>
+        </div>
+      </aside>
+
+      <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
+      <main id="main-content" class="main-content" tabindex="-1">
+        <div class="content-column">
+          <nav id="breadcrumbs" class="breadcrumbs" aria-label="Você está aqui"></nav>
+          <article id="article" class="article"></article>
+          <section id="related-content" class="related-content" aria-label="Conteúdos relacionados"></section>
+          <footer class="article-footer">
+            <p>Este guia explica o uso do AjustCam. As opções exibidas podem variar conforme sua permissão e a configuração da instalação.</p>
+            <button id="copy-link" class="secondary-button" type="button">Copiar link desta página</button>
+          </footer>
+        </div>
+        <aside id="page-index" class="page-index" aria-label="Nesta página"></aside>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <noscript>Ative o JavaScript para usar a navegação e a busca desta Central de Ajuda.</noscript>
+    <script src="./content.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

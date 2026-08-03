@@ -6,6 +6,7 @@ import {
   ChevronLeft, ChevronRight, LogOut, Keyboard, Shield,
   Server, Users, Radar, FolderKey, ShieldCheck, Search, Sun, Moon,
   Bell, Crosshair, HardDrive, UserCircle, Smartphone,
+  CircleHelp,
   type LucideIcon,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -217,6 +218,18 @@ export function Sidebar({
             <span className="ml-auto font-mono text-[9px] opacity-60">?</span>
           </button>
         )}
+
+        <a
+          href="/ajuda/"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="Abrir a Central de Ajuda"
+          title="Central de Ajuda"
+          className={`sidebar-footer-btn flex h-8 items-center gap-2 rounded-lg text-[hsl(var(--muted-foreground))] transition-colors hover:text-sidebar-foreground ${isExpanded ? 'w-full px-3' : 'w-9 mx-auto justify-center'}`}
+        >
+          <CircleHelp className="h-3.5 w-3.5 shrink-0" />
+          {isExpanded && <span className="text-[11px]">Central de Ajuda</span>}
+        </a>
 
         {/* User row */}
         {user && (
