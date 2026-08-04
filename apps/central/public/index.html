@@ -599,7 +599,7 @@
       /* ── Portal técnico ──────────────────────────────────────────────────
          O conteúdo só chega pela API depois da autorização. Estes estilos são
          apenas a casca pública da interface e não revelam o documento. */
-      .technical-shell { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
+      .technical-shell { --technical-accent: var(--brand-strong); display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
       .technical-sidebar { position: sticky; top: 76px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
       .technical-search { padding: 14px; border-bottom: 1px solid var(--line-hair); }
       .technical-search-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 7px; }
@@ -607,46 +607,97 @@
       .technical-search-head span { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
       .technical-search input { width: 100%; }
       .technical-index { padding: 8px; overflow: auto; scrollbar-width: thin; }
-      .technical-category { margin: 10px 0 4px; padding: 0 9px; color: var(--muted); font-size: 10.5px; font-weight: 600;
-        letter-spacing: .12em; text-transform: uppercase; }
-      .technical-index button { width: 100%; min-height: 0; padding: 8px 9px; border: 0; border-radius: 9px; background: transparent;
+      .technical-category-group { --technical-accent: var(--brand-strong); --technical-accent-soft: color-mix(in srgb, var(--technical-accent) 11%, transparent);
+        --technical-accent-line: color-mix(in srgb, var(--technical-accent) 34%, transparent); padding: 5px 0 8px; }
+      .technical-category-group + .technical-category-group { margin-top: 4px; border-top: 1px solid var(--line-hair); padding-top: 12px; }
+      .technical-category { display: flex; align-items: center; gap: 7px; margin: 4px 0 5px; padding: 0 9px; color: var(--technical-accent);
+        font-size: 10.5px; font-weight: 650; letter-spacing: .105em; text-transform: uppercase; }
+      .technical-category::before { content: ''; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 2px; background: var(--technical-accent);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--technical-accent) 45%, transparent); }
+      .technical-index button { position: relative; width: 100%; min-height: 0; padding: 8px 10px 8px 14px; border: 0; border-radius: 9px; background: transparent;
         color: var(--muted); text-align: left; justify-content: flex-start; font-size: 11.5px; line-height: 1.35; }
-      .technical-index button:hover { color: var(--ink); background: var(--surface-soft); }
-      .technical-index button.active { color: var(--ink); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand-line); }
+      .technical-index button::before { content: ''; position: absolute; left: 3px; top: 8px; bottom: 8px; width: 2px; border-radius: 99px;
+        background: var(--technical-accent); opacity: 0; transform: scaleY(.35); transition: opacity .15s ease, transform .15s ease; }
+      .technical-index button:hover { color: var(--ink); background: var(--technical-accent-soft); }
+      .technical-index button.active { color: var(--ink); background: var(--technical-accent-soft); box-shadow: inset 0 0 0 1px var(--technical-accent-line); }
+      .technical-index button.active::before { opacity: 1; transform: scaleY(1); }
+      [data-technical-category="fundamentos"] { --technical-accent: #8fb3ff; }
+      [data-technical-category="identidade"] { --technical-accent: #63c9d5; }
+      [data-technical-category="video"] { --technical-accent: #70cf9c; }
+      [data-technical-category="gravacao"] { --technical-accent: #e5b45b; }
+      [data-technical-category="playback"] { --technical-accent: #e895b9; }
+      [data-technical-category="clientes"] { --technical-accent: #b3a2f3; }
+      [data-technical-category="operacao"] { --technical-accent: #62c7b2; }
+      [data-technical-category="ciclo-vida"] { --technical-accent: #ed9e72; }
+      [data-technical-category="catalogo-funcional"] { --technical-accent: #71bce3; }
+      [data-technical-category="plataforma-avancada"] { --technical-accent: #d996e8; }
+      [data-technical-category="referencia"] { --technical-accent: #aeb4c8; }
+      body.light [data-technical-category="fundamentos"] { --technical-accent: #3567b3; }
+      body.light [data-technical-category="identidade"] { --technical-accent: #147582; }
+      body.light [data-technical-category="video"] { --technical-accent: #217548; }
+      body.light [data-technical-category="gravacao"] { --technical-accent: #895d08; }
+      body.light [data-technical-category="playback"] { --technical-accent: #9b3f69; }
+      body.light [data-technical-category="clientes"] { --technical-accent: #654ba8; }
+      body.light [data-technical-category="operacao"] { --technical-accent: #187866; }
+      body.light [data-technical-category="ciclo-vida"] { --technical-accent: #9a4e24; }
+      body.light [data-technical-category="catalogo-funcional"] { --technical-accent: #256b91; }
+      body.light [data-technical-category="plataforma-avancada"] { --technical-accent: #7f4190; }
+      body.light [data-technical-category="referencia"] { --technical-accent: #565e74; }
       .technical-empty { padding: 24px 16px; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.55; }
-      .technical-article { min-height: 520px; }
-      .technical-article-head { padding: 24px 26px 19px; border-bottom: 1px solid var(--line-hair);
-        background: radial-gradient(80% 190% at 0 0, var(--brand-soft), transparent 56%); }
-      .technical-eyebrow { color: var(--brand-strong); font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+      .technical-article { --technical-accent-soft: color-mix(in srgb, var(--technical-accent) 10%, transparent);
+        --technical-accent-line: color-mix(in srgb, var(--technical-accent) 30%, transparent); min-height: 520px; overflow: hidden; }
+      .technical-article-head { position: relative; padding: 26px 28px 21px; border-top: 3px solid var(--technical-accent); border-bottom: 1px solid var(--technical-accent-line);
+        background: radial-gradient(95% 210% at 0 0, var(--technical-accent-soft), transparent 62%); }
+      .technical-eyebrow { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--technical-accent-line); border-radius: 99px;
+        padding: 4px 9px; background: var(--technical-accent-soft); color: var(--technical-accent); font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+      .technical-eyebrow::before { content: ''; width: 6px; height: 6px; border-radius: 99px; background: currentColor; }
       .technical-article-head h2 { margin-top: 8px; font-size: 25px; }
       .technical-article-head p { margin: 8px 0 0; max-width: 82ch; color: var(--muted); line-height: 1.6; }
       .technical-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
-      .technical-meta li { border: 1px solid var(--line-hair); border-radius: 99px; padding: 3px 8px; background: var(--surface-soft);
+      .technical-meta li { border: 1px solid var(--technical-accent-line); border-radius: 99px; padding: 3px 8px; background: var(--technical-accent-soft);
         color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
-      .technical-content { padding: 24px 26px 32px; display: grid; gap: 17px; }
+      .technical-content { padding: 25px 28px 32px; display: grid; gap: 16px; }
       .technical-content p { margin: 0; max-width: 74ch; color: var(--muted); font-size: 13px; line-height: 1.75; }
       .technical-content ul, .technical-content ol:not(.technical-flow) { margin: 0; padding-left: 22px; display: grid; gap: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
-      .technical-callout { border: 1px solid var(--brand-line); border-left: 3px solid var(--brand); border-radius: 10px;
-        background: var(--brand-soft); padding: 13px 15px; max-width: 96ch; }
+      .technical-content li::marker { color: var(--technical-accent); font-weight: 700; }
+      .technical-reading-block, .technical-visual-block { position: relative; border: 1px solid var(--line-hair); border-radius: 12px; background: var(--surface-soft); }
+      .technical-reading-block { max-width: 92ch; padding: 15px 17px 15px 20px; box-shadow: inset 3px 0 0 var(--technical-accent-line); }
+      .technical-reading-block:hover, .technical-visual-block:hover { border-color: var(--technical-accent-line); }
+      .technical-list-block { padding: 15px 18px 16px; }
+      .technical-block-label { display: flex; align-items: center; gap: 7px; margin-bottom: 11px; color: var(--technical-accent); font-size: 10px;
+        font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+      .technical-block-label::before { content: ''; width: 16px; height: 2px; border-radius: 99px; background: currentColor; }
+      .technical-callout { position: relative; border: 1px solid var(--technical-accent-line); border-left: 3px solid var(--technical-accent); border-radius: 11px;
+        background: var(--technical-accent-soft); padding: 14px 16px; max-width: 96ch; }
       .technical-callout.warning { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-soft); }
       .technical-callout.danger { border-color: var(--red-line); border-left-color: var(--red); background: var(--red-soft); }
-      .technical-callout strong { display: block; margin-bottom: 5px; font-size: 12px; font-weight: 600; }
+      .technical-callout strong { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; color: var(--technical-accent); font-size: 12px; font-weight: 650; }
+      .technical-callout strong::before { content: '●'; font-size: 8px; }
+      .technical-callout.warning strong { color: var(--amber); }
+      .technical-callout.warning strong::before { content: '▲'; }
+      .technical-callout.danger strong { color: var(--red); }
+      .technical-callout.danger strong::before { content: '!'; display: grid; place-items: center; width: 15px; height: 15px; border: 1px solid currentColor; border-radius: 99px; font-size: 9px; }
       .technical-callout span { color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .technical-visual-block { padding: 14px; overflow: hidden; }
       .technical-flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 0; padding: 0; list-style: none; counter-reset: technical-flow; }
-      .technical-flow > li { position: relative; flex: 1 1 145px; min-width: 0; border: 1px solid var(--line-hair); border-radius: 10px;
-        background: var(--surface-soft); padding: 11px 25px 11px 12px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+      .technical-flow > li { position: relative; counter-increment: technical-flow; flex: 1 1 145px; min-width: 0; border: 1px solid var(--technical-accent-line); border-radius: 10px;
+        background: var(--technical-accent-soft); padding: 12px 26px 12px 42px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+      .technical-flow > li::before { content: counter(technical-flow); position: absolute; left: 11px; top: 11px; width: 21px; height: 21px; display: grid;
+        place-items: center; border-radius: 7px; background: var(--technical-accent); color: var(--page); font-size: 10px; font-weight: 700; }
       .technical-flow > li:not(:last-child)::after { content: '›'; position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
         color: var(--brand-strong); font-size: 17px; }
-      .technical-kv { display: grid; grid-template-columns: minmax(140px, .36fr) minmax(0, 1fr); border: 1px solid var(--line-hair);
+      .technical-kv { display: grid; grid-template-columns: minmax(140px, .36fr) minmax(0, 1fr); border: 1px solid var(--technical-accent-line);
         border-radius: 11px; overflow: hidden; }
       .technical-kv dt, .technical-kv dd { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line-hair); font-size: 11.5px; line-height: 1.55; }
-      .technical-kv dt { color: var(--ink); font-weight: 500; background: var(--surface-soft); }
+      .technical-kv dt { color: var(--technical-accent); font-weight: 600; background: var(--technical-accent-soft); }
       .technical-kv dd { color: var(--muted); }
       .technical-kv dt:last-of-type, .technical-kv dd:last-of-type { border-bottom: 0; }
-      .technical-table-wrap { overflow: auto; border: 1px solid var(--line-hair); border-radius: 11px; }
+      .technical-table-wrap { overflow: auto; border: 1px solid var(--technical-accent-line); border-radius: 10px; }
       .technical-table { min-width: 620px; }
-      .technical-table th { position: static; }
+      .technical-table th { position: static; background: var(--technical-accent-soft); color: var(--technical-accent); border-bottom-color: var(--technical-accent-line); }
       .technical-table td { color: var(--muted); line-height: 1.55; vertical-align: top; }
+      .technical-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--technical-accent) 3.5%, transparent); }
+      .technical-table tbody tr:hover td { background: var(--technical-accent-soft); }
       .technical-code { border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface-2) 82%, #000);
         padding: 12px 14px; overflow: auto; }
       .technical-code-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; }
@@ -3620,7 +3671,7 @@
       }
       function renderTechnicalBlock(block) {
         if (!block || typeof block !== 'object') return '';
-        if (block.type === 'paragraph') return `<p>${escapeHtml(block.text)}</p>`;
+        if (block.type === 'paragraph') return `<div class="technical-reading-block technical-prose-block"><p>${escapeHtml(block.text)}</p></div>`;
         if (block.type === 'callout') {
           const tone = ['warning', 'danger'].includes(block.tone) ? block.tone : 'info';
           return `<div class="technical-callout ${tone}"><strong>${escapeHtml(block.title)}</strong><span>${escapeHtml(block.text)}</span></div>`;
@@ -3628,20 +3679,21 @@
         if (block.type === 'list' || block.type === 'steps') {
           const ordered = block.type === 'steps' || block.ordered;
           const tag = ordered ? 'ol' : 'ul';
-          return `<${tag}>${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}>`;
+          const label = block.type === 'steps' ? 'Passo a passo' : 'Pontos principais';
+          return `<div class="technical-reading-block technical-list-block"><div class="technical-block-label">${label}</div><${tag}>${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}></div>`;
         }
         if (block.type === 'flow') {
-          return `<ol class="technical-flow" aria-label="Fluxo em sequência">${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ol>`;
+          return `<div class="technical-visual-block"><div class="technical-block-label">Fluxo de execução</div><ol class="technical-flow" aria-label="Fluxo em sequência">${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ol></div>`;
         }
         if (block.type === 'keyValue') {
-          return `<dl class="technical-kv">${(block.items || []).map((item) => `<dt>${escapeHtml(item?.[0])}</dt><dd>${escapeHtml(item?.[1])}</dd>`).join('')}</dl>`;
+          return `<div class="technical-visual-block"><div class="technical-block-label">Referência rápida</div><dl class="technical-kv">${(block.items || []).map((item) => `<dt>${escapeHtml(item?.[0])}</dt><dd>${escapeHtml(item?.[1])}</dd>`).join('')}</dl></div>`;
         }
         if (block.type === 'table') {
           const tableLabel = `Tabela: ${(block.columns || []).join(', ')}`;
-          return `<div class="technical-table-wrap"><table class="technical-table" aria-label="${escapeHtml(tableLabel)}"><thead><tr>${(block.columns || []).map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${(block.rows || []).map((row) => `<tr>${(row || []).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+          return `<div class="technical-visual-block"><div class="technical-block-label">Matriz técnica</div><div class="technical-table-wrap"><table class="technical-table" aria-label="${escapeHtml(tableLabel)}"><thead><tr>${(block.columns || []).map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${(block.rows || []).map((row) => `<tr>${(row || []).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
         }
         if (block.type === 'code') {
-          return `<div class="technical-code">${block.label ? `<div class="technical-code-label">${escapeHtml(block.label)}</div>` : ''}<code>${escapeHtml(block.text)}</code></div>`;
+          return `<div class="technical-code"><div class="technical-code-label">${escapeHtml(block.label || 'Referência técnica')}</div><code>${escapeHtml(block.text)}</code></div>`;
         }
         return '';
       }
@@ -3700,8 +3752,10 @@
           return;
         }
         index.innerHTML = categories.map((category) => `
-          <h3 class="technical-category">${escapeHtml(category.title)}</h3>
-          ${(category.articles || []).map((article) => `<button class="${article.id === state.technicalArticleId ? 'active' : ''}" data-technical-article="${escapeHtml(article.id)}" ${article.id === state.technicalArticleId ? 'aria-current="page"' : ''}>${escapeHtml(article.title)}</button>`).join('')}
+          <section class="technical-category-group" data-technical-category="${escapeHtml(category.id)}" aria-labelledby="technical-category-${escapeHtml(category.id)}">
+            <h3 id="technical-category-${escapeHtml(category.id)}" class="technical-category">${escapeHtml(category.title)}</h3>
+            ${(category.articles || []).map((article) => `<button class="${article.id === state.technicalArticleId ? 'active' : ''}" data-technical-article="${escapeHtml(article.id)}" ${article.id === state.technicalArticleId ? 'aria-current="page"' : ''}>${escapeHtml(article.title)}</button>`).join('')}
+          </section>
         `).join('');
         index.querySelectorAll('[data-technical-article]').forEach((button) => button.addEventListener('click', () => {
           selectTechnicalArticle(button.dataset.technicalArticle);
@@ -3714,6 +3768,7 @@
         const next = selectedIndex < matchingIds.length - 1 ? technicalArticleById(matchingIds[selectedIndex + 1])?.article : null;
         localStorage.setItem('drac-central-technical-article', article.id);
         updateTechnicalUrl(article.id);
+        articleBox.setAttribute('data-technical-category', category.id);
         articleBox.innerHTML = `
           <header class="technical-article-head">
             <div class="technical-eyebrow">${escapeHtml(category.title)}</div>

@@ -109,6 +109,12 @@ test('a interface do portal oferece navegação, recuperação e acessibilidade 
   assert.match(publicIndex, /@media \(max-width: 560px\)/);
   assert.match(publicIndex, /\.technical-kv \{ grid-template-columns: 1fr; \}/);
   assert.match(publicIndex, /\.technical-flow > li:not\(:last-child\)::after \{ content: '↓'/);
+  assert.match(publicIndex, /data-technical-category=/);
+  assert.match(publicIndex, /technical-category-group/);
+  assert.match(publicIndex, /technical-reading-block/);
+  assert.match(publicIndex, /technical-visual-block/);
+  assert.match(publicIndex, /counter\(technical-flow\)/);
+  assert.match(publicIndex, /Matriz técnica/);
   assert.doesNotMatch(publicIndex, /\.technical-(?:category|meta|code-label)[^{]*\{[^}]*color:\s*var\(--quiet\)/s);
 });
 
