@@ -363,19 +363,31 @@ export class CamerasService {
 
   async update(id: string, dto: UpdateCameraDto) {
     const existing = await this.getCameraOrThrow(id);
-    const normalizedIp = this.assertTestTargetAllowed(
-      dto.ip ?? existing.ip,
-      dto.rtspPort ?? existing.rtspPort,
-    );
+    // Em RTMP push o IP é apenas um marcador inerte criado pelo próprio sistema
+    // (`0.0.0.0`): nunca é discado. Validá-lo como alvo RTSP impedia salvar até
+    // mudanças sem relação com rede (nome, retenção, áudio etc.). A política de
+    // rede continua obrigatória e inalterada para toda câmera RTSP pull.
+    const pushSourced = isPushSourced(existing);
+    const normalizedIp = pushSourced
+      ? existing.ip
+      : this.assertTestTargetAllowed(
+          dto.ip ?? existing.ip,
+          dto.rtspPort ?? existing.rtspPort,
+        );
     const targetOnvifPort = dto.onvifPort ?? existing.onvifPort;
-    if (targetOnvifPort != null) this.assertTestTargetAllowed(normalizedIp, targetOnvifPort);
+    if (!pushSourced && targetOnvifPort != null) {
+      this.assertTestTargetAllowed(normalizedIp, targetOnvifPort);
+    }
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
     const normalizedProfile = this.normalizeProfileToDetected(dto, existing);
     const camera = await this.prisma.camera.update({
       where: { id },
       data: {
         name: dto.name,
-        ip: dto.ip === undefined ? undefined : normalizedIp,
+        // Não aceite transformar o marcador de uma câmera push em configuração
+        // de rede parcialmente preenchida. Ao voltar para RTSP pull, a tela
+        // exige e valida um endereço real antes de salvar.
+        ip: pushSourced ? undefined : dto.ip === undefined ? undefined : normalizedIp,
         rtspPort: dto.rtspPort,
         onvifPort: dto.onvifPort,
         username: dto.username,

@@ -375,12 +375,33 @@ function mapAlarmItems(rawAlarms: any[], cameras: Camera[]): Alarm[] {
 
 const API_URL = getApiBaseUrl();
 const THUMBNAIL_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)'];
+const API_REQUEST_TIMEOUT_MS = 15_000;
+const FULL_LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 30_000] as const;
+let fullLoadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let fullLoadRetryAttempt = 0;
+
+function clearFullLoadRetry() {
+  if (fullLoadRetryTimer) clearTimeout(fullLoadRetryTimer);
+  fullLoadRetryTimer = null;
+  fullLoadRetryAttempt = 0;
+}
+
+function scheduleFullLoadRetry() {
+  if (fullLoadRetryTimer) return;
+  const delay = FULL_LOAD_RETRY_DELAYS_MS[Math.min(fullLoadRetryAttempt, FULL_LOAD_RETRY_DELAYS_MS.length - 1)];
+  fullLoadRetryAttempt += 1;
+  fullLoadRetryTimer = setTimeout(() => {
+    fullLoadRetryTimer = null;
+    void useVmsDataStore.getState().load();
+  }, delay);
+}
 
 function api() {
   const accessToken = useAuthStore.getState().accessToken;
   return axios.create({
     baseURL: API_URL,
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    timeout: API_REQUEST_TIMEOUT_MS,
   });
 }
 
@@ -451,6 +472,7 @@ export const useVmsDataStore = create<VmsDataState>((set, get) => ({
   resourceErrors: {},
   load: async () => {
     if (!useAuthStore.getState().accessToken) {
+      clearFullLoadRetry();
       set({
         cameras: [], users: [], events: [], alarms: [], recordings: [], layouts: [],
         overview: null, system: null, auditLogs: [], operationsTimeline: [], loaded: false,
@@ -458,6 +480,9 @@ export const useVmsDataStore = create<VmsDataState>((set, get) => ({
       });
       return;
     }
+    // Uma retentativa agendada pode coincidir com atualização manual. O fluxo
+    // já em andamento decidirá se deve limpar ou reagendar quando terminar.
+    if (get().isLoading) return;
 
     set({ isLoading: true, error: null });
     const client = api();
@@ -532,6 +557,8 @@ export const useVmsDataStore = create<VmsDataState>((set, get) => ({
       resourceErrors,
       error: criticalErrors.length ? criticalErrors.map((result) => result.error).filter(Boolean).join(' · ') : null,
     });
+    if (Object.keys(resourceErrors).length > 0) scheduleFullLoadRetry();
+    else clearFullLoadRetry();
   },
   refreshOperational: async () => {
     if (!useAuthStore.getState().accessToken || get().isRefreshing || get().isLoading) return;
@@ -580,6 +607,10 @@ export const useVmsDataStore = create<VmsDataState>((set, get) => ({
       resourceErrors,
       error: criticalErrors.length ? criticalErrors.map((result) => result.error).filter(Boolean).join(' · ') : null,
     });
+    // Qualquer falha operacional depois de um deploy dispara uma recarga
+    // COMPLETA. Assim usuários, gravações, auditoria e timeline também voltam;
+    // o polling leve sozinho só recuperava seis recursos e deixava telas vazias.
+    if (criticalErrors.length > 0) scheduleFullLoadRetry();
   },
   updateUserActive: async (id, active) => {
     await api().patch(`/users/${id}`, { isActive: active });

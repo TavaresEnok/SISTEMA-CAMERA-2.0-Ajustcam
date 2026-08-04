@@ -7,6 +7,7 @@ import { type Readable } from 'stream';
 import { CamerasService } from '../cameras/cameras.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { buildRtspUrl, resolveDeliveryRtspProfile } from '../cameras/helpers/rtsp-url.helper';
+import { isPushSourced } from '../cameras/helpers/rtmp-ingest.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { MediamtxProxyService } from './mediamtx-proxy.service';
 import {
@@ -425,14 +426,28 @@ export class FfmpegMjpegService {
       throw new ServiceUnavailableException('FFmpeg não está instalado no servidor.');
     }
 
-    const password = this.cryptoService.decrypt(camera.passwordEncrypted);
-    const primaryUrl = this.buildCameraRtspUrl(camera, password);
-    const fallbackUrl = camera.subtype !== 0 ? this.buildCameraRtspUrl(camera, password, 0) : null;
-    const directUrls = this.expandUrlsWithPortFallbacks(fallbackUrl ? [primaryUrl, fallbackUrl] : [primaryUrl], camera.rtspPort);
-    // Snapshot segue a mesma escolha leve da grade, mas lê DIRETO da câmera.
-    // Nunca inicializa o path selected do MediaMTX para capturar um único frame.
     const gridUrl = await this.getGridPosterSource(cameraId);
-    const urls = Array.from(new Set([...(gridUrl ? [gridUrl] : []), ...directUrls]));
+    let urls: string[];
+    if (isPushSourced(camera)) {
+      // Uma câmera push não possui RTSP direto: ip/usuário/senha são marcadores
+      // inertes. Se ela ainda não publicou, responder 503 é o único resultado
+      // correto — montar rtsp://0.0.0.0 criava FFmpeg inútil e retornava 500.
+      if (!gridUrl) {
+        throw new ServiceUnavailableException('Câmera RTMP ainda não está publicando vídeo.');
+      }
+      urls = [gridUrl];
+    } else {
+      const password = this.cryptoService.decrypt(camera.passwordEncrypted);
+      const primaryUrl = this.buildCameraRtspUrl(camera, password);
+      const fallbackUrl = camera.subtype !== 0 ? this.buildCameraRtspUrl(camera, password, 0) : null;
+      const directUrls = this.expandUrlsWithPortFallbacks(
+        fallbackUrl ? [primaryUrl, fallbackUrl] : [primaryUrl],
+        camera.rtspPort,
+      );
+      // Snapshot segue a mesma escolha leve da grade e pode cair no RTSP direto
+      // apenas para câmeras pull. Nunca inicializa o path selected só para um frame.
+      urls = Array.from(new Set([...(gridUrl ? [gridUrl] : []), ...directUrls]));
+    }
     const transports = this.getTransportCandidates(camera);
     let lastError: unknown = null;
 

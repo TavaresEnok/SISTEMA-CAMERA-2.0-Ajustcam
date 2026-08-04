@@ -1,5 +1,6 @@
 const URL_WITH_CREDENTIALS = /\b((?:rtsp|rtsps|http|https):\/\/)([^\s/@:]+):([^\s/@]+)@/gi;
 const AUTHORITY_WITH_REDACTED_CREDENTIALS = /\b((?:rtsp|rtsps|http|https):\/\/)(?:\*{3}|<redacted>):(?:\*{3}|<redacted>)@/gi;
+const SENSITIVE_QUERY_VALUE = /([?&](?:access[_-]?token|refresh[_-]?token|stream[_-]?token|token|api[_-]?key|signature)=)[^&\s#"'<>]+/gi;
 
 /**
  * Redação em nível de TEXTO: não conhece Error, não descarta stack. É a peça
@@ -12,7 +13,8 @@ const AUTHORITY_WITH_REDACTED_CREDENTIALS = /\b((?:rtsp|rtsps|http|https):\/\/)(
 export function redactSensitiveText(text: string): string {
   return text
     .replace(URL_WITH_CREDENTIALS, '$1<redacted>@')
-    .replace(AUTHORITY_WITH_REDACTED_CREDENTIALS, '$1<redacted>@');
+    .replace(AUTHORITY_WITH_REDACTED_CREDENTIALS, '$1<redacted>@')
+    .replace(SENSITIVE_QUERY_VALUE, '$1<redacted>');
 }
 
 /**

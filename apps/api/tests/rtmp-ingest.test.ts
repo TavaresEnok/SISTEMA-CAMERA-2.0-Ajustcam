@@ -160,9 +160,8 @@ test('a URL de publicação sai pronta nos dois formatos de interface', () => {
   assert.equal(ingestKeyFromPathName(alvo.fullUrl.split(':1935/')[1]), 'a'.repeat(32));
 });
 
-test('domínio do AjustCam cabe com alias Base64URL sem reduzir os 128 bits', () => {
+test('host curto configurado prevalece, mantém porta explícita e os 128 bits', () => {
   const chave = 'c'.repeat(32);
-  const compacta = encodeCompactIngestKey(chave)!;
   const alvo = buildPublishTarget({
     host: 'ajustcam.ajustconsulting.com.br',
     compactHost: '168.194.13.70',
@@ -171,13 +170,27 @@ test('domínio do AjustCam cabe com alias Base64URL sem reduzir os 128 bits', ()
   });
 
   assert.ok(alvo.canonicalFullUrl.length > RTMP_SINGLE_FIELD_MAX_LENGTH);
-  assert.equal(alvo.fullUrl, `rtmp://ajustcam.ajustconsulting.com.br/d/${compacta}`);
+  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/drac/${chave}`);
   assert.equal(alvo.fullUrl.length, RTMP_SINGLE_FIELD_MAX_LENGTH);
   assert.equal(alvo.fullUrlFitsSingleField, true);
   assert.equal(alvo.streamKey, chave, 'o formato separado continua compatível com a chave hexadecimal');
+  assert.equal(ingestKeyFromPathName(alvo.fullUrl.split(':1935/')[1]), chave);
+  assert.ok(alvo.fullUrl.includes(':1935'), 'firmwares legados devem receber a porta explicitamente');
+});
+
+test('sem host curto, domínio do AjustCam usa alias Base64URL sem reduzir os 128 bits', () => {
+  const chave = 'c'.repeat(32);
+  const compacta = encodeCompactIngestKey(chave)!;
+  const alvo = buildPublishTarget({
+    host: 'ajustcam.ajustconsulting.com.br',
+    port: 1935,
+    key: chave,
+  });
+
+  assert.equal(alvo.fullUrl, `rtmp://ajustcam.ajustconsulting.com.br/d/${compacta}`);
+  assert.equal(alvo.fullUrl.length, RTMP_SINGLE_FIELD_MAX_LENGTH);
+  assert.equal(alvo.fullUrlFitsSingleField, true);
   assert.equal(ingestKeyFromPathName(alvo.fullUrl.split('.br/')[1]), chave);
-  assert.ok(!alvo.fullUrl.includes('168.194.13.70'), 'o IP não deve substituir o domínio quando o alias cabe');
-  assert.ok(!alvo.fullUrl.includes(':1935'), 'a porta padrão pode ser omitida sem mudar o destino');
 });
 
 test('IP curto permanece como fallback para um domínio ainda maior que 63 caracteres', () => {

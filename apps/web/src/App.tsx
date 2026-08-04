@@ -294,9 +294,9 @@ function App() {
   }, [revalidate]);
 
   useEffect(() => {
-    if (isAuthenticated) {
-      void loadData();
-    }
+    // Autenticado: carrega tudo. Desautenticado: cancela retentativas pendentes
+    // e remove da memória os dados pertencentes à sessão anterior.
+    void loadData();
   }, [isAuthenticated, loadData]);
 
   // A API ainda não expõe SSE/WebSocket para o estado operacional. Atualizamos

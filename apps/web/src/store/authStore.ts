@@ -40,6 +40,26 @@ interface AuthState {
 const TOKEN_STORAGE_KEY = 'vms.auth.token';
 const USER_STORAGE_KEY = 'nexusguard.auth.user';
 const API_URL = getApiBaseUrl();
+const SESSION_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 30_000] as const;
+let sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionRetryAttempt = 0;
+
+function clearSessionRetry() {
+  if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
+  sessionRetryTimer = null;
+  sessionRetryAttempt = 0;
+}
+
+function scheduleSessionRetry() {
+  if (sessionRetryTimer) return;
+  const delay = SESSION_RETRY_DELAYS_MS[Math.min(sessionRetryAttempt, SESSION_RETRY_DELAYS_MS.length - 1)];
+  sessionRetryAttempt += 1;
+  sessionRetryTimer = setTimeout(() => {
+    sessionRetryTimer = null;
+    const state = useAuthStore.getState();
+    void (state.isAuthenticated ? state.revalidate() : state.bootstrap());
+  }, delay);
+}
 
 function mapRole(role: LoginResponse['user']['role']): UiRole {
   if (role === 'SUPER_ADMIN' || role === 'ADMIN') return 'admin';
@@ -101,6 +121,7 @@ async function refreshWebSession() {
     {
       withCredentials: true,
       headers: { 'X-DRAC-Auth-Mode': 'cookie' },
+      timeout: 15_000,
     },
   );
   return { accessToken: data.accessToken, user: mapUser(data.user) };
@@ -132,6 +153,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         isBootstrapped: true,
       });
+      clearSessionRetry();
     } catch (error) {
       if (isAuthenticationRejection(error)) {
         persistUser(null);
@@ -142,6 +164,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isLoading: false,
           isBootstrapped: true,
         });
+        clearSessionRetry();
         return;
       }
 
@@ -154,6 +177,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         isBootstrapped: true,
       });
+      // O cookie HttpOnly continua intacto. Uma queda breve durante deploy não
+      // deve transformar a sessão válida em uma tela sem dados até o usuário
+      // recarregar manualmente.
+      scheduleSessionRetry();
     }
   },
   revalidate: async () => {
@@ -176,6 +203,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAuthenticated: true,
         isBootstrapped: true,
       });
+      clearSessionRetry();
     } catch (error) {
       if (isAuthenticationRejection(error)) {
         persistUser(null);
@@ -185,10 +213,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isAuthenticated: false,
           isBootstrapped: true,
         });
+        clearSessionRetry();
+      } else {
+        scheduleSessionRetry();
       }
     }
   },
   login: async (email, password) => {
+    clearSessionRetry();
     set({ isLoading: true });
 
     try {
@@ -210,6 +242,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         isBootstrapped: true,
       });
+      clearSessionRetry();
     } catch (error) {
       persistUser(null);
       set({
@@ -223,6 +256,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
   logout: async () => {
+    clearSessionRetry();
     const accessToken = get().accessToken;
     persistUser(null);
     set({

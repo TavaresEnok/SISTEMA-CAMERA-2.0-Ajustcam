@@ -89,6 +89,12 @@ test('security logs: remove todas as credenciais embutidas em URLs', () => {
   assert.equal(sanitized.includes('p%40ss'), false);
   assert.equal(sanitized.includes('token@'), false);
   assert.match(sanitized, /rtsp:\/\/<redacted>@10\.0\.0\.20/);
+
+  const query = sanitizeSensitiveText('/camera-stream/cam/poster?token=segredo-assinado&v=123&api_key=outra-chave');
+  assert.equal(query.includes('segredo-assinado'), false);
+  assert.equal(query.includes('outra-chave'), false);
+  assert.equal(query, '/camera-stream/cam/poster?token=<redacted>&v=123&api_key=<redacted>');
+  assert.equal(sanitizeSensitiveText(query), query, 'redigir duas vezes deve produzir exatamente o mesmo texto');
 });
 
 // O helper acima sempre funcionou — o vazamento real (2026-07-15: 10 linhas com senha de

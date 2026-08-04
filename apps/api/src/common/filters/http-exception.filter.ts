@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { redactSensitiveText } from '../security/sensitive-text.helper';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -26,11 +27,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
       exception instanceof HttpException
         ? exception.getResponse()
         : { message: 'Internal server error' };
+    const safePath = redactSensitiveText(request.url);
 
     const errorResponse = {
       statusCode: status,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path: safePath,
       method: request.method,
       requestId: typeof request.headers['x-request-id'] === 'string' ? request.headers['x-request-id'] : undefined,
       ...(typeof message === 'object' ? message : { message }),
@@ -39,11 +41,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // Log the error
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.url} ${status} requestId=${errorResponse.requestId ?? '-'}`,
+        `${request.method} ${safePath} ${status} requestId=${errorResponse.requestId ?? '-'}`,
         exception instanceof Error ? exception.stack : JSON.stringify(exception),
       );
     } else {
-      this.logger.warn(`${request.method} ${request.url} ${status} requestId=${errorResponse.requestId ?? '-'}`);
+      this.logger.warn(`${request.method} ${safePath} ${status} requestId=${errorResponse.requestId ?? '-'}`);
     }
 
     response.status(status).json(errorResponse);
