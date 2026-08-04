@@ -1326,6 +1326,26 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
   // .ts de origem. Lança em caso de remux/registro inválido para a varredura
   // tentar de novo no próximo ciclo.
   private async remuxAndRegisterTsSegment(cameraId: string, tsPath: string, segmentSeconds: number) {
+    // SEGMENTO VAZIO: descarta em vez de tentar remuxar.
+    //
+    // O ffmpeg cria o arquivo antes de escrever o primeiro byte. Se ele morre
+    // nessa fresta — reinício da API, câmera que cai ao iniciar — sobra um .ts
+    // de 0 byte. Medido: 4 de uma vez, mesmo minuto, 4 câmeras diferentes, num
+    // reinício.
+    //
+    // Sem esta guarda, cada um desses gastava um ffprobe e um ffmpeg para
+    // descobrir o óbvio, imprimia "Invalid data found" no log como se fosse
+    // defeito, e ainda queimava tentativas até a quarentena. Não há vídeo ali:
+    // não existe remux que salve 0 byte.
+    try {
+      if (statSync(tsPath).size === 0) {
+        await unlink(tsPath).catch(() => undefined);
+        this.logger.log(`Segmento vazio descartado (gravação interrompida ao iniciar): ${basename(tsPath)}`);
+        return null;
+      }
+    } catch {
+      // Sem stat não dá para decidir; segue o fluxo normal, que já trata falha.
+    }
     const mp4Path = tsPath.replace(/\.ts$/i, '.mp4');
     if (!existsSync(mp4Path) || statSync(mp4Path).size === 0) {
       const codec = await this.probeLocalVideoCodec(tsPath);
@@ -1553,9 +1573,13 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         }
         try {
           const mp4Path = await this.remuxAndRegisterTsSegment(candidate.cameraId, candidate.filePath, defaultSegmentSeconds);
-          registeredPaths.add(mp4Path);
+          // `null` = segmento vazio, já descartado. Não é recuperação nem falha:
+          // contá-lo como recuperado inflaria o número da varredura.
+          if (mp4Path) {
+            registeredPaths.add(mp4Path);
+            recovered += 1;
+          }
           this.segmentRemuxFailures.delete(candidate.filePath);
-          recovered += 1;
         } catch (error) {
           if (await this.registerSegmentRemuxFailure(candidate.cameraId, candidate.filePath, error)) quarantined += 1;
         }
