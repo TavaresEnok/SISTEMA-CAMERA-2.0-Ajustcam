@@ -59,7 +59,23 @@ const DEFAULT_BATCH = 25;
  * simples materializa o arquivo inteiro no processo — o mesmo que está gravando
  * as câmeras. 200MB é o ponto a partir do qual isso passa a incomodar.
  */
-const MAX_SINGLE_PUT_BYTES = 200 * 1024 * 1024;
+// Acima disto o vídeo é lido do DISCO em pedaços, em vez de ser copiado inteiro
+// para a memória.
+//
+// O arquivo já está no disco — copiá-lo inteiro para a RAM só para enviar é
+// gasto puro. Com o teto em 200 MB, praticamente TODA gravação passava pela
+// memória: medido nesta frota, a média é 12 MB e a maior 61 MB, todas abaixo do
+// teto. Um envio de 60 em paralelo chegaria a 3,6 GB de RAM num servidor com
+// 7,4 GB livres, disputando com a IA, o servidor de vídeo e as gravações.
+//
+// 5 MB é o mínimo que o S3 aceita por pedaço (menos que isso ele recusa a
+// montagem), então é o menor teto possível — e o que mantém o consumo preso a
+// um pedaço por vez, não ao tamanho do arquivo.
+const MAX_SINGLE_PUT_BYTES = envNumber('CLOUD_OFFLOAD_SINGLE_PUT_MB', 5, {
+  min: 5,
+  max: 200,
+  integer: true,
+}) * 1024 * 1024;
 
 export type OffloadResult = {
   skipped: boolean;
