@@ -51,6 +51,9 @@ const POLICY_SETTING_KEY = 'storage.policy';
 
 /** Teto de arquivos por ciclo: evita monopolizar rede/CPU do host de gravação. */
 const DEFAULT_BATCH = 25;
+// Envios em paralelo. 6 satura o link desta frota com folga e não disputa com o
+// vídeo ao vivo; o operador ajusta na Central quando o link comportar mais.
+const DEFAULT_CONCURRENCY = 6;
 
 /**
  * Acima disto o upload vai em MÚLTIPLAS PARTES.
@@ -213,82 +216,105 @@ export class CloudOffloadService {
     let failed = 0;
     let bytesUploaded = 0;
 
-    for (const rec of pendentes) {
-      let caminho: string;
-      try {
-        caminho = ensureFileUnderRoot(this.recordingsRoot(), rec.filePath);
-      } catch {
-        // Caminho fora da raiz é dado inconsistente, não gravação a subir.
-        failed += 1;
-        continue;
-      }
+      // ENVIO EM PARALELO, com teto configurável.
+      //
+      // Sequencial, cada gravação pagava sozinha os ~143ms que este fornecedor
+      // cobra para abrir conexão (ele fecha a cada requisição). Em paralelo esse
+      // custo se sobrepõe. O teto existe porque paralelismo demais não usa mais
+      // internet do que ela tem — só disputa com o vídeo ao vivo.
+      const concorrencia = Math.max(1, Math.min(64, Number(cfg.uploadConcurrency) || DEFAULT_CONCURRENCY));
 
-      let tamanho: number;
-      try {
-        tamanho = (await stat(caminho)).size;
-      } catch {
-        // Arquivo já não existe no disco: nada a subir. Não conta como falha —
-        // é o caso normal de uma gravação que a retenção já removeu.
-        continue;
-      }
-
-      if (tamanho <= 0) continue;
-
-      const key = this.buildCloudKey(rec);
-      try {
-        if (tamanho > MAX_SINGLE_PUT_BYTES) {
-          // Arquivo grande vai em MÚLTIPLAS PARTES, lendo do disco por pedaço.
-          // Ler o arquivo inteiro na memória para um PUT único derrubaria o
-          // processo de gravação — que é o mesmo processo que está atendendo as
-          // câmeras. A leitura por offset mantém o consumo em uma parte por vez.
-          const handle = await open(caminho, 'r');
+      const subirUma = async (rec: (typeof pendentes)[number]): Promise<{ ok: boolean; bytes: number }> => {
+          let caminho: string;
           try {
-            await client.putObjectMultipart(
-              key,
-              async (offset, length) => {
-                const buf = Buffer.alloc(length);
-                await handle.read(buf, 0, length, offset);
-                return buf;
-              },
-              tamanho,
-              { contentType: 'video/mp4' },
-            );
-          } finally {
-            await handle.close();
+            caminho = ensureFileUnderRoot(this.recordingsRoot(), rec.filePath);
+          } catch {
+            // Caminho fora da raiz é dado inconsistente, não gravação a subir.
+            return { ok: false, bytes: 0 };
+            return { ok: false, bytes: 0 };
           }
-        } else {
-          const conteudo = await readFile(caminho);
-          await client.putObject(key, conteudo, 'video/mp4');
-        }
 
-        // CONFIRMAÇÃO: o PUT ter respondido 200 não basta. Relemos o objeto para
-        // garantir que ele existe de fato antes de considerar a gravação salva —
-        // é essa confirmação que autoriza, mais tarde, apagar o local.
-        const confirmado = await client.headObject(key);
-        if (!confirmado.exists) {
-          this.logger.warn(`Upload de ${rec.id} respondeu OK mas o objeto não está no bucket; não será marcado.`);
-          failed += 1;
-          continue;
-        }
+          let tamanho: number;
+          try {
+            tamanho = (await stat(caminho)).size;
+          } catch {
+            // Arquivo já não existe no disco: nada a subir. Não conta como falha —
+            // é o caso normal de uma gravação que a retenção já removeu.
+            return { ok: false, bytes: 0 };
+          }
 
-        await this.prisma.recording.update({
-          where: { id: rec.id },
-          // CARIMBA em qual storage o objeto ficou. Sem isso, trocar de
-          // fornecedor faria o playback procurar esta chave no bucket NOVO e o
-          // acervo sumiria da tela — o defeito que a coluna existe para impedir.
-          // `null` = storage legado (a configuração única), e segue válido.
-          data: { cloudKey: key, cloudUploadedAt: new Date(), cloudStorageId: storageId ?? null },
-        });
-        uploaded += 1;
-        bytesUploaded += tamanho;
-      } catch (error) {
-        failed += 1;
-        const detalhe = error instanceof S3Error ? `${error.code} (${error.status})` : String(error);
-        this.logger.warn(`Falha ao subir gravação ${rec.id}: ${detalhe}`);
-        // Sem marcação no banco, o próximo ciclo tenta de novo. É a
-        // recuperação: nada fica "meio subido" do ponto de vista do sistema.
-      }
-    }
+          if (tamanho <= 0) return { ok: false, bytes: 0 };
+
+          const key = this.buildCloudKey(rec);
+          try {
+            if (tamanho > MAX_SINGLE_PUT_BYTES) {
+              // Arquivo grande vai em MÚLTIPLAS PARTES, lendo do disco por pedaço.
+              // Ler o arquivo inteiro na memória para um PUT único derrubaria o
+              // processo de gravação — que é o mesmo processo que está atendendo as
+              // câmeras. A leitura por offset mantém o consumo em uma parte por vez.
+              const handle = await open(caminho, 'r');
+              try {
+                await client.putObjectMultipart(
+                  key,
+                  async (offset, length) => {
+                    const buf = Buffer.alloc(length);
+                    await handle.read(buf, 0, length, offset);
+                    return buf;
+                  },
+                  tamanho,
+                  { contentType: 'video/mp4' },
+                );
+              } finally {
+                await handle.close();
+              }
+            } else {
+              const conteudo = await readFile(caminho);
+              await client.putObject(key, conteudo, 'video/mp4');
+            }
+
+            // CONFIRMAÇÃO: o PUT ter respondido 200 não basta. Relemos o objeto para
+            // garantir que ele existe de fato antes de considerar a gravação salva —
+            // é essa confirmação que autoriza, mais tarde, apagar o local.
+            const confirmado = await client.headObject(key);
+            if (!confirmado.exists) {
+              this.logger.warn(`Upload de ${rec.id} respondeu OK mas o objeto não está no bucket; não será marcado.`);
+              return { ok: false, bytes: 0 };
+              return { ok: false, bytes: 0 };
+            }
+
+            await this.prisma.recording.update({
+              where: { id: rec.id },
+              // CARIMBA em qual storage o objeto ficou. Sem isso, trocar de
+              // fornecedor faria o playback procurar esta chave no bucket NOVO e o
+              // acervo sumiria da tela — o defeito que a coluna existe para impedir.
+              // `null` = storage legado (a configuração única), e segue válido.
+              data: { cloudKey: key, cloudUploadedAt: new Date(), cloudStorageId: storageId ?? null },
+            });
+        
+            return { ok: true, bytes: tamanho };
+          } catch (error) {
+            const detalhe = error instanceof S3Error ? `${error.code} (${error.status})` : String(error);
+            this.logger.warn(`Falha ao subir gravação ${rec.id}: ${detalhe}`);
+            return { ok: false, bytes: 0 };
+            // Sem marcação no banco, o próximo ciclo tenta de novo. É a
+            // recuperação: nada fica "meio subido" do ponto de vista do sistema.
+          }
+        return { ok: false, bytes: 0 };
+      };
+
+      // Fila com N trabalhadores: cada um puxa a próxima assim que termina a sua.
+      // Dividir em blocos fixos deixaria trabalhador ocioso esperando o vídeo mais
+      // lento do bloco.
+      const fila = [...pendentes];
+      const trabalhadores = Array.from({ length: Math.min(concorrencia, fila.length) }, async () => {
+        for (;;) {
+          const rec = fila.shift();
+          if (!rec) return;
+          const r = await subirUma(rec);
+          if (r.ok) { uploaded += 1; bytesUploaded += r.bytes; } else { failed += 1; }
+        }
+      });
+      await Promise.all(trabalhadores);
 
     return { uploaded, failed, bytesUploaded };
   }

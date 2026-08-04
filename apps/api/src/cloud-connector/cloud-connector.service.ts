@@ -35,6 +35,8 @@ export type CloudStorageConfig = {
   enabled: true;
   /** Nome que o operador deu na Central. Sem ele, todo storage vira "Storage principal". */
   name: string;
+  /** Quantos envios em paralelo. Escolha do operador, feita na Central. */
+  uploadConcurrency: number;
   /** `tier` = grava local e envia; `mount` = grava direto no bucket montado. */
   mode: 'tier' | 'mount';
   provider: string;
@@ -786,6 +788,13 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       // resolvedor rotulava TODOS os storages de "Storage principal" — depois
       // de uma troca, o antigo e o novo ficavam idênticos na tela.
       name: text('name'),
+      // Paralelismo do envio, escolhido na Central. Fora da faixa cai no padrão:
+      // valor absurdo vindo de fora não pode virar pico de memória nem afogar o
+      // link do cliente.
+      uploadConcurrency: (() => {
+        const n = Number(source.uploadConcurrency);
+        return Number.isFinite(n) && n >= 1 && n <= 64 ? Math.round(n) : 6;
+      })(),
       mode,
       provider: text('provider') || 's3',
       endpoint,

@@ -201,7 +201,7 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
    */
   private comOperacao(linha: StorageResolvido | null, config: StorageResolvido): StorageResolvido | null {
     if (!linha) return null;
-    return { ...linha, mode: config.mode, localWindowHours: config.localWindowHours };
+    return { ...linha, mode: config.mode, localWindowHours: config.localWindowHours, uploadConcurrency: config.uploadConcurrency };
   }
 
   private async reconciliar(config: StorageResolvido): Promise<StorageResolvido | null> {
@@ -383,6 +383,7 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
       // aqui decide apagar arquivo. Para o storage ATIVO, o modo e a janela
       // reais vêm da configuração provisionada — veja `comOperacao`.
       mode: 'tier',
+      uploadConcurrency: 6,
       provider: registro.provider,
       endpoint: registro.endpoint,
       region: registro.region,

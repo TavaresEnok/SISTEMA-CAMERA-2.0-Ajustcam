@@ -2476,6 +2476,10 @@
               <!-- O rótulo antigo era "Janela local ANTES de enviar", e mentia: o
                    upload acontece assim que o segmento fecha. O que a janela
                    controla é por quanto tempo a cópia local SOBREVIVE. -->
+              <div class="field"><label for="cloud-concurrency">Envios em paralelo</label>
+                <input id="cloud-concurrency" type="number" min="1" max="64" value="${Number(c.uploadConcurrency) || 6}"/>
+                <small class="subtext">Quantos vídeos sobem ao mesmo tempo. Mais que isso não usa internet além da que existe — só disputa com o vídeo ao vivo.</small>
+              </div>
               <div class="field"><label for="cloud-window">Manter no disco após enviar (h)</label><input id="cloud-window" type="number" min="1" max="720" value="${Number(c.localWindowHours) || 24}"/><small class="subtext">Só vale no modo Camada: o playback desse período vem do disco.</small></div>
               <div class="field"><label for="cloud-pathstyle">Estilo de URL</label>
                 <select id="cloud-pathstyle">
@@ -2820,6 +2824,7 @@
           // Em branco = manter a credencial já salva (o servidor entende).
           secretAccessKey: body.querySelector('#cloud-secret').value,
           mode: body.querySelector('#cloud-mode').value,
+          uploadConcurrency: Number(body.querySelector('#cloud-concurrency')?.value) || 6,
           localWindowHours: Number(body.querySelector('#cloud-window').value) || 24,
           forcePathStyle: body.querySelector('#cloud-pathstyle').value === 'true',
         };

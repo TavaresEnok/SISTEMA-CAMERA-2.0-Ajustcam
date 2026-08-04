@@ -10,6 +10,7 @@ import { PrismaModule } from '../common/prisma/prisma.module';
 import { RecordingsController } from './recordings.controller';
 import { RecordingProcessManagerService } from './recording-process-manager.service';
 import { RecordingsService } from './recordings.service';
+import { CLOUD_OFFLOAD_QUEUE } from '../jobs/queues/cloud-offload.queue';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
 import { RECORDING_EXPORT_QUEUE } from '../jobs/queues/recording-export.queue';
 import { InvestigationsModule } from '../investigations/investigations.module';
@@ -25,7 +26,9 @@ import { RetentionService } from './retention.service';
     AuditModule,
     AccessControlModule,
     InvestigationsModule,
-    BullModule.registerQueue({ name: THUMBNAIL_GENERATION_QUEUE }, { name: RECORDING_EXPORT_QUEUE }),
+    // A fila de envio entra aqui para o gatilho por segmento fechado poder
+    // enfileirar sem esperar a rodada do relógio.
+    BullModule.registerQueue({ name: THUMBNAIL_GENERATION_QUEUE }, { name: RECORDING_EXPORT_QUEUE }, { name: CLOUD_OFFLOAD_QUEUE }),
   ],
   controllers: [RecordingsController],
   providers: [RecordingProcessManagerService, RecordingsService, RetentionService],

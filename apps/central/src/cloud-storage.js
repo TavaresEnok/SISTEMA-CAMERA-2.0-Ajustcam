@@ -39,6 +39,7 @@ const DEFAULT_CONFIG = Object.freeze({
   bucket: '',
   prefix: '',
   accessKeyId: '',
+  uploadConcurrency: 6,
   /** Janela local antes do offload, em horas (só no modo `tier`). */
   localWindowHours: 24,
   forcePathStyle: true,
@@ -130,6 +131,10 @@ function normalizeCloudStorage(input) {
     bucket: String(source.bucket ?? '').trim(),
     prefix: String(source.prefix ?? '').trim(),
     accessKeyId: String(source.accessKeyId ?? '').trim(),
+    // Envios em paralelo. Fora da faixa cai no padrão: o teto existe porque
+    // paralelismo demais não usa mais internet do que há — só disputa com o
+    // vídeo ao vivo e multiplica memória no servidor do cliente.
+    uploadConcurrency: readInt(source.uploadConcurrency, 6, { min: 1, max: 64 }),
     secretAccessKeyEncrypted: String(source.secretAccessKeyEncrypted ?? ''),
     localWindowHours: readInt(source.localWindowHours, DEFAULT_CONFIG.localWindowHours, { min: 1, max: 24 * 30 }),
     forcePathStyle: readBool(source.forcePathStyle, DEFAULT_CONFIG.forcePathStyle),
@@ -240,6 +245,7 @@ function buildInstallationPayload(config) {
     prefix: c.prefix,
     accessKeyId: c.accessKeyId,
     secretAccessKey: secret,
+    uploadConcurrency: c.uploadConcurrency,
     localWindowHours: c.localWindowHours,
     forcePathStyle: c.forcePathStyle,
     updatedAt: c.updatedAt,

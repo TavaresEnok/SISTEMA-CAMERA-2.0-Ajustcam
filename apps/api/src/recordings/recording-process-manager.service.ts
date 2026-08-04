@@ -39,6 +39,7 @@ import {
   DEFAULT_STDERR_RING_LINES,
   type FfmpegStderrRing,
 } from './helpers/ffmpeg-stderr-ring.helper';
+import { CLOUD_OFFLOAD_QUEUE } from '../jobs/queues/cloud-offload.queue';
 import { THUMBNAIL_GENERATION_QUEUE } from '../jobs/queues/thumbnail-generation.queue';
 
 const execFileAsync = promisify(execFile);
@@ -195,6 +196,7 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     private readonly prisma: PrismaService,
     private readonly commercialPolicy: CommercialPolicyService,
     @InjectQueue(THUMBNAIL_GENERATION_QUEUE) private readonly thumbnailQueue: Queue,
+    @InjectQueue(CLOUD_OFFLOAD_QUEUE) private readonly cloudOffloadQueue: Queue,
   ) {
     this.recordingsRoot = this.configService.get<string>('recordingsRoot') ?? './storage/recordings';
     this.recordingFormat = this.configService.get<string>('ffmpegRecordingFormat') ?? 'mp4';
@@ -1277,6 +1279,30 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       // A miniatura também será recuperada sob demanda quando a gravação for listada.
       this.logger.warn(`Falha ao enfileirar thumbnail recording=${recording.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
+
+      // ENVIO PARA A NUVEM ASSIM QUE O SEGMENTO FECHA.
+      //
+      // Antes o vídeo esperava a próxima rodada do relógio — até 15 minutos
+      // parado no disco, sendo um arquivo que já estava pronto. Numa frota que
+      // produz ~312 gravações por hora, isso é fila permanente e disco cheio.
+      //
+      // `jobId` por janela de 10s faz o BullMQ descartar pedidos repetidos: 26
+      // câmeras fechando segmento juntas enfileiravam 26 varreduras idênticas.
+      // Uma basta — ela pega tudo que estiver pronto.
+      //
+      // A rodada periódica CONTINUA existindo como rede de segurança, para o que
+      // falhou, o que chegou durante uma queda e o que este gatilho perdeu.
+      // Trocar uma pela outra deixaria buraco.
+      try {
+        await this.cloudOffloadQueue.add(
+          'offload',
+          {},
+          { jobId: `offload-${Math.floor(Date.now() / 10_000)}`, removeOnComplete: true, removeOnFail: 20 },
+        );
+      } catch (error) {
+        // Falhar aqui não pode atrapalhar a gravação: a rodada periódica pega.
+        this.logger.warn(`Falha ao enfileirar envio recording=${recording.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
   }
 
   private async probeLocalVideoCodec(filePath: string): Promise<string | null> {
