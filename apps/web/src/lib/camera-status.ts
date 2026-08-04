@@ -65,3 +65,39 @@ export function atividadeAgora(status: string): string | null {
       return null;
   }
 }
+
+/**
+ * A COR do selo de conexão. Verde e vermelho, e nada mais.
+ *
+ * Antes a cor vinha do status CRU, então o rótulo já dizia "Online" enquanto o
+ * fundo continuava vermelho (gravando) ou âmbar (movimento): três "Online" com
+ * três cores, dois deles gritando alarme sem haver alarme.
+ *
+ * Verde e vermelho são reservados a conectado/caído. Estado intermediário fica
+ * NEUTRO — pintar "Sem sinal" de vermelho equipara um problema de sinal a uma
+ * câmera fora do ar, e quem olha a lista não consegue mais priorizar.
+ */
+export const CLASSE_CONEXAO: Record<EstadoConexao, string> = {
+  online: 'bg-[hsl(var(--status-online)_/_0.12)] text-[hsl(var(--status-online))] border-[hsl(var(--status-online)_/_0.3)]',
+  offline: 'bg-[hsl(var(--destructive)_/_0.1)] text-[hsl(var(--destructive))] border-[hsl(var(--destructive)_/_0.3)]',
+  sem_sinal: 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] border-border',
+  manutencao: 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] border-border',
+};
+
+/** O ponto colorido, mesma regra do selo. */
+export const PONTO_CONEXAO: Record<EstadoConexao, string> = {
+  online: 'bg-[hsl(var(--status-online))]',
+  offline: 'bg-[hsl(var(--destructive))]',
+  sem_sinal: 'bg-[hsl(var(--muted-foreground))]',
+  manutencao: 'bg-[hsl(var(--muted-foreground))]',
+};
+
+/**
+ * A cor do MODO de gravação. Deliberadamente sem verde, vermelho ou âmbar.
+ *
+ * Modo é configuração, não incidente. Pintá-lo com as cores de alerta faz uma
+ * lista de câmeras saudáveis parecer um painel de emergência — e quando algo
+ * realmente quebrar, ninguém vai notar no meio do vermelho.
+ */
+export const CLASSE_MODO_GRAVACAO =
+  'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] border-border';

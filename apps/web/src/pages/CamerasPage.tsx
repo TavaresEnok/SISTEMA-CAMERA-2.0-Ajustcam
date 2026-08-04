@@ -38,7 +38,7 @@ import {
   parsePreviewFrame,
   type PreviewFrame,
 } from '../lib/camera-preview-frame';
-import { ROTULO_CONEXAO, atividadeAgora, estadoConexao } from '../lib/camera-status';
+import { CLASSE_CONEXAO, CLASSE_MODO_GRAVACAO, PONTO_CONEXAO, ROTULO_CONEXAO, estadoConexao } from '../lib/camera-status';
 const STATUSES = ['all', 'online', 'recording', 'motion', 'alarm', 'offline', 'no_signal', 'maintenance'] as const;
 const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
   all: 'Todos os status',
@@ -1473,7 +1473,7 @@ export default function CamerasPage() {
             <table className="w-full text-xs border-collapse">
               <thead className="sticky top-0 bg-card z-10">
                 <tr className="border-b border-border">
-                  {['Câmera', 'Local', 'IP', 'Status', 'Gravação', 'Ações'].map(h => (
+                  {['Câmera', 'IP', 'Status', 'Gravação', 'Ações'].map(h => (
                     <th key={h} className="px-3 py-2.5 text-left font-medium text-[hsl(var(--muted-foreground))] whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -1502,7 +1502,6 @@ export default function CamerasPage() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-3 py-2.5 text-[hsl(var(--muted-foreground))]">{cam.zone}</td>
                     <td className="px-3 py-2.5 font-mono text-[11px] text-[hsl(var(--muted-foreground))] whitespace-nowrap">{cam.ipAddress}</td>
                     <td className="px-3 py-2.5">
                       <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${STATUS_BADGE[cam.status] ?? STATUS_BADGE.offline}`}>
@@ -1511,15 +1510,10 @@ export default function CamerasPage() {
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex flex-col gap-1">
-                        <span className={`inline-flex w-fit items-center rounded-md border px-1.5 py-0.5 text-[10px] ${recordingModeCopy.className}`}>
+                        <span className={`inline-flex w-fit items-center rounded-md border px-1.5 py-0.5 text-[10px] ${CLASSE_MODO_GRAVACAO}`}>
                           {recordingModeCopy.label}
                         </span>
                         <span className="text-[10px] text-[hsl(var(--muted-foreground))]">{cam.retentionDays} dias</span>
-                        {/* A atividade do INSTANTE mora aqui, junto do modo — não na coluna de
-                            conexão, onde ela competia com "Online" como se fosse alternativa. */}
-                        {atividadeAgora(cam.status) && (
-                          <span className="text-[10px] text-[hsl(var(--status-online))]">{atividadeAgora(cam.status)}</span>
-                        )}
                       </div>
                     </td>
                     <td className="px-3 py-2.5">
@@ -1561,7 +1555,7 @@ export default function CamerasPage() {
                         className="absolute inset-0 h-full w-full object-cover"
                       />
                     )}
-                    <div className={`absolute top-0 inset-x-0 h-[2.5px] ${STATUS_DOT[cam.status] ?? STATUS_DOT.offline}`} />
+                    <div className={`absolute top-0 inset-x-0 h-[2.5px] ${PONTO_CONEXAO[estadoConexao(cam.status)]}`} />
                     <div className="absolute top-2 left-2 z-10">
                       <span className="rounded border border-white/10 bg-black/35 px-1.5 py-px font-mono text-[9px] text-white/65">{cam.code}</span>
                     </div>
@@ -1595,17 +1589,15 @@ export default function CamerasPage() {
                       <div className="min-w-0">
                         <div className="text-[13px] font-semibold truncate">{cam.name}</div>
                         <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[cam.status] ?? STATUS_DOT.offline}`} />
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${PONTO_CONEXAO[estadoConexao(cam.status)]}`} />
                           <span className="text-[10px] text-muted-foreground">{ROTULO_CONEXAO[estadoConexao(cam.status)]}</span>
                         </div>
                       </div>
-                      <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${isDisabled ? 'border-amber-500/40 bg-amber-500/10 text-amber-500' : STATUS_BADGE[cam.status] ?? STATUS_BADGE.offline}`}>
-                        {isDisabled ? 'Desativada' : (atividadeAgora(cam.status) ?? formatRecordingMode(cam.recordingMode))}
+                      <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${isDisabled ? 'border-amber-500/40 bg-amber-500/10 text-amber-500' : CLASSE_CONEXAO[estadoConexao(cam.status)]}`}>
+                        {isDisabled ? 'Desativada' : ROTULO_CONEXAO[estadoConexao(cam.status)]}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] text-muted-foreground font-mono">
-                      <span className="truncate">{cam.zone}</span>
-                      <span className="opacity-40">·</span>
                       <span>{cam.ipAddress}</span>
                     </div>
                     <div className="flex items-center gap-2 pt-0.5" onClick={(e) => e.stopPropagation()}>
@@ -1663,7 +1655,7 @@ export default function CamerasPage() {
                   <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${STATUS_BADGE[liveCam.status] ?? STATUS_BADGE.offline}`}>
                     {formatCameraStatus(liveCam.status)}
                   </span>
-                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${recordingModeCopy.className}`}>
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${CLASSE_MODO_GRAVACAO}`}>
                     {recordingModeCopy.label}
                   </span>
                 </div>
@@ -1671,7 +1663,6 @@ export default function CamerasPage() {
               <div className="space-y-2 text-xs">
                 {[
                   ['Código', liveCam.code],
-                  ['Local', liveCam.zone],
                   ['Unidade', liveCam.building],
                   ['Andar', liveCam.floor],
                   ['Gravação', recordingModeCopy.label],
