@@ -120,6 +120,11 @@ export class UpdateCameraDto {
   @Min(1)
   retentionDays?: number;
 
+  /** Segue a retenção do grupo? Câmera nova nasce seguindo. */
+  @IsOptional()
+  @IsBoolean()
+  retentionFollowsGroup?: boolean;
+
   @IsOptional()
   @IsString()
   @IsIn(RTSP_TRANSPORTS)

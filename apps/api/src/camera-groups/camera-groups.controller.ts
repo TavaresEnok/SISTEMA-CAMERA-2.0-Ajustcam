@@ -81,7 +81,7 @@ export class CameraGroupsController {
     @Req() req: Request,
   ) {
     // Sobrescreve a retenção de TODAS as câmeras do grupo (a UI avisa antes).
-    const retentionDays = Math.max(1, Math.min(3650, Math.floor(Number(body?.retentionDays ?? 7)) || 7));
+    const retentionDays = Math.max(1, Math.min(3650, Math.floor(Number(body?.retentionDays ?? 3)) || 3));
     const result = await this.cameraGroupsService.setRetentionForGroup(id, retentionDays);
     await this.auditService.log(user.id, 'camera_group.retention_set', 'CameraGroup', id, { retentionDays, affected: result.affected }, req);
     return result;

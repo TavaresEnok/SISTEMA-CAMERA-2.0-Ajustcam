@@ -221,6 +221,9 @@ export class CamerasService {
         recordingEnabled: dto.recordingEnabled ?? true,
         recordingMode: dto.recordingMode ?? ((dto.recordingEnabled ?? true) ? 'continuous' : 'manual'),
         retentionDays: dto.retentionDays ?? this.getDefaultRetentionDays(),
+        // Câmera nova nasce seguindo o grupo: herdar a política é o padrão são,
+        // e um número próprio que ninguém revisita é como se acumula exceção.
+        retentionFollowsGroup: dto.retentionFollowsGroup ?? true,
         preferredRtspTransport: dto.preferredRtspTransport ?? 'tcp',
         preferredLiveProtocol: this.normalizeLiveProtocol(dto.preferredLiveProtocol) === 'mjpeg'
           ? 'webrtc'
@@ -394,6 +397,7 @@ export class CamerasService {
         recordingEnabled: dto.recordingEnabled !== undefined ? dto.recordingEnabled : existing.recordingEnabled,
         recordingMode: dto.recordingMode,
         retentionDays: dto.retentionDays,
+        retentionFollowsGroup: dto.retentionFollowsGroup,
         preferredRtspTransport: dto.preferredRtspTransport,
         preferredLiveProtocol: this.normalizeLiveProtocol(dto.preferredLiveProtocol) === 'mjpeg'
           ? 'webrtc'
@@ -1479,6 +1483,9 @@ export class CamerasService {
         recordingEnabled: dto.recordingEnabled ?? true,
         recordingMode: dto.recordingMode ?? ((dto.recordingEnabled ?? true) ? 'continuous' : 'manual'),
         retentionDays: dto.retentionDays ?? this.getDefaultRetentionDays(),
+        // Câmera nova nasce seguindo o grupo: herdar a política é o padrão são,
+        // e um número próprio que ninguém revisita é como se acumula exceção.
+        retentionFollowsGroup: dto.retentionFollowsGroup ?? true,
         // RTMP clássico entrega H.264 — não há sonda a fazer nem codec a adivinhar.
         streamVideoCodec: 'h264',
         detectedVideoCodec: 'h264',
@@ -2356,7 +2363,7 @@ export class CamerasService {
   }
 
   private getDefaultRetentionDays() {
-    return this.configService.get<number>('retentionDays') ?? 7;
+    return this.configService.get<number>('retentionDays') ?? 3;
   }
 
   private normalizeProfileToDetected(

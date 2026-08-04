@@ -82,11 +82,22 @@ export class CameraGroupsService {
    */
   async setRetentionForGroup(groupId: string, retentionDays: number) {
     await this.ensureExists(groupId);
-    const result = await this.prisma.camera.updateMany({
-      where: { groupId },
+    // Grava no GRUPO, não em cada câmera.
+    //
+    // Antes isto era um `updateMany` sobre `Camera`: aplicar a retenção do grupo
+    // APAGAVA o número individual de todas elas. As exceções ajustadas à mão se
+    // perdiam a cada mexida no grupo, sem volta — e o operador só descobria
+    // quando o acervo de uma câmera específica encurtava sozinho.
+    //
+    // Agora o grupo guarda a política e cada câmera decide se a segue. Quem
+    // segue passa a valer o número novo na hora; quem é exceção não é tocada.
+    await this.prisma.cameraGroup.update({
+      where: { id: groupId },
       data: { retentionDays },
     });
-    return { groupId, retentionDays, affected: result.count };
+    const seguindo = await this.prisma.camera.count({ where: { groupId, retentionFollowsGroup: true } });
+    const excecoes = await this.prisma.camera.count({ where: { groupId, retentionFollowsGroup: false } });
+    return { groupId, retentionDays, affected: seguindo, excecoes };
   }
 
   async addCamera(groupId: string, cameraId: string) {

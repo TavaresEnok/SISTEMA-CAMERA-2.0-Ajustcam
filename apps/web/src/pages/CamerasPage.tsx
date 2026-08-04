@@ -242,6 +242,7 @@ function WizardModal({
     recordingEnabled: boolean;
     recordingMode: 'continuous' | 'motion' | 'schedule' | 'manual';
     retentionDays: number;
+    retentionFollowsGroup?: boolean;
     preferredRtspTransport: 'tcp' | 'udp';
     preferredLiveProtocol: PreferredLiveProtocol;
     streamVideoCodec: VideoCodec;
@@ -374,7 +375,8 @@ function WizardModal({
     siteId: '',
     areaId: '',
     recordingMode: 'continuous',
-    retentionDays: '90',
+    retentionDays: '3',
+    retentionFollowsGroup: true,
     preferredRtspTransport: 'tcp',
     preferredLiveProtocol: 'webrtc',
     streamVideoCodec: 'original',
@@ -490,6 +492,7 @@ function WizardModal({
         recordingEnabled: form.recordingMode !== 'manual',
         recordingMode: form.recordingMode as 'continuous' | 'motion' | 'schedule' | 'manual',
         retentionDays: Number(form.retentionDays),
+        retentionFollowsGroup: form.retentionFollowsGroup,
         preferredRtspTransport: form.preferredRtspTransport as 'tcp' | 'udp',
         preferredLiveProtocol: normalizePreferredLiveProtocol(form.preferredLiveProtocol),
         streamVideoCodec: normalizeVideoCodec(form.streamVideoCodec),
@@ -842,7 +845,24 @@ function WizardModal({
                   </div>
                   <div className="space-y-1">
                     <label className="text-[11px] font-medium text-[hsl(var(--muted-foreground))]">Retenção</label>
-                    <input value={form.retentionDays} onChange={(e) => updateField('retentionDays', e.target.value)} className="w-full h-9 px-3 rounded border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-[hsl(var(--primary))]" />
+                    <input value={form.retentionDays} onChange={(e) => updateField('retentionDays', e.target.value)} disabled={form.retentionFollowsGroup} className="w-full h-9 px-3 disabled:opacity-45 rounded border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-[hsl(var(--primary))]" />
+                    {/* Seguir o grupo é o padrão. O campo de dias só faz sentido quando a
+                        câmera é exceção — deixá-lo editável seguindo o grupo faria o
+                        operador digitar um número que o sistema ignora. */}
+                    <label className="col-span-2 flex cursor-pointer items-start gap-2 text-[11px]">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={form.retentionFollowsGroup}
+                        onChange={(e) => updateField('retentionFollowsGroup', e.target.checked)}
+                      />
+                      <span>
+                        Seguir a retenção do grupo
+                        <span className="mt-0.5 block text-[hsl(var(--muted-foreground))]">
+                          Desligue para esta câmera guardar por um prazo próprio.
+                        </span>
+                      </span>
+                    </label>
                   </div>
                   <div className="col-span-2 rounded border border-border bg-card px-3 py-2 text-[11px] text-[hsl(var(--muted-foreground))]">
                     O grid usa no máximo 720p em 20 FPS. Ao abrir a câmera sozinha, o DRAC mostra a resolução original do perfil live. A gravação usa o perfil principal da câmera e preserva o FPS da origem.

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { existsSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
+import { retencaoEfetiva } from './helpers/retencao-efetiva.helper';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
@@ -381,10 +382,24 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * e é o ÚNICO ponto onde o custo depende do cadastro — não do acervo.
    */
   private async loadRetentionGroups(globalDays: number): Promise<RetentionGroup[]> {
-    const cameras = await this.prisma.camera.findMany({ select: { id: true, retentionDays: true } });
+    // O GRUPO entra na conta: a câmera pode seguir a política dele em vez de
+    // carregar um número próprio. Sem trazer o grupo aqui, "seguir o grupo"
+    // seria uma promessa da tela que a expiração não cumpriria.
+    const cameras = await this.prisma.camera.findMany({
+      select: {
+        id: true,
+        retentionDays: true,
+        retentionFollowsGroup: true,
+        group: { select: { retentionDays: true } },
+      },
+    });
     const byDays = new Map<number, string[]>();
     for (const camera of cameras) {
-      const days = camera.retentionDays ?? globalDays;
+      const days = retencaoEfetiva({
+        retentionDays: camera.retentionDays,
+        retentionFollowsGroup: camera.retentionFollowsGroup,
+        grupoRetentionDays: camera.group?.retentionDays ?? null,
+      }, globalDays);
       const bucket = byDays.get(days);
       if (bucket) bucket.push(camera.id);
       else byDays.set(days, [camera.id]);
@@ -810,7 +825,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       ? configuredDays
       // Dias de retenção NUNCA podem virar NaN/0 por typo: 0 apagaria TUDO na
       // varredura seguinte. Piso de 1 dia, e valor inválido cai no default.
-      : envNumber('RECORDING_RETENTION_DAYS', Number(this.config.get<number>('retentionDays')) || 7, {
+      : envNumber('RECORDING_RETENTION_DAYS', Number(this.config.get<number>('retentionDays')) || 3, {
         min: 1,
         integer: true,
         onInvalid: (m) => this.logger.warn(m),

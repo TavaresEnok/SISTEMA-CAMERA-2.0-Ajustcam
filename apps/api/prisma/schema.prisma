@@ -98,7 +98,11 @@ model Camera {
   groupId                String?
   recordingEnabled       Boolean      @default(true)
   recordingMode          String       @default("continuous")
-  retentionDays          Int          @default(7)
+  /// Dias que ESTA câmera guarda, quando NÃO segue o grupo.
+  retentionDays          Int          @default(3)
+  /// Segue a retenção do grupo? Nasce ligado: câmera nova herda a política do
+  /// grupo em vez de carregar um número próprio que ninguém revisita.
+  retentionFollowsGroup  Boolean      @default(true)
   preferredRtspTransport String       @default("tcp")
   preferredLiveProtocol  String       @default("webrtc")
   /// COMO O VÍDEO CHEGA ATÉ NÓS.
@@ -580,6 +584,9 @@ model CameraGroup {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  /// Retenção do GRUPO. Todo grupo nasce com um número — grupo sem valor
+  /// deixaria o toggle "seguir o grupo" apontando para o nada.
+  retentionDays Int      @default(3)
   cameras     Camera[]
   permissions CameraPermission[]
 

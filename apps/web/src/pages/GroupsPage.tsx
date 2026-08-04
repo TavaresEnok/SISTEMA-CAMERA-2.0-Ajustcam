@@ -105,7 +105,7 @@ export default function GroupsPage() {
   const [granting, setGranting] = useState(false);
   const [alarmsSaving, setAlarmsSaving] = useState(false);
   const [retentionOpen, setRetentionOpen] = useState(false);
-  const [retentionValue, setRetentionValue] = useState('7');
+  const [retentionValue, setRetentionValue] = useState('3');
   const [retentionSaving, setRetentionSaving] = useState(false);
 
   const selGroup = groups.find((g) => g.id === selGroupId) ?? groups[0] ?? null;
@@ -687,7 +687,7 @@ export default function GroupsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Retenção do grupo — sobrescreve o valor individual de cada câmera. */}
+      {/* Retenção do grupo. Vale para quem segue o grupo; exceções ficam de pé. */}
       <Dialog open={retentionOpen} onOpenChange={(o) => !o && setRetentionOpen(false)}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
@@ -704,15 +704,18 @@ export default function GroupsPage() {
               className="text-sm font-mono"
               autoFocus
             />
-            <p className="text-[12px] rounded-lg border p-3 leading-relaxed" style={{ borderColor: 'hsl(var(--warning) / 0.4)', background: 'hsl(var(--warning) / 0.08)', color: 'hsl(var(--warning-foreground, var(--foreground)))' }}>
-              ⚠️ Isto vai <strong>sobrescrever</strong> a retenção individual de{' '}
-              <strong>{selGroup?.cameras.length ?? 0} câmera(s)</strong> do grupo{' '}
-              <strong>{selGroup?.name}</strong>. Cada câmera passará a manter as gravações por {Math.max(1, Math.min(3650, Math.floor(Number(retentionValue)) || 7))} dia(s).
-            </p>
+            <p className="text-[12px] rounded-lg border p-3 leading-relaxed" style={{ borderColor: 'hsl(var(--border))' }}>
+                Vale para as câmeras deste grupo que estão marcadas como{' '}
+                <strong>seguir a retenção do grupo</strong>. Câmeras com prazo próprio não são
+                tocadas — antes elas eram sobrescritas e o ajuste se perdia.
+                <span className="mt-2 block text-[hsl(var(--muted-foreground))]">
+                  Encurtar o prazo apaga o que passar dele na próxima varredura, que roda de hora em hora.
+                </span>
+              </p>
             <div className="flex gap-2 pt-2">
               <Button variant="ghost" size="sm" onClick={() => setRetentionOpen(false)}>Cancelar</Button>
               <Button size="sm" className="flex-1 justify-center" disabled={retentionSaving} onClick={() => void setGroupRetention()}>
-                {retentionSaving ? 'Aplicando...' : <><HardDrive className="w-3.5 h-3.5 mr-1.5" /> Aplicar a todas</>}
+                {retentionSaving ? 'Aplicando...' : <><HardDrive className="w-3.5 h-3.5 mr-1.5" /> Aplicar ao grupo</>}
               </Button>
             </div>
           </div>
