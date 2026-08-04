@@ -1,3 +1,4 @@
+import { CameraStatus } from '@prisma/client';
 import { BadRequestException, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { CamerasService } from '../cameras/cameras.service';
 import { AiService } from './ai.service';
@@ -205,7 +206,19 @@ export class AiManagerService implements OnModuleInit {
         const settings = await this.getSettings();
         if (settings.enabled && settings.mode === 'motion') {
           const armed = await this.prisma.camera.findMany({
-            where: { recordingMode: 'motion', motionTrigger: 'SYSTEM', enabled: true },
+            // OFFLINE fica de fora. Sem isto, a IA abria captura para uma câmera que
+            // não responde e entrava em laço de reconexão a cada 30s — CPU e log
+            // gastos num endereço que não vai atender, e o serviço inteiro
+            // reportando `degraded` por causa dela.
+            //
+            // Quando a câmera volta, este mesmo ciclo a religa em até 5 minutos: não
+            // é desistir dela, é parar de bater na porta fechada.
+            where: {
+              recordingMode: 'motion',
+              motionTrigger: 'SYSTEM',
+              enabled: true,
+              status: { not: CameraStatus.OFFLINE },
+            },
             select: { id: true, name: true },
           });
           for (const cam of armed) {
@@ -258,7 +271,14 @@ export class AiManagerService implements OnModuleInit {
           // desligado, sobra de teste).
           const legitimas = new Set(
             (await this.prisma.camera.findMany({
-              where: { enabled: { not: false }, aiEnabled: { not: false } },
+              where: {
+                  // O MESMO critério do lado que inicia, incluindo o OFFLINE.
+                  // Critérios diferentes aqui são o cabo de guerra descrito
+                  // acima: um lado para o que o outro religa, para sempre.
+                  enabled: { not: false },
+                  aiEnabled: { not: false },
+                  status: { not: CameraStatus.OFFLINE },
+                },
               select: { id: true },
             })).map((cam) => cam.id),
           );
