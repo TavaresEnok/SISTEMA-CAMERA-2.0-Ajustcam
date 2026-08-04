@@ -50,6 +50,7 @@ import {
   type TimelinePreviewPlan,
 } from './helpers/timeline-preview.helper';
 import { planVodPlaylist, renderVodPlaylist, type VodSourceSegment } from './helpers/vod-playlist.helper';
+import { CacheDeDiagnostico } from './helpers/diagnostics-cache.helper';
 import {
   isMissingCommandError,
   markNiceUnavailable,
@@ -169,6 +170,14 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.integritySweepTimer);
       this.integritySweepTimer = null;
     }
+    // O que estava só em memória vai para o disco antes de desligar; senão um
+    // deploy jogaria fora os diagnósticos dos últimos 2 segundos e o ffprobe
+    // teria de refazê-los.
+    if (this.diagnosticsFlushTimer) {
+      clearTimeout(this.diagnosticsFlushTimer);
+      this.diagnosticsFlushTimer = null;
+    }
+    this.cacheDiagnostico.descarregar();
   }
 
   /**
@@ -241,28 +250,53 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     return recording;
   }
 
+  // O porquê de o cache viver em memória está em `diagnostics-cache.helper.ts`:
+  // reler 1,6 MB do disco a cada volta de um laço de 1.200 travava a API
+  // inteira por 11 segundos.
+  //
+  // Criado na primeira chamada, e não como campo de classe: parte da suíte
+  // monta este serviço sem passar pelo construtor (`Object.create` do
+  // protótipo), e inicializador de campo só roda em construtor — o campo sairia
+  // `undefined` e todo teste que toca gravação quebraria.
+  private cacheDiagnosticoInterno: CacheDeDiagnostico<RecordingHealthCacheEntry> | null = null;
+  private get cacheDiagnostico(): CacheDeDiagnostico<RecordingHealthCacheEntry> {
+    if (!this.cacheDiagnosticoInterno) {
+      this.cacheDiagnosticoInterno = new CacheDeDiagnostico<RecordingHealthCacheEntry>(
+        () => this.getDiagnosticsCacheFile(),
+        (mensagem) => this.logger?.warn(mensagem),
+      );
+    }
+    return this.cacheDiagnosticoInterno;
+  }
+  private diagnosticsCacheDir: string | null = null;
+  private diagnosticsFlushTimer: NodeJS.Timeout | null = null;
+
   private getDiagnosticsCacheFile() {
-    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
-    const dir = join(recordingsRoot, '.diagnostics-cache');
-    mkdirSync(dir, { recursive: true });
-    return join(dir, 'recording-health.json');
+    // `mkdirSync` uma vez por processo. Era uma chamada de sistema por volta do
+    // laço — barata sozinha, absurda 1.200 vezes.
+    if (!this.diagnosticsCacheDir) {
+      const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+      const dir = join(recordingsRoot, '.diagnostics-cache');
+      mkdirSync(dir, { recursive: true });
+      this.diagnosticsCacheDir = dir;
+    }
+    return join(this.diagnosticsCacheDir, 'recording-health.json');
   }
 
-  private readDiagnosticsCache() {
-    const file = this.getDiagnosticsCacheFile();
-    if (!existsSync(file)) return {} as Record<string, RecordingHealthCacheEntry>;
-    try {
-      const raw = readFileSync(file, 'utf-8');
-      const parsed = JSON.parse(raw) as Record<string, RecordingHealthCacheEntry>;
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {} as Record<string, RecordingHealthCacheEntry>;
-    }
+  private readDiagnosticsCache(): Record<string, RecordingHealthCacheEntry> {
+    return this.cacheDiagnostico.ler();
   }
 
   private writeDiagnosticsCache(cache: Record<string, RecordingHealthCacheEntry>) {
-    const file = this.getDiagnosticsCacheFile();
-    writeFileSync(file, JSON.stringify(cache), 'utf-8');
+    this.cacheDiagnostico.gravar(cache);
+    // Gravação adiada e agrupada — o auxiliar já guarda o valor em memória, e
+    // quem ler em seguida enxerga o dado novo mesmo antes de ele ir ao disco.
+    if (this.diagnosticsFlushTimer) return;
+    this.diagnosticsFlushTimer = setTimeout(() => {
+      this.diagnosticsFlushTimer = null;
+      this.cacheDiagnostico.descarregar();
+    }, 2000);
+    this.diagnosticsFlushTimer.unref();
   }
 
   private getCacheTtlMs() {
