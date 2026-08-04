@@ -311,13 +311,16 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - AUTH_REFRESH_INACTIVITY_DAYS=${AUTH_REFRESH_INACTIVITY_DAYS:-7}
       - CAMERA_SECRET_KEY=${CAMERA_SECRET_KEY:?CAMERA_SECRET_KEY is required}
-      # ENVIO PARA A NUVEM. O padrão (25 por rodada, a cada 15 min) sustenta o
-      # regime permanente, mas não drena FILA: quando o offload fica parado —
-      # credencial errada, storage fora do ar — a fila cresce em minutos e o
-      # padrão levaria quase um dia para recuperar, com o disco enchendo. Medido:
-      # 2.285 gravações acumuladas em 16h de parada.
-      - CLOUD_OFFLOAD_BATCH=${CLOUD_OFFLOAD_BATCH:-200}
-      - CLOUD_OFFLOAD_INTERVAL_MINUTES=${CLOUD_OFFLOAD_INTERVAL_MINUTES:-5}
+      # ENVIO PARA A NUVEM. O padrão do código (25 por rodada) não sustentava
+      # nem o regime permanente desta frota: MEDIDO, 26 câmeras em movimento
+      # produzem ~312 gravações/hora, e 25 a cada 15 min entrega 100/hora — a
+      # fila só crescia. Com 100 a cada 15 min são 400/hora, ~28% de folga.
+      #
+      # Essa folga é apertada de propósito para não competir com o vídeo ao vivo,
+      # mas tem consequência: uma parada de 2h cria ~620 de fila, que leva ~7h
+      # para drenar. Se a frota crescer, este número sobe junto.
+      - CLOUD_OFFLOAD_BATCH=${CLOUD_OFFLOAD_BATCH:-100}
+      - CLOUD_OFFLOAD_INTERVAL_MINUTES=${CLOUD_OFFLOAD_INTERVAL_MINUTES:-15}
       - CAMERA_SECRET_KEY_LEGACY=${CAMERA_SECRET_KEY_LEGACY:-}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       - EVIDENCE_HMAC_SECRET=${EVIDENCE_HMAC_SECRET:?EVIDENCE_HMAC_SECRET is required}
