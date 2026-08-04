@@ -348,6 +348,7 @@ prepare_env() {
   local env_file="$DRAC_INSTALL_DIR/infra/.env"
   local example_file="$DRAC_INSTALL_DIR/infra/.env.example"
   local server_ip="${DRAC_SERVER_IP:-$(detect_ip)}"
+  local rtmp_short_host="${DRAC_RTMP_SHORT_HOST:-}"
   local install_slug
 
   prompt DRAC_CUSTOMER_NAME "Nome do cliente"
@@ -355,6 +356,12 @@ prepare_env() {
   prompt DRAC_INSTALLATION_ID "Codigo da instalacao" "${install_slug:-drac-cliente}"
   prompt DRAC_LICENSE_KEY "Chave/licenca do cliente" "drac-$(random_hex 16)"
   prompt DRAC_SERVER_IP "IP ou dominio deste servidor" "${server_ip:-127.0.0.1}"
+  # Se o endereço principal já é IPv4, ele também é a representação compacta.
+  # Com domínio não adivinhamos NAT/DNS: o operador pode fornecer explicitamente
+  # DRAC_RTMP_SHORT_HOST, evitando publicar um IP privado por engano.
+  if [ -z "$rtmp_short_host" ] && printf '%s' "$DRAC_SERVER_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    rtmp_short_host="$DRAC_SERVER_IP"
+  fi
   prompt DRAC_CENTRAL_URL "URL da DRAC Central" "$DRAC_CENTRAL_URL"
   prompt DRAC_CAMERA_ALLOWED_CIDRS \
     "CIDRs exclusivos das redes de cameras (separados por virgula; ex.: 192.168.10.0/24)"
@@ -400,6 +407,7 @@ prepare_env() {
   env_set "$env_file" DRAC_MEDIAMTX_WEBRTC_UDP_BIND "0.0.0.0"
   env_set "$env_file" MEDIAMTX_WEBRTC_ADDITIONAL_HOST "$DRAC_SERVER_IP"
   env_set "$env_file" MEDIAMTX_PUBLIC_HOST "$DRAC_SERVER_IP"
+  env_set "$env_file" MEDIAMTX_RTMP_SHORT_HOST "$rtmp_short_host"
   env_set "$env_file" MEDIAMTX_PUBLIC_SCHEME "http"
   env_set "$env_file" MEDIAMTX_PUBLIC_WEBRTC_URL ""
   env_set "$env_file" MEDIAMTX_PUBLIC_HLS_URL ""

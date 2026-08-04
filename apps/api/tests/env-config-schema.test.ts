@@ -74,6 +74,7 @@ const DEFAULTS: Record<string, unknown> = {
   mediaMtxPublicHost: '',
   mediaMtxPublicScheme: '',
   mediaMtxPublicWebrtcUrl: '',
+  mediaMtxRtmpShortHost: '',
   mediaMtxRtspInternalUrl: 'rtsp://mediamtx:8554',
   mediaMtxRunOnDemandCloseAfter: '5m',
   mediaMtxSelectedRunOnDemandCloseAfter: '5m',
@@ -230,6 +231,11 @@ test('valores válidos continuam passando intactos', () => {
   assert.equal(config.recordingSegmentSeconds, 600);
   assert.equal(config.recordingMinFreeBytes, 5_368_709_120);
   assert.equal(config.mediaMtxHlsPort, 8890);
+});
+
+test('host RTMP compacto configurado é preservado para URLs de campo curto', () => {
+  const config = readEnvConfig({ MEDIAMTX_RTMP_SHORT_HOST: '192.0.2.10' }, () => {});
+  assert.equal(config.mediaMtxRtmpShortHost, '192.0.2.10');
 });
 
 test('flags: "0"/"off" DESLIGAM de verdade e "TRUE"/"1" LIGAM', () => {

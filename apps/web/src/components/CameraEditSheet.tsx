@@ -69,6 +69,10 @@ type IngestTarget = {
   serverUrl: string | null;
   streamKey: string | null;
   fullUrl: string | null;
+  canonicalFullUrl?: string | null;
+  compactFullUrl?: string | null;
+  fullUrlFitsSingleField?: boolean;
+  singleFieldMaxLength?: number;
   /** Caminho próprio do equipamento, quando ele não deixa escolher. */
   ingestPath?: string | null;
 };
@@ -162,6 +166,8 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
   const upd = <K extends keyof Form>(k: K, v: Form[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
 
   const modoPush = ingest?.sourceMode === 'rtmp_push';
+  const usaEnderecoCompacto = Boolean(ingest?.canonicalFullUrl && ingest.fullUrl !== ingest.canonicalFullUrl);
+  const urlCompletaCompativel = ingest?.fullUrlFitsSingleField !== false;
   const auth = { headers: { Authorization: `Bearer ${accessToken}` } };
 
   const copiar = async (texto: string, marca: string) => {
@@ -401,12 +407,48 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                         </div>
                       ) : null}
                       {!ingest?.ingestPath && (
-                        <CampoCopiavel
-                          rotulo="Endereço de publicação"
-                          valor={ingest?.fullUrl ?? ''}
-                          copiado={copiado === 'completa'}
-                          onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
-                        />
+                        <div className="space-y-3">
+                          {usaEnderecoCompacto && (
+                            <div className="rounded-md border border-[hsl(var(--status-online)_/_0.35)] bg-[hsl(var(--status-online)_/_0.08)] p-3">
+                              <p className="text-[11px] font-semibold text-[hsl(var(--status-online))]">Endereço compacto selecionado</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                                Cabe no limite de {ingest?.singleFieldMaxLength ?? 63} caracteres da Intelbras sem reduzir a chave.
+                              </p>
+                            </div>
+                          )}
+                          {urlCompletaCompativel ? (
+                            <CampoCopiavel
+                              rotulo="Endereço completo para campo único"
+                              valor={ingest?.fullUrl ?? ''}
+                              copiado={copiado === 'completa'}
+                              onCopiar={() => copiar(ingest?.fullUrl ?? '', 'completa')}
+                            />
+                          ) : (
+                            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                              <p className="text-[11px] font-semibold text-amber-500">URL maior que o campo da câmera</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                                Não recorte a chave. Use servidor e chave separados ou o modo não personalizado por IP e porta.
+                              </p>
+                            </div>
+                          )}
+                          <details className="rounded-md border border-border bg-background/40 px-3 py-2">
+                            <summary className="cursor-pointer text-[11px] font-medium">Servidor e chave separados</summary>
+                            <div className="mt-3 space-y-3">
+                              <CampoCopiavel
+                                rotulo="Servidor RTMP"
+                                valor={ingest?.serverUrl ?? ''}
+                                copiado={copiado === 'servidor'}
+                                onCopiar={() => copiar(ingest?.serverUrl ?? '', 'servidor')}
+                              />
+                              <CampoCopiavel
+                                rotulo="Chave do stream"
+                                valor={ingest?.streamKey ?? ''}
+                                copiado={copiado === 'chave'}
+                                onCopiar={() => copiar(ingest?.streamKey ?? '', 'chave')}
+                              />
+                            </div>
+                          </details>
+                        </div>
                       )}
 
                       {pendentes.length > 0 && (

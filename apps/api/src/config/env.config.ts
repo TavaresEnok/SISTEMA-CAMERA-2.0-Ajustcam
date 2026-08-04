@@ -120,6 +120,7 @@ export function readEnvConfig(
     mediaMtxApiPass: source.MEDIAMTX_API_PASS ?? '',
     mediaMtxAuthCallbackToken: source.MEDIAMTX_AUTH_CALLBACK_TOKEN ?? '',
     mediaMtxPublicHost: source.MEDIAMTX_PUBLIC_HOST ?? '',
+    mediaMtxRtmpShortHost: source.MEDIAMTX_RTMP_SHORT_HOST ?? '',
     mediaMtxPublicScheme: source.MEDIAMTX_PUBLIC_SCHEME ?? '',
     mediaMtxPublicWebrtcUrl: source.MEDIAMTX_PUBLIC_WEBRTC_URL ?? '',
     mediaMtxPublicHlsUrl: source.MEDIAMTX_PUBLIC_HLS_URL ?? '',

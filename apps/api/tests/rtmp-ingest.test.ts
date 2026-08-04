@@ -10,6 +10,7 @@ import {
   isPushSourced,
   isValidIngestKey,
   RTMP_INGEST_APP,
+  RTMP_SINGLE_FIELD_MAX_LENGTH,
   SOURCE_MODE_PUSH,
 } from '../src/cameras/helpers/rtmp-ingest.helper';
 
@@ -130,8 +131,55 @@ test('a URL de publicação sai pronta nos dois formatos de interface', () => {
   assert.equal(alvo.serverUrl, 'rtmp://203.0.113.10:1935/drac');
   assert.equal(alvo.streamKey, 'a'.repeat(32));
   assert.equal(alvo.fullUrl, `rtmp://203.0.113.10:1935/drac/${'a'.repeat(32)}`);
+  assert.equal(alvo.canonicalFullUrl, alvo.fullUrl);
+  assert.equal(alvo.compactFullUrl, null);
+  assert.equal(alvo.fullUrlFitsSingleField, true);
+  assert.equal(alvo.singleFieldMaxLength, 63);
   // Câmera com um campo só recebe a concatenação exata que o path espera.
   assert.equal(ingestKeyFromPathName(alvo.fullUrl.split(':1935/')[1]), 'a'.repeat(32));
+});
+
+test('domínio longo usa IP compacto sem reduzir a chave da Intelbras', () => {
+  const chave = 'c'.repeat(32);
+  const alvo = buildPublishTarget({
+    host: 'ajustcam.ajustconsulting.com.br',
+    compactHost: '168.194.13.70',
+    port: 1935,
+    key: chave,
+  });
+
+  assert.ok(alvo.canonicalFullUrl.length > RTMP_SINGLE_FIELD_MAX_LENGTH);
+  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/drac/${chave}`);
+  assert.equal(alvo.fullUrl.length, RTMP_SINGLE_FIELD_MAX_LENGTH);
+  assert.equal(alvo.fullUrlFitsSingleField, true);
+  assert.equal(alvo.streamKey, chave, 'a chave de 128 bits não pode ser truncada para caber');
+  assert.equal(ingestKeyFromPathName(alvo.fullUrl.split(':1935/')[1]), chave);
+});
+
+test('sem host compacto a API sinaliza que a URL não cabe, sem fingir compatibilidade', () => {
+  const chave = 'd'.repeat(32);
+  const alvo = buildPublishTarget({
+    host: 'dominio-publico-muito-longo.exemplo.test',
+    port: 1935,
+    key: chave,
+  });
+
+  assert.equal(alvo.fullUrl, alvo.canonicalFullUrl);
+  assert.equal(alvo.fullUrlFitsSingleField, false);
+  assert.equal(alvo.streamKey.length, 32);
+});
+
+test('host compacto malformado é ignorado em vez de gerar URL enganosa', () => {
+  const alvo = buildPublishTarget({
+    host: 'dominio-publico-muito-longo.exemplo.test',
+    compactHost: 'https://168.194.13.70/drac',
+    port: 1935,
+    key: 'e'.repeat(32),
+  });
+
+  assert.equal(alvo.compactFullUrl, null);
+  assert.equal(alvo.fullUrl, alvo.canonicalFullUrl);
+  assert.equal(alvo.fullUrlFitsSingleField, false);
 });
 
 test('RTMPS muda só o esquema', () => {

@@ -31,6 +31,16 @@ type PendingIngest = {
   attempts: number;
 };
 
+type RtmpTarget = {
+  serverUrl: string;
+  streamKey: string;
+  fullUrl: string;
+  canonicalFullUrl?: string;
+  compactFullUrl?: string | null;
+  fullUrlFitsSingleField?: boolean;
+  singleFieldMaxLength?: number;
+};
+
 export function AddPushCameraDialog({
   open,
   onClose,
@@ -44,10 +54,12 @@ export function AddPushCameraDialog({
   const [nome, setNome] = useState('');
   const [salvando, setSalvando] = useState(false);
   const [copiado, setCopiado] = useState<string | null>(null);
-  const [alvo, setAlvo] = useState<{ serverUrl: string; streamKey: string; fullUrl: string } | null>(null);
+  const [alvo, setAlvo] = useState<RtmpTarget | null>(null);
   const [cameraId, setCameraId] = useState<string | null>(null);
   const [pendentes, setPendentes] = useState<PendingIngest[]>([]);
   const [vinculando, setVinculando] = useState<string | null>(null);
+  const usaEnderecoCompacto = Boolean(alvo?.canonicalFullUrl && alvo.fullUrl !== alvo.canonicalFullUrl);
+  const urlCompletaCompativel = alvo?.fullUrlFitsSingleField !== false;
 
   const fechar = () => {
     setNome(''); setAlvo(null); setCopiado(null); setCameraId(null); setPendentes([]);
@@ -166,7 +178,38 @@ export function AddPushCameraDialog({
               <span className="font-medium text-foreground">Rede → RTMP</span> (ou <em>Push Stream</em>).
               Assim que ele começar a publicar, a câmera aparece na grade.
             </p>
-            <Campo rotulo="Endereço de publicação" valor={alvo.fullUrl} copiado={copiado === 'f'} onCopiar={() => copiar(alvo.fullUrl, 'f')} />
+            {usaEnderecoCompacto && (
+              <div className="rounded-md border border-[hsl(var(--status-online)_/_0.35)] bg-[hsl(var(--status-online)_/_0.08)] p-3">
+                <p className="text-[11px] font-semibold text-[hsl(var(--status-online))]">Compatível com campos curtos</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                  O sistema escolheu automaticamente o endereço público compacto para caber no limite de{' '}
+                  {alvo.singleFieldMaxLength ?? 63} caracteres da Intelbras. A chave continua completa e segura.
+                </p>
+              </div>
+            )}
+            {urlCompletaCompativel ? (
+              <Campo
+                rotulo="Endereço completo para campo único"
+                valor={alvo.fullUrl}
+                hint={`até ${alvo.singleFieldMaxLength ?? 63} caracteres`}
+                copiado={copiado === 'f'}
+                onCopiar={() => copiar(alvo.fullUrl, 'f')}
+              />
+            ) : (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="text-[11px] font-semibold text-amber-500">A URL completa não cabe neste tipo de câmera</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                  Não recorte a chave. Use os campos separados abaixo ou configure a câmera por IP e porta no modo não personalizado.
+                </p>
+              </div>
+            )}
+            <details className="rounded-md border border-border bg-muted/20 px-3 py-2">
+              <summary className="cursor-pointer text-[11px] font-medium">Equipamento com servidor e chave separados</summary>
+              <div className="mt-3 space-y-3">
+                <Campo rotulo="Servidor RTMP" valor={alvo.serverUrl} copiado={copiado === 's'} onCopiar={() => copiar(alvo.serverUrl, 's')} />
+                <Campo rotulo="Chave do stream" valor={alvo.streamKey} copiado={copiado === 'k'} onCopiar={() => copiar(alvo.streamKey, 'k')} />
+              </div>
+            </details>
             {pendentes.length > 0 && (
               <>
                 <Separator />
@@ -205,7 +248,7 @@ export function AddPushCameraDialog({
             <Separator />
             <p className="text-[10px] leading-relaxed text-muted-foreground">
               A chave é uma senha de publicação — quem a tiver pode enviar vídeo como se fosse esta câmera.
-              Dá para trocá-la depois, na edição da câmera.
+              Nunca a recorte para fazer a URL caber. Dá para trocá-la depois, na edição da câmera.
             </p>
           </div>
         )}

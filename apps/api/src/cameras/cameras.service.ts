@@ -1710,12 +1710,18 @@ export class CamerasService {
   private buildIngestDescriptor(key: string) {
     const host =
       (this.configService.get<string>('mediaMtxPublicHost') ?? '').trim() || 'SEU-SERVIDOR';
+    const compactHost =
+      (this.configService.get<string>('mediaMtxRtmpShortHost') ?? '').trim() || null;
     const port = envNumber('MEDIAMTX_RTMP_PORT', 1935, { min: 1, max: 65535, integer: true });
     const scheme =
       String(process.env.MEDIAMTX_RTMP_SCHEME ?? 'rtmp').trim().toLowerCase() === 'rtmps'
         ? 'rtmps'
         : 'rtmp';
-    return { ...buildPublishTarget({ host, port, key, scheme }), sourceMode: SOURCE_MODE_PUSH, ingestPath: null as string | null };
+    return {
+      ...buildPublishTarget({ host, compactHost, port, key, scheme }),
+      sourceMode: SOURCE_MODE_PUSH,
+      ingestPath: null as string | null,
+    };
   }
 
   private async discoverOnvifMediaProfiles(input: {

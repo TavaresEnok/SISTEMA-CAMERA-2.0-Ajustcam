@@ -28,9 +28,19 @@ A resposta traz os dois campos que a interface da câmera pede:
   "serverUrl": "rtmp://SEU-SERVIDOR:1935/drac",
   "streamKey": "3f2a...c81d",
   "fullUrl":   "rtmp://SEU-SERVIDOR:1935/drac/3f2a...c81d",
+  "canonicalFullUrl": "rtmp://SEU-DOMINIO:1935/drac/3f2a...c81d",
+  "fullUrlFitsSingleField": true,
+  "singleFieldMaxLength": 63,
   "sourceMode": "rtmp_push"
 }
 ```
+
+Se o domínio tornar a URL maior que o campo do equipamento, a API usa
+`MEDIAMTX_RTMP_SHORT_HOST` para devolver em `fullUrl` uma alternativa compacta
+por IP/host curto. A chave continua com 128 bits; ela nunca é recortada para
+fazer a URL caber. Sem alternativa curta configurada, a resposta marca
+`fullUrlFitsSingleField=false` e a interface orienta usar servidor e chave em
+campos separados ou o caminho próprio do equipamento.
 
 **2. Na câmera**, procure *Rede → RTMP* (ou *Live Streaming*, *Push Stream*):
 
@@ -56,7 +66,7 @@ que ninguém espera que esteja publicando.
 |---|---|---|
 | Colunas no banco | migração `20260731210000_add_rtmp_push_ingest` | **precisa rodar** |
 | Porta 1935 | `docker-compose.yml` (publicada) | pronta |
-| Servidor RTMP | MediaMTX (ligado por padrão) | pronto |
+| Servidor RTMP público | SRS tradutor → MediaMTX interno | pronto |
 | Autorização | `mediamtx-auth` na API | pronta |
 
 > **A migração tem de rodar junto com o deploy da API, não depois.** O Prisma passa a
@@ -106,10 +116,19 @@ câmera.
 **Um fluxo só.** Quem publica manda um stream; não há sub-stream para a grade escolher.
 Grade, tela cheia e "máxima qualidade" leem a mesma ingestão.
 
-**Nem toda câmera sabe fazer push.** Verificado nesta instalação: as IntelBras
-VIPC-1230-B-G2 e Positivo CIP-B1312-M **não têm RTMP** (a seção de configuração não
-existe no firmware). O recurso serve para equipamento que tem — que é a maioria dos
-DVR/NVR e boa parte das câmeras de outras marcas.
+**Campos curtos existem.** Equipamentos Intelbras medidos aceitam no máximo 63
+caracteres em "Endereço personalizado". Um domínio longo mais a chave completa
+ultrapassa esse limite. Configure `MEDIAMTX_RTMP_SHORT_HOST` com um IP público ou
+hostname curto roteável; a interface escolhe essa alternativa automaticamente.
+
+**Alguns equipamentos ignoram o caminho.** A Positivo CIP-B1312-M medida em campo
+usa somente host/porta e publica em um nome derivado do número de série. O fluxo de
+"equipamentos tentando publicar" permite vincular esse caminho a uma câmera. O SRS
+na borda também responde ao dialeto Adobe/FMLE legado (`onFCPublish`) antes de
+repassar o vídeo ao MediaMTX.
+
+**Nem toda câmera sabe fazer push.** O recurso só se aplica quando o firmware possui
+RTMP, Live Streaming ou Push Stream. A disponibilidade varia por modelo e versão.
 
 ## O que não mudou
 

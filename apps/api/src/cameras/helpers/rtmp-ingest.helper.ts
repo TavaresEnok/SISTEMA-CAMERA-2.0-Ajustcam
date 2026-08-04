@@ -39,6 +39,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 
 /** Prefixo do path de ingestão. Curto porque vai na tela, digitado por humano. */
 export const RTMP_INGEST_APP = 'drac';
+/** Limite medido no campo "Endereço personalizado" de câmeras Intelbras. */
+export const RTMP_SINGLE_FIELD_MAX_LENGTH = 63;
 
 /** 128 bits em hexa: espaço de busca inviável e ainda cabe em campo de câmera. */
 const KEY_BYTES = 16;
@@ -54,6 +56,13 @@ export type RtmpPublishTarget = {
   streamKey: string;
   /** URL inteira, para câmeras com um campo só. */
   fullUrl: string;
+  /** URL canônica, preservada para diagnóstico quando a compacta for escolhida. */
+  canonicalFullUrl: string;
+  /** Alternativa montada com IP/host curto, quando configurada. */
+  compactFullUrl: string | null;
+  /** Evita que a interface recomende uma URL que o equipamento truncará. */
+  fullUrlFitsSingleField: boolean;
+  singleFieldMaxLength: number;
 };
 
 /** Gera uma chave de ingestão nova, com aleatoriedade criptográfica. */
@@ -117,16 +126,37 @@ export function ingestKeyFromPathName(pathName: unknown): string | null {
  */
 export function buildPublishTarget(input: {
   host: string;
+  compactHost?: string | null;
   port: number;
   key: string;
   scheme?: 'rtmp' | 'rtmps';
 }): RtmpPublishTarget {
   const scheme = input.scheme ?? 'rtmp';
   const serverUrl = `${scheme}://${input.host}:${input.port}/${RTMP_INGEST_APP}`;
+  const canonicalFullUrl = `${serverUrl}/${input.key}`;
+  const compactHost = String(input.compactHost ?? '').trim();
+  const compactHostSeguro = compactHost !== input.host
+    && /^[a-z0-9.-]+$/i.test(compactHost)
+    && !compactHost.startsWith('.')
+    && !compactHost.endsWith('.');
+  const compactFullUrl = compactHostSeguro
+    ? `${scheme}://${compactHost}:${input.port}/${RTMP_INGEST_APP}/${input.key}`
+    : null;
+  // Nunca encurtamos a chave: isso reduziria a raiz de confiança. Só trocamos
+  // o hostname por uma representação curta configurada pelo operador.
+  const fullUrl = canonicalFullUrl.length <= RTMP_SINGLE_FIELD_MAX_LENGTH
+    ? canonicalFullUrl
+    : compactFullUrl && compactFullUrl.length <= RTMP_SINGLE_FIELD_MAX_LENGTH
+      ? compactFullUrl
+      : canonicalFullUrl;
   return {
     serverUrl,
     streamKey: input.key,
-    fullUrl: `${serverUrl}/${input.key}`,
+    fullUrl,
+    canonicalFullUrl,
+    compactFullUrl,
+    fullUrlFitsSingleField: fullUrl.length <= RTMP_SINGLE_FIELD_MAX_LENGTH,
+    singleFieldMaxLength: RTMP_SINGLE_FIELD_MAX_LENGTH,
   };
 }
 
