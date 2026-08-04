@@ -108,6 +108,9 @@ export default function GroupsPage() {
   const [alarmsSaving, setAlarmsSaving] = useState(false);
   const [retentionOpen, setRetentionOpen] = useState(false);
   const [retentionValue, setRetentionValue] = useState('3');
+  // Quem segue o grupo, editável aqui mesmo. Sem isto, definir a política do
+  // grupo e escolher a quem ela se aplica eram duas telas diferentes.
+  const [seguidores, setSeguidores] = useState<Set<string>>(new Set());
   const [retentionSaving, setRetentionSaving] = useState(false);
 
   const selGroup = groups.find((g) => g.id === selGroupId) ?? groups[0] ?? null;
@@ -158,7 +161,7 @@ export default function GroupsPage() {
     const days = Math.max(1, Math.min(3650, Math.floor(Number(retentionValue)) || 7));
     setRetentionSaving(true);
     try {
-      const { data } = await apiClient(accessToken).post(`/camera-groups/${selGroup.id}/retention`, { retentionDays: days });
+      const { data } = await apiClient(accessToken).post(`/camera-groups/${selGroup.id}/retention`, { retentionDays: days, seguidores: [...seguidores] });
       await Promise.all([loadData(), load()]);
       setRetentionOpen(false);
       toast({
@@ -404,7 +407,11 @@ export default function GroupsPage() {
                     // Abre com o prazo REAL do grupo. Fixar um número aqui fazia o diálogo
                     // mostrar 7 num grupo de 3 dias — e aplicar mudava o grupo sem ninguém
                     // pedir, só por ter aberto a janela e confirmado.
-                    onClick={() => { setRetentionValue(String(selGroup?.retentionDays ?? 3)); setRetentionOpen(true); }}
+                    onClick={() => {
+                      setRetentionValue(String(selGroup?.retentionDays ?? 3));
+                      setSeguidores(new Set((selGroup?.cameras ?? []).filter((c) => c.retentionFollowsGroup !== false).map((c) => c.id)));
+                      setRetentionOpen(true);
+                    }}
                   >
                     <HardDrive className="w-3.5 h-3.5" /> Retenção
                   </button>
@@ -728,6 +735,47 @@ export default function GroupsPage() {
                   Encurtar o prazo apaga o que passar dele na próxima varredura, que roda de hora em hora.
                 </span>
               </p>
+
+              {/* QUEM SEGUE, marcável aqui. Antes isto exigia abrir câmera por câmera —
+                  a tela que define a política do grupo era a única que não deixava dizer
+                  a quem ela se aplica. */}
+              <div className="rounded-lg border border-border">
+                <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+                  <span className="text-[12px] font-medium">Câmeras que seguem o grupo</span>
+                  <div className="flex gap-1.5">
+                    <button type="button" className="rounded border border-border px-2 py-0.5 text-[11px]"
+                      onClick={() => setSeguidores(new Set((selGroup?.cameras ?? []).map((c) => c.id)))}>Todas</button>
+                    <button type="button" className="rounded border border-border px-2 py-0.5 text-[11px]"
+                      onClick={() => setSeguidores(new Set())}>Nenhuma</button>
+                  </div>
+                </div>
+                <div className="max-h-52 overflow-y-auto">
+                  {(selGroup?.cameras ?? []).length === 0 && (
+                    <div className="px-3 py-3 text-[11px] text-muted-foreground">Nenhuma câmera neste grupo.</div>
+                  )}
+                  {(selGroup?.cameras ?? []).map((c) => {
+                    const segue = seguidores.has(c.id);
+                    const dias = Number(retentionValue) || 0;
+                    const propria = Number(c.retentionDays) || 0;
+                    // Perda só existe ao PASSAR a seguir um prazo menor que o próprio.
+                    const perde = segue && c.retentionFollowsGroup === false && propria > dias ? propria - dias : 0;
+                    return (
+                      <label key={c.id} className="flex cursor-pointer items-center gap-2 border-b border-border/60 px-3 py-2 last:border-b-0 text-[12px]">
+                        <input type="checkbox" checked={segue} onChange={(e) => {
+                          const proximo = new Set(seguidores);
+                          if (e.target.checked) proximo.add(c.id); else proximo.delete(c.id);
+                          setSeguidores(proximo);
+                        }} />
+                        <span className="min-w-0 flex-1 truncate">{c.name}</span>
+                        {!segue && <span className="shrink-0 text-[11px] text-muted-foreground">{propria || 3} dias próprios</span>}
+                        {perde > 0 && (
+                          <span className="shrink-0 text-[11px]" style={{ color: 'hsl(var(--warning))' }}>−{perde} dias</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             <div className="flex gap-2 pt-2">
               <Button variant="ghost" size="sm" onClick={() => setRetentionOpen(false)}>Cancelar</Button>
               <Button size="sm" className="flex-1 justify-center" disabled={retentionSaving} onClick={() => void setGroupRetention()}>

@@ -80,7 +80,7 @@ export class CameraGroupsService {
    * Define a retenção (dias) de TODAS as câmeras do grupo de uma vez. Isto
    * SOBRESCREVE o valor individual de cada câmera — a UI avisa antes de aplicar.
    */
-  async setRetentionForGroup(groupId: string, retentionDays: number) {
+  async setRetentionForGroup(groupId: string, retentionDays: number, seguidores?: string[]) {
     await this.ensureExists(groupId);
     // Grava no GRUPO, não em cada câmera.
     //
@@ -95,6 +95,28 @@ export class CameraGroupsService {
       where: { id: groupId },
       data: { retentionDays },
     });
+
+    // QUEM SEGUE, definido na mesma ação.
+    //
+    // Sem isto, escolher os seguidores exigia abrir câmera por câmera — e a tela
+    // onde se define a política do grupo era justamente a única que não deixava
+    // dizer a quem ela se aplica.
+    //
+    // `undefined` preserva o que está lá (mudar só o prazo não pode religar
+    // exceção nenhuma); lista vazia é uma escolha legítima ("ninguém segue").
+    if (Array.isArray(seguidores)) {
+      const doGrupo = await this.prisma.camera.findMany({ where: { groupId }, select: { id: true } });
+      const pedidos = new Set(seguidores);
+      const seguem = doGrupo.filter((c) => pedidos.has(c.id)).map((c) => c.id);
+      const naoSeguem = doGrupo.filter((c) => !pedidos.has(c.id)).map((c) => c.id);
+      // Duas escritas em vez de uma por câmera: N chamadas viram N janelas em que
+      // a varredura de retenção pode rodar com o estado pela metade.
+      await this.prisma.$transaction([
+        this.prisma.camera.updateMany({ where: { id: { in: seguem } }, data: { retentionFollowsGroup: true } }),
+        this.prisma.camera.updateMany({ where: { id: { in: naoSeguem } }, data: { retentionFollowsGroup: false } }),
+      ]);
+    }
+
     const seguindo = await this.prisma.camera.count({ where: { groupId, retentionFollowsGroup: true } });
     const excecoes = await this.prisma.camera.count({ where: { groupId, retentionFollowsGroup: false } });
     return { groupId, retentionDays, affected: seguindo, excecoes };

@@ -77,12 +77,13 @@ export class CameraGroupsController {
   async setRetention(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
-    @Body() body: { retentionDays?: number },
+    @Body() body: { retentionDays?: number; seguidores?: string[] },
     @Req() req: Request,
   ) {
     // Sobrescreve a retenção de TODAS as câmeras do grupo (a UI avisa antes).
     const retentionDays = Math.max(1, Math.min(3650, Math.floor(Number(body?.retentionDays ?? 3)) || 3));
-    const result = await this.cameraGroupsService.setRetentionForGroup(id, retentionDays);
+    const seguidores = Array.isArray(body?.seguidores) ? body.seguidores.map(String) : undefined;
+    const result = await this.cameraGroupsService.setRetentionForGroup(id, retentionDays, seguidores);
     await this.auditService.log(user.id, 'camera_group.retention_set', 'CameraGroup', id, { retentionDays, affected: result.affected }, req);
     return result;
   }
