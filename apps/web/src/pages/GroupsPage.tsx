@@ -33,12 +33,14 @@ type AccessGroup = {
   name: string;
   description?: string | null;
   isActive: boolean;
+  /** Prazo do grupo. Vale para as câmeras que optaram por segui-lo. */
+  retentionDays?: number;
   /** Cota de câmeras privadas que o cliente deste grupo pode cadastrar (0 = nenhuma). */
   maxPrivateCameras?: number;
   /** Bloqueio comercial: ACTIVE normal · RESTRICTED sem histórico · SUSPENDED sem acesso. */
   accessStatus?: GroupAccessStatus;
   accessMessage?: string | null;
-  cameras: Array<{ id: string; name: string }>;
+  cameras: Array<{ id: string; name: string; retentionFollowsGroup?: boolean; retentionDays?: number }>;
   _userPermissions?: UserPermission[];
 };
 
@@ -399,7 +401,10 @@ export default function GroupsPage() {
                     className="btn btn-ghost btn-sm"
                     title="Definir a retenção (dias) de TODAS as câmeras deste grupo"
                     disabled={!selGroup?.cameras.length}
-                    onClick={() => { setRetentionValue('7'); setRetentionOpen(true); }}
+                    // Abre com o prazo REAL do grupo. Fixar um número aqui fazia o diálogo
+                    // mostrar 7 num grupo de 3 dias — e aplicar mudava o grupo sem ninguém
+                    // pedir, só por ter aberto a janela e confirmado.
+                    onClick={() => { setRetentionValue(String(selGroup?.retentionDays ?? 3)); setRetentionOpen(true); }}
                   >
                     <HardDrive className="w-3.5 h-3.5" /> Retenção
                   </button>
@@ -705,9 +710,20 @@ export default function GroupsPage() {
               autoFocus
             />
             <p className="text-[12px] rounded-lg border p-3 leading-relaxed" style={{ borderColor: 'hsl(var(--border))' }}>
-                Vale para as câmeras deste grupo que estão marcadas como{' '}
-                <strong>seguir a retenção do grupo</strong>. Câmeras com prazo próprio não são
-                tocadas — antes elas eram sobrescritas e o ajuste se perdia.
+                {(() => {
+                  // O número ANTES de confirmar. "Vale para quem segue o grupo" é regra;
+                  // "vale para 4 das 17" é a informação que decide.
+                  const total = selGroup?.cameras.length ?? 0;
+                  const seguem = (selGroup?.cameras ?? []).filter((c) => c.retentionFollowsGroup !== false).length;
+                  const excecoes = total - seguem;
+                  return (
+                    <>
+                      Vale para <strong>{seguem} de {total}</strong> câmera(s) deste grupo — as marcadas como{' '}
+                      <strong>seguir a retenção do grupo</strong>.
+                      {excecoes > 0 && <> As outras <strong>{excecoes}</strong> têm prazo próprio e não são tocadas.</>}
+                    </>
+                  );
+                })()}
                 <span className="mt-2 block text-[hsl(var(--muted-foreground))]">
                   Encurtar o prazo apaga o que passar dele na próxima varredura, que roda de hora em hora.
                 </span>
