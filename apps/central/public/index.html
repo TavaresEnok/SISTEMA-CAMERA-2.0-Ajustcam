@@ -134,6 +134,8 @@
       ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
       ::-webkit-scrollbar-track { background: transparent; }
       .hidden { display: none !important; }
+      .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important;
+        overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
       .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: .92em; letter-spacing: -.01em; }
       .num { font-variant-numeric: tabular-nums; }
       .subtext { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
@@ -594,6 +596,66 @@
       .policy-card h3 { font-size: 13.5px; margin-bottom: 6px; }
       .policy-card p { color: var(--muted); margin: 0; line-height: 1.55; font-size: 12px; }
 
+      /* ── Portal técnico ──────────────────────────────────────────────────
+         O conteúdo só chega pela API depois da autorização. Estes estilos são
+         apenas a casca pública da interface e não revelam o documento. */
+      .technical-shell { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
+      .technical-sidebar { position: sticky; top: 76px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
+      .technical-search { padding: 14px; border-bottom: 1px solid var(--line-hair); }
+      .technical-search-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+      .technical-search-head label { color: var(--muted); font-size: 11px; font-weight: 500; }
+      .technical-search-head span { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+      .technical-search input { width: 100%; }
+      .technical-index { padding: 8px; overflow: auto; scrollbar-width: thin; }
+      .technical-category { margin: 10px 0 4px; padding: 0 9px; color: var(--muted); font-size: 10.5px; font-weight: 600;
+        letter-spacing: .12em; text-transform: uppercase; }
+      .technical-index button { width: 100%; min-height: 0; padding: 8px 9px; border: 0; border-radius: 9px; background: transparent;
+        color: var(--muted); text-align: left; justify-content: flex-start; font-size: 11.5px; line-height: 1.35; }
+      .technical-index button:hover { color: var(--ink); background: var(--surface-soft); }
+      .technical-index button.active { color: var(--ink); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand-line); }
+      .technical-empty { padding: 24px 16px; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.55; }
+      .technical-article { min-height: 520px; }
+      .technical-article-head { padding: 24px 26px 19px; border-bottom: 1px solid var(--line-hair);
+        background: radial-gradient(80% 190% at 0 0, var(--brand-soft), transparent 56%); }
+      .technical-eyebrow { color: var(--brand-strong); font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+      .technical-article-head h2 { margin-top: 8px; font-size: 25px; }
+      .technical-article-head p { margin: 8px 0 0; max-width: 82ch; color: var(--muted); line-height: 1.6; }
+      .technical-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
+      .technical-meta li { border: 1px solid var(--line-hair); border-radius: 99px; padding: 3px 8px; background: var(--surface-soft);
+        color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+      .technical-content { padding: 24px 26px 32px; display: grid; gap: 17px; }
+      .technical-content p { margin: 0; max-width: 74ch; color: var(--muted); font-size: 13px; line-height: 1.75; }
+      .technical-content ul, .technical-content ol:not(.technical-flow) { margin: 0; padding-left: 22px; display: grid; gap: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
+      .technical-callout { border: 1px solid var(--brand-line); border-left: 3px solid var(--brand); border-radius: 10px;
+        background: var(--brand-soft); padding: 13px 15px; max-width: 96ch; }
+      .technical-callout.warning { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-soft); }
+      .technical-callout.danger { border-color: var(--red-line); border-left-color: var(--red); background: var(--red-soft); }
+      .technical-callout strong { display: block; margin-bottom: 5px; font-size: 12px; font-weight: 600; }
+      .technical-callout span { color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .technical-flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 0; padding: 0; list-style: none; counter-reset: technical-flow; }
+      .technical-flow > li { position: relative; flex: 1 1 145px; min-width: 0; border: 1px solid var(--line-hair); border-radius: 10px;
+        background: var(--surface-soft); padding: 11px 25px 11px 12px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+      .technical-flow > li:not(:last-child)::after { content: '›'; position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+        color: var(--brand-strong); font-size: 17px; }
+      .technical-kv { display: grid; grid-template-columns: minmax(140px, .36fr) minmax(0, 1fr); border: 1px solid var(--line-hair);
+        border-radius: 11px; overflow: hidden; }
+      .technical-kv dt, .technical-kv dd { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line-hair); font-size: 11.5px; line-height: 1.55; }
+      .technical-kv dt { color: var(--ink); font-weight: 500; background: var(--surface-soft); }
+      .technical-kv dd { color: var(--muted); }
+      .technical-kv dt:last-of-type, .technical-kv dd:last-of-type { border-bottom: 0; }
+      .technical-table-wrap { overflow: auto; border: 1px solid var(--line-hair); border-radius: 11px; }
+      .technical-table { min-width: 620px; }
+      .technical-table th { position: static; }
+      .technical-table td { color: var(--muted); line-height: 1.55; vertical-align: top; }
+      .technical-code { border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface-2) 82%, #000);
+        padding: 12px 14px; overflow: auto; }
+      .technical-code-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; }
+      .technical-code code { color: var(--ink); font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; }
+      .technical-notice { margin-bottom: 16px; border: 1px solid var(--amber-line); border-radius: 11px; background: var(--amber-soft);
+        color: var(--muted); padding: 10px 13px; font-size: 11.5px; line-height: 1.5; }
+      .technical-article-nav { display: flex; justify-content: space-between; gap: 10px; padding-top: 4px; border-top: 1px solid var(--line-hair); }
+      .technical-article-nav button { min-width: 0; max-width: 48%; white-space: normal; text-align: left; line-height: 1.35; }
+
       /* ── Fila de atenção ───────────────────────────────────────────────── */
       .queue { display: grid; gap: 8px; }
       .queue-item { display: grid; grid-template-columns: 3px 1fr auto; gap: 0 14px; align-items: center;
@@ -747,6 +809,7 @@
       /* ── Responsivo ───────────────────────────────────────────────────── */
       @media (max-width: 1180px) {
         .workgrid { grid-template-columns: 1fr; }
+        .technical-shell { grid-template-columns: 230px minmax(0, 1fr); }
         .filters { grid-template-columns: minmax(180px, 1fr) 1fr 1fr; }
         .filters #sort-filter { grid-column: span 3; }
       }
@@ -789,11 +852,36 @@
         td:first-child > div { text-align: left; }
         tbody tr.selected td:first-child::before { display: none; }
         .progress { min-width: 0; width: 120px; }
+        .technical-shell { grid-template-columns: 1fr; }
+        .technical-sidebar { position: static; max-height: none; }
+        .technical-index { max-height: 250px; }
+        .technical-article-head, .technical-content { padding-left: 17px; padding-right: 17px; }
+        .technical-table, .technical-table thead, .technical-table tbody, .technical-table tr, .technical-table th, .technical-table td { display: revert; }
+        .technical-table thead { display: table-header-group; }
+        .technical-table tbody { display: table-row-group; }
+        .technical-table tr { display: table-row; padding: 0; }
+        .technical-table th, .technical-table td { display: table-cell; }
+        .technical-table td::before { display: none; }
+      }
+      @media (max-width: 560px) {
+        .technical-kv { grid-template-columns: 1fr; }
+        .technical-kv dt { border-bottom: 0; padding-bottom: 3px; }
+        .technical-kv dd { padding-top: 3px; }
+        .technical-flow { display: grid; gap: 22px; }
+        .technical-flow > li:not(:last-child)::after { content: '↓'; right: 50%; top: auto; bottom: -23px; transform: translateX(50%); }
+        .technical-article-nav { display: grid; }
+        .technical-article-nav button { max-width: none; width: 100%; }
       }
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
       }
-      @media print { .sidebar, .topbar, .filters, .chips { display: none !important; } }
+      @media print {
+        .sidebar, .topbar, .filters, .chips, .technical-sidebar, .technical-notice, .technical-page-actions, .technical-article-nav { display: none !important; }
+        .shell, .main, .technical-shell { display: block !important; }
+        .content { max-width: none; padding: 0; }
+        .technical-article { border: 0; box-shadow: none; }
+        .technical-article-head, .technical-content { padding-left: 0; padding-right: 0; }
+      }
     </style>
   </head>
 
@@ -890,6 +978,12 @@
           <button data-view-button="auditoria" title="Auditoria">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
             <span class="nav-label">Auditoria</span>
+          </button>
+
+          <div id="technical-nav-group" class="nav-group-label hidden">Engenharia</div>
+          <button id="technical-nav" data-view-button="tecnico" class="hidden" title="Portal técnico do AjustCam">
+            <svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22z"/></svg>
+            <span class="nav-label">Portal técnico</span>
           </button>
         </nav>
         <div class="sidebar-foot">
@@ -1279,7 +1373,7 @@
             <div class="page-head">
               <div>
                 <h1>Usuários da central</h1>
-                <p>Contas que podem acessar este painel. O administrador do sistema é definido no servidor e não aparece para edição.</p>
+                <p>Contas que podem acessar este painel. O Portal técnico exige permissão separada e somente o administrador nativo pode concedê-la ou revogá-la.</p>
               </div>
             </div>
             <div class="workgrid">
@@ -1303,12 +1397,49 @@
                   <div class="license-form">
                     <div class="field"><label for="user-email">E-mail</label><input id="user-email" type="email" placeholder="pessoa@empresa.com" /></div>
                     <div class="field"><label for="user-name">Nome</label><input id="user-name" placeholder="Nome da pessoa" /></div>
-                    <div class="field"><label for="user-password">Senha (mín. 8)</label><input id="user-password" type="password" placeholder="Senha de acesso" /></div>
+                    <div class="field"><label for="user-password">Senha (mín. 12, com maiúscula, minúscula e número)</label><input id="user-password" type="password" placeholder="Senha de acesso" /></div>
                     <div class="license-actions"><button id="user-save" class="primary">Salvar usuário</button></div>
                   </div>
                   <div id="user-form-status" class="subtext"></div>
                 </div>
               </aside>
+            </div>
+          </section>
+
+          <!-- ── PORTAL TÉCNICO ───────────────────────────────────────────
+               Somente a casca existe no HTML público. O documento é buscado
+               após autenticação e autorização no servidor. -->
+          <section id="tecnico-view" class="view">
+            <div class="page-head">
+              <div>
+                <h1>Portal técnico do AjustCam</h1>
+                <p>Arquitetura, regras de funcionamento, fluxos de vídeo, falhas, recuperação e operação reunidos em uma referência pesquisável.</p>
+              </div>
+              <div class="page-head-actions technical-page-actions">
+                <span id="technical-version" class="badge neutral">Conteúdo protegido</span>
+                <button id="technical-copy-link" class="sm" disabled>Copiar link</button>
+                <button id="technical-print" class="sm" disabled>Imprimir artigo</button>
+              </div>
+            </div>
+            <div id="technical-notice" class="technical-notice hidden"></div>
+            <div id="technical-live-status" class="sr-only" role="status" aria-live="polite"></div>
+            <div class="technical-shell">
+              <aside class="panel technical-sidebar">
+                <div class="technical-search">
+                  <div class="technical-search-head">
+                    <label for="technical-query">Pesquisar na documentação</label>
+                    <span id="technical-search-status">—</span>
+                  </div>
+                  <input id="technical-query" type="search" placeholder="Módulo, regra ou falha…" autocomplete="off"
+                    aria-controls="technical-index technical-article" aria-describedby="technical-search-status" />
+                </div>
+                <nav id="technical-index" class="technical-index" aria-label="Índice da documentação" aria-busy="false">
+                  <div class="technical-empty">Abra o portal para carregar o índice protegido.</div>
+                </nav>
+              </aside>
+              <article id="technical-article" class="panel technical-article" aria-label="Artigo técnico" aria-busy="false" tabindex="-1">
+                <div class="technical-empty">Selecione um artigo no índice.</div>
+              </article>
             </div>
           </section>
         </main>
@@ -1379,6 +1510,15 @@
       </div>
     </dialog>
 
+    <dialog id="technical-access-dialog" aria-labelledby="technical-access-title">
+      <div class="modal-head" id="technical-access-title">Alterar acesso ao Portal técnico</div>
+      <div class="modal-body" id="technical-access-message"></div>
+      <div class="modal-actions">
+        <button id="technical-access-cancel">Cancelar</button>
+        <button id="technical-access-apply" class="primary">Confirmar</button>
+      </div>
+    </dialog>
+
     <div class="toast-stack"><div id="toast" class="toast"></div></div>
 
     <!-- Lógica pura do dashboard (escala, downsampling, eixo de tempo, totais).
@@ -1391,10 +1531,12 @@
         ? '/central'
         : '';
       const centralUrl = (path) => `${CENTRAL_BASE_PATH}${path.startsWith('/') ? path : `/${path}`}`;
-      const VIEWS = ['operacao', 'detalhe', 'clientes', 'instalacao', 'apps', 'contratos', 'alertas', 'auditoria', 'usuarios'];
+      const TECHNICAL_DOCUMENTATION_PERMISSION = 'technical_documentation.read';
+      const VIEWS = ['operacao', 'detalhe', 'clientes', 'instalacao', 'apps', 'contratos', 'alertas', 'auditoria', 'usuarios', 'tecnico'];
       const VIEW_LABELS = {
         operacao: 'Operação', detalhe: 'Instalação', clientes: 'Clientes', instalacao: 'Nova instalação',
         apps: 'Apps', contratos: 'Contratos', alertas: 'Alertas', auditoria: 'Auditoria', usuarios: 'Usuários',
+        tecnico: 'Portal técnico',
       };
       const REFRESH_SECONDS = 30;
 
@@ -1422,6 +1564,13 @@
         auditEvents: [],
         provision: null,
         summary: null,
+        technicalDocumentation: null,
+        technicalArticleId: new URL(window.location.href).searchParams.get('doc') || localStorage.getItem('drac-central-technical-article') || '',
+        technicalRoutePending: Boolean(new URL(window.location.href).searchParams.get('doc')),
+        technicalQuery: '',
+        technicalLoading: false,
+        technicalError: '',
+        pendingTechnicalAccess: null,
         // Dashboard de frota. `endpoint === undefined` = ainda não sondado;
         // `null` = sondado e indisponível (não tenta de novo antes do cooldown).
         fleet: {
@@ -1512,6 +1661,10 @@
         'installation.installer_denied': 'Instalador recusado',
         'installation.installer_command_viewed': 'Comando de instalação aberto',
         'installation.diagnostics_viewed': 'Diagnóstico copiado',
+        'technical_documentation.viewed': 'Portal técnico consultado',
+        'technical_documentation.denied': 'Portal técnico recusado',
+        'user.technical_access_changed': 'Acesso técnico alterado',
+        'user.technical_access_denied': 'Alteração de acesso técnico recusada',
       };
       const auditResultLabels = { accepted: 'concluído', denied: 'negado', blocked: 'bloqueado' };
 
@@ -1573,10 +1726,22 @@
       }
       function setAuthenticated(user) {
         state.user = user;
+        const technicalAllowed = Boolean(user?.permissions?.includes(TECHNICAL_DOCUMENTATION_PERMISSION));
+        document.querySelector('#technical-nav')?.classList.toggle('hidden', !technicalAllowed);
+        document.querySelector('#technical-nav-group')?.classList.toggle('hidden', !technicalAllowed);
+        if (!technicalAllowed && state.view === 'tecnico') {
+          setView('operacao', { updateHistory: false });
+          updateTechnicalUrl('');
+        }
         els.loginScreen.classList.toggle('hidden', Boolean(user));
         els.appShell.classList.toggle('hidden', !user);
         els.userChip.textContent = user ? user.email : 'Não autenticado';
         els.userAvatar.textContent = user ? String(user.email || '?').trim().charAt(0).toUpperCase() : '–';
+        if (technicalAllowed && state.technicalRoutePending) {
+          state.technicalRoutePending = false;
+          setView('tecnico');
+          void loadTechnicalDocumentation();
+        }
       }
       function selectedItem() {
         return state.installations.find((item) => item.id === state.selectedId) || state.installations[0] || null;
@@ -3389,17 +3554,233 @@
         renderInstallCommand();
       }
 
+      /* ── Portal técnico ──────────────────────────────────────────────── */
+      function canReadTechnicalDocumentation() {
+        return Boolean(state.user?.permissions?.includes(TECHNICAL_DOCUMENTATION_PERMISSION));
+      }
+      function updateTechnicalUrl(articleId, { push = false } = {}) {
+        const url = new URL(window.location.href);
+        if (articleId) url.searchParams.set('doc', articleId);
+        else url.searchParams.delete('doc');
+        const next = `${url.pathname}${url.search}${url.hash}`;
+        if (push) window.history.pushState({ technicalArticleId: articleId || null }, '', next);
+        else window.history.replaceState({ technicalArticleId: articleId || null }, '', next);
+      }
+      function announceTechnical(message) {
+        const live = document.querySelector('#technical-live-status');
+        if (live) live.textContent = message;
+      }
+      function focusTechnicalArticle() {
+        const heading = document.querySelector('#technical-article-title');
+        if (heading) {
+          heading.focus({ preventScroll: true });
+          const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+          document.querySelector('#technical-article')?.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
+        }
+      }
+      function normalizeTechnicalSearch(value) {
+        return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      }
+      function technicalArticleText(article) {
+        return normalizeTechnicalSearch(JSON.stringify({
+          title: article?.title,
+          summary: article?.summary,
+          tags: article?.tags,
+          sourceFiles: article?.sourceFiles,
+          blocks: article?.blocks,
+        }));
+      }
+      function filteredTechnicalCategories() {
+        const categories = Array.isArray(state.technicalDocumentation?.categories)
+          ? state.technicalDocumentation.categories
+          : [];
+        const query = normalizeTechnicalSearch(state.technicalQuery).trim();
+        if (!query) return categories;
+        return categories.map((category) => ({
+          ...category,
+          articles: (category.articles || []).filter((article) => technicalArticleText(article).includes(query)),
+        })).filter((category) => category.articles.length);
+      }
+      function technicalArticleById(id) {
+        for (const category of state.technicalDocumentation?.categories || []) {
+          const found = (category.articles || []).find((article) => article.id === id);
+          if (found) return { article: found, category };
+        }
+        return null;
+      }
+      function selectTechnicalArticle(id, { push = true, focus = true } = {}) {
+        const selected = technicalArticleById(id);
+        if (!selected) return;
+        state.technicalArticleId = id;
+        localStorage.setItem('drac-central-technical-article', id);
+        updateTechnicalUrl(id, { push });
+        renderTechnicalDocumentation();
+        announceTechnical(`Artigo aberto: ${selected.article.title}.`);
+        if (focus) focusTechnicalArticle();
+      }
+      function renderTechnicalBlock(block) {
+        if (!block || typeof block !== 'object') return '';
+        if (block.type === 'paragraph') return `<p>${escapeHtml(block.text)}</p>`;
+        if (block.type === 'callout') {
+          const tone = ['warning', 'danger'].includes(block.tone) ? block.tone : 'info';
+          return `<div class="technical-callout ${tone}"><strong>${escapeHtml(block.title)}</strong><span>${escapeHtml(block.text)}</span></div>`;
+        }
+        if (block.type === 'list' || block.type === 'steps') {
+          const ordered = block.type === 'steps' || block.ordered;
+          const tag = ordered ? 'ol' : 'ul';
+          return `<${tag}>${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}>`;
+        }
+        if (block.type === 'flow') {
+          return `<ol class="technical-flow" aria-label="Fluxo em sequência">${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ol>`;
+        }
+        if (block.type === 'keyValue') {
+          return `<dl class="technical-kv">${(block.items || []).map((item) => `<dt>${escapeHtml(item?.[0])}</dt><dd>${escapeHtml(item?.[1])}</dd>`).join('')}</dl>`;
+        }
+        if (block.type === 'table') {
+          const tableLabel = `Tabela: ${(block.columns || []).join(', ')}`;
+          return `<div class="technical-table-wrap"><table class="technical-table" aria-label="${escapeHtml(tableLabel)}"><thead><tr>${(block.columns || []).map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${(block.rows || []).map((row) => `<tr>${(row || []).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+        }
+        if (block.type === 'code') {
+          return `<div class="technical-code">${block.label ? `<div class="technical-code-label">${escapeHtml(block.label)}</div>` : ''}<code>${escapeHtml(block.text)}</code></div>`;
+        }
+        return '';
+      }
+      function renderTechnicalDocumentation() {
+        const index = document.querySelector('#technical-index');
+        const articleBox = document.querySelector('#technical-article');
+        const notice = document.querySelector('#technical-notice');
+        const version = document.querySelector('#technical-version');
+        const searchStatus = document.querySelector('#technical-search-status');
+        const copyLink = document.querySelector('#technical-copy-link');
+        const printButton = document.querySelector('#technical-print');
+        if (!index || !articleBox) return;
+        index.setAttribute('aria-busy', state.technicalLoading ? 'true' : 'false');
+        articleBox.setAttribute('aria-busy', state.technicalLoading ? 'true' : 'false');
+        if (copyLink) copyLink.disabled = true;
+        if (printButton) printButton.disabled = true;
+        if (state.technicalLoading) {
+          if (searchStatus) searchStatus.textContent = 'Carregando…';
+          index.innerHTML = '<div class="technical-empty">Carregando índice protegido…</div>';
+          articleBox.innerHTML = '<div class="sk-rows"><div class="sk" style="width:38%"></div><div class="sk" style="width:82%"></div><div class="sk" style="width:68%"></div></div>';
+          announceTechnical('Carregando documentação técnica.');
+          return;
+        }
+        if (state.technicalError) {
+          if (searchStatus) searchStatus.textContent = 'Indisponível';
+          index.innerHTML = '<div class="technical-empty">Conteúdo indisponível.</div>';
+          articleBox.innerHTML = `<div class="technical-empty"><div>${escapeHtml(state.technicalError)}</div><button id="technical-retry" class="primary" style="margin-top:12px">Tentar novamente</button></div>`;
+          document.querySelector('#technical-retry')?.addEventListener('click', () => {
+            state.technicalError = '';
+            void loadTechnicalDocumentation();
+          });
+          announceTechnical(`Falha ao carregar a documentação: ${state.technicalError}`);
+          return;
+        }
+        const documentData = state.technicalDocumentation;
+        if (!documentData) return;
+        version.textContent = `v${documentData.version || '—'} · ${documentData.updatedAt || '—'}`;
+        notice.textContent = documentData.notice || '';
+        notice.classList.toggle('hidden', !documentData.notice);
+        const categories = filteredTechnicalCategories();
+        const matchingIds = categories.flatMap((category) => (category.articles || []).map((article) => article.id));
+        if (searchStatus) searchStatus.textContent = `${matchingIds.length} ${matchingIds.length === 1 ? 'artigo' : 'artigos'}`;
+        if (!matchingIds.includes(state.technicalArticleId)) {
+          state.technicalArticleId = matchingIds[0] || '';
+        }
+        if (!matchingIds.length) {
+          index.innerHTML = '<div class="technical-empty">Nenhum artigo corresponde à busca.</div>';
+          articleBox.innerHTML = '<div class="technical-empty"><div>Tente outro termo ou limpe o campo de busca.</div><button id="technical-clear-search" style="margin-top:12px">Limpar busca</button></div>';
+          document.querySelector('#technical-clear-search')?.addEventListener('click', () => {
+            state.technicalQuery = '';
+            const query = document.querySelector('#technical-query');
+            if (query) { query.value = ''; query.focus(); }
+            renderTechnicalDocumentation();
+          });
+          announceTechnical('Nenhum artigo corresponde à busca.');
+          return;
+        }
+        index.innerHTML = categories.map((category) => `
+          <h3 class="technical-category">${escapeHtml(category.title)}</h3>
+          ${(category.articles || []).map((article) => `<button class="${article.id === state.technicalArticleId ? 'active' : ''}" data-technical-article="${escapeHtml(article.id)}" ${article.id === state.technicalArticleId ? 'aria-current="page"' : ''}>${escapeHtml(article.title)}</button>`).join('')}
+        `).join('');
+        index.querySelectorAll('[data-technical-article]').forEach((button) => button.addEventListener('click', () => {
+          selectTechnicalArticle(button.dataset.technicalArticle);
+        }));
+        const selected = technicalArticleById(state.technicalArticleId);
+        if (!selected) return;
+        const { article, category } = selected;
+        const selectedIndex = matchingIds.indexOf(article.id);
+        const previous = selectedIndex > 0 ? technicalArticleById(matchingIds[selectedIndex - 1])?.article : null;
+        const next = selectedIndex < matchingIds.length - 1 ? technicalArticleById(matchingIds[selectedIndex + 1])?.article : null;
+        localStorage.setItem('drac-central-technical-article', article.id);
+        updateTechnicalUrl(article.id);
+        articleBox.innerHTML = `
+          <header class="technical-article-head">
+            <div class="technical-eyebrow">${escapeHtml(category.title)}</div>
+            <h2 id="technical-article-title" tabindex="-1">${escapeHtml(article.title)}</h2>
+            <p>${escapeHtml(article.summary)}</p>
+            ${(article.sourceFiles || []).length ? `<ul class="technical-meta" aria-label="Arquivos relacionados">${article.sourceFiles.map((file) => `<li>${escapeHtml(file)}</li>`).join('')}</ul>` : ''}
+          </header>
+          <div class="technical-content">
+            ${(article.blocks || []).map(renderTechnicalBlock).join('')}
+            <nav class="technical-article-nav" aria-label="Navegação entre artigos">
+              ${previous ? `<button data-technical-previous="${escapeHtml(previous.id)}">← ${escapeHtml(previous.title)}</button>` : '<span></span>'}
+              ${next ? `<button data-technical-next="${escapeHtml(next.id)}">${escapeHtml(next.title)} →</button>` : '<span></span>'}
+            </nav>
+          </div>`;
+        articleBox.setAttribute('aria-labelledby', 'technical-article-title');
+        articleBox.querySelector('[data-technical-previous]')?.addEventListener('click', (event) => selectTechnicalArticle(event.currentTarget.dataset.technicalPrevious));
+        articleBox.querySelector('[data-technical-next]')?.addEventListener('click', (event) => selectTechnicalArticle(event.currentTarget.dataset.technicalNext));
+        if (copyLink) copyLink.disabled = false;
+        if (printButton) printButton.disabled = false;
+      }
+      async function loadTechnicalDocumentation() {
+        if (!canReadTechnicalDocumentation() || state.technicalLoading) return;
+        if (state.technicalDocumentation) { renderTechnicalDocumentation(); return; }
+        state.technicalLoading = true;
+        state.technicalError = '';
+        renderTechnicalDocumentation();
+        try {
+          const res = await fetch(centralUrl('/api/admin/technical-documentation'), { credentials: 'include' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            if (res.status === 403 && state.user) {
+              state.user.permissions = (state.user.permissions || []).filter((permission) => permission !== TECHNICAL_DOCUMENTATION_PERMISSION);
+              setAuthenticated(state.user);
+            }
+            throw new Error(data.message || 'Não foi possível carregar o conteúdo técnico.');
+          }
+          state.technicalDocumentation = data.document || null;
+          if (!state.technicalDocumentation) throw new Error('O servidor retornou um documento técnico vazio.');
+        } catch (error) {
+          state.technicalError = error?.message || 'Não foi possível carregar o conteúdo técnico.';
+        } finally {
+          state.technicalLoading = false;
+          renderTechnicalDocumentation();
+        }
+      }
+
       /* ── Navegação ─────────────────────────────────────────────────────── */
-      function setView(view) {
+      function setView(view, { updateHistory = true } = {}) {
+        const previousView = state.view;
+        if (view === 'tecnico' && !canReadTechnicalDocumentation()) view = 'operacao';
         state.view = view;
         localStorage.setItem('drac-central-view', view);
-        document.querySelectorAll('[data-view-button]').forEach(button => button.classList.toggle('active', button.dataset.viewButton === view));
+        document.querySelectorAll('[data-view-button]').forEach((button) => {
+          const active = button.dataset.viewButton === view;
+          button.classList.toggle('active', active);
+          if (active) button.setAttribute('aria-current', 'page');
+          else button.removeAttribute('aria-current');
+        });
         document.querySelectorAll('.view').forEach(node => node.classList.remove('active'));
         document.querySelector(`#${view}-view`)?.classList.add('active');
         const crumb = document.querySelector('#crumb-view');
         const label = view === 'detalhe' ? (displayName(selectedItem()) || 'Instalação') : (VIEW_LABELS[view] || view);
         if (crumb) crumb.textContent = label;
         document.title = `${label} — DRAC Central`;
+        if (updateHistory && view !== 'tecnico' && previousView === 'tecnico' && state.user && !state.technicalRoutePending) {
+          updateTechnicalUrl('', { push: true });
+        }
         window.scrollTo({ top: 0, behavior: 'auto' });
       }
       // A aba escolhida é lembrada: ao voltar de outra instalação o operador cai
@@ -3446,9 +3827,9 @@
       };
       function paletteActions() {
         return [
-          ...VIEWS.filter(v => v !== 'detalhe').map((view) => ({
+          ...VIEWS.filter((view) => view !== 'detalhe' && (view !== 'tecnico' || canReadTechnicalDocumentation())).map((view) => ({
             group: 'Telas', label: VIEW_LABELS[view], meta: 'ir para',
-            run: () => { setView(view); if (view === 'apps') void loadApps(); if (view === 'usuarios') void loadUsers(); if (view === 'auditoria') void load(); render(); },
+            run: () => { setView(view); if (view === 'apps') void loadApps(); if (view === 'usuarios') void loadUsers(); if (view === 'auditoria') void load(); if (view === 'tecnico') void loadTechnicalDocumentation(); render(); },
           })),
           { group: 'Ações', label: 'Atualizar dados agora', meta: 'R', run: () => load() },
           { group: 'Ações', label: 'Alternar tema claro/escuro', meta: 'T', run: () => applyTheme(document.body.classList.contains('light') ? 'dark' : 'light') },
@@ -4083,7 +4464,10 @@
       function renderUsers(users) {
         const box = document.querySelector('#users-list');
         if (!users.length) { box.innerHTML = '<div class="empty">Nenhum usuário cadastrado.</div>'; return; }
-        box.innerHTML = users.map((u) => `
+        const canManage = Boolean(state.user?.canManageTechnicalAccess);
+        box.innerHTML = users.map((u) => {
+          const technicalAccess = Boolean(u.permissions?.includes(TECHNICAL_DOCUMENTATION_PERMISSION));
+          return `
           <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-hair)">
             <div style="display:flex;align-items:center;gap:10px;min-width:0">
               <span class="avatar" style="width:26px;height:26px;flex:0 0 auto;border-radius:99px;display:grid;place-items:center;background:var(--surface-2);font-size:11px;font-weight:600">${escapeHtml(String(u.name || u.email || '?').trim().charAt(0).toUpperCase())}</span>
@@ -4092,9 +4476,63 @@
                 <div class="subtext" style="margin:0">${escapeHtml(u.email)}</div>
               </div>
             </div>
-            ${u.builtin ? '<span class="badge neutral">Sistema</span>' : `<button class="sm danger" data-deluser="${escapeHtml(u.email)}">Remover</button>`}
-          </div>`).join('');
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap">
+              ${technicalAccess ? '<span class="badge ok">Portal técnico</span>' : ''}
+              ${u.builtin ? '<span class="badge neutral">Sistema</span>' : `
+                ${canManage ? `<button class="sm" data-techuser="${escapeHtml(u.email)}" data-techgrant="${technicalAccess ? '0' : '1'}">${technicalAccess ? 'Revogar portal' : 'Conceder portal'}</button>` : ''}
+                <button class="sm danger" data-deluser="${escapeHtml(u.email)}">Remover</button>`}
+            </div>
+          </div>`;
+        }).join('');
         box.querySelectorAll('[data-deluser]').forEach(b => b.addEventListener('click', () => deleteUser(b.dataset.deluser)));
+        box.querySelectorAll('[data-techuser]').forEach((button) => button.addEventListener('click', () => {
+          const user = users.find((item) => item.email === button.dataset.techuser);
+          void setTechnicalAccess(user, button.dataset.techgrant === '1');
+        }));
+      }
+      async function setTechnicalAccess(user, grant) {
+        if (!user || !state.user?.canManageTechnicalAccess) return;
+        state.pendingTechnicalAccess = { user, grant };
+        const message = document.querySelector('#technical-access-message');
+        const apply = document.querySelector('#technical-access-apply');
+        if (message) {
+          message.textContent = grant
+            ? `Conceder a ${user.email} acesso à arquitetura, regras internas e procedimentos técnicos do AjustCam?`
+            : `Revogar imediatamente de ${user.email} o acesso ao Portal técnico? A sessão continuará válida para as demais áreas permitidas.`;
+        }
+        if (apply) {
+          apply.textContent = grant ? 'Conceder acesso' : 'Revogar acesso';
+          apply.classList.toggle('danger', !grant);
+          apply.classList.toggle('primary', grant);
+        }
+        document.querySelector('#technical-access-dialog')?.showModal();
+      }
+      async function applyTechnicalAccess() {
+        const pending = state.pendingTechnicalAccess;
+        if (!pending || !state.user?.canManageTechnicalAccess) return;
+        const { user, grant } = pending;
+        const permissions = (user.permissions || []).filter((permission) => permission !== TECHNICAL_DOCUMENTATION_PERMISSION);
+        if (grant) permissions.push(TECHNICAL_DOCUMENTATION_PERMISSION);
+        const apply = document.querySelector('#technical-access-apply');
+        if (apply) apply.disabled = true;
+        try {
+          const res = await fetch(centralUrl('/api/admin/users'), {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ email: user.email, permissions }),
+          });
+          const data = await res.json();
+          if (!res.ok) { showToast(data.message || data.error || 'Falha ao alterar o acesso técnico.', 'bad'); return; }
+          document.querySelector('#technical-access-dialog')?.close();
+          state.pendingTechnicalAccess = null;
+          showToast(grant ? 'Acesso ao Portal técnico concedido.' : 'Acesso ao Portal técnico revogado.', 'ok');
+          await loadUsers();
+        } catch {
+          showToast('Falha ao alterar o acesso técnico.', 'bad');
+        } finally {
+          if (apply) apply.disabled = false;
+        }
       }
       async function saveUser() {
         const email = document.querySelector('#user-email').value.trim();
@@ -4227,6 +4665,7 @@
         if (state.view === 'auditoria') void load();
         if (state.view === 'apps') void loadApps();
         if (state.view === 'usuarios') void loadUsers();
+        if (state.view === 'tecnico') void loadTechnicalDocumentation();
         render();
       }));
       [els.search, els.communication, els.contract, els.sort].forEach(input => input.addEventListener('input', render));
@@ -4235,6 +4674,34 @@
       document.querySelector('#audit-filter').addEventListener('change', (event) => {
         state.auditFilter = event.target.value;
         renderAudit();
+      });
+      document.querySelector('#technical-query')?.addEventListener('input', (event) => {
+        state.technicalQuery = event.target.value;
+        renderTechnicalDocumentation();
+      });
+      document.querySelector('#technical-copy-link')?.addEventListener('click', async () => {
+        updateTechnicalUrl(state.technicalArticleId);
+        if (!(await copyText(window.location.href, 'Link permanente do artigo copiado.'))) {
+          showToast('Não foi possível copiar o link automaticamente.', 'bad');
+        }
+      });
+      document.querySelector('#technical-print')?.addEventListener('click', () => window.print());
+      window.addEventListener('popstate', () => {
+        const articleId = new URL(window.location.href).searchParams.get('doc');
+        if (articleId && canReadTechnicalDocumentation()) {
+          state.technicalQuery = '';
+          const query = document.querySelector('#technical-query');
+          if (query) query.value = '';
+          setView('tecnico', { updateHistory: false });
+          if (state.technicalDocumentation) selectTechnicalArticle(articleId, { push: false });
+          else {
+            state.technicalArticleId = articleId;
+            void loadTechnicalDocumentation();
+          }
+        } else if (!articleId && state.view === 'tecnico') {
+          setView('operacao', { updateHistory: false });
+          render();
+        }
       });
       // Ordenar pela coluna reaproveita o mesmo seletor de ordenação da barra —
       // uma verdade só, então cabeçalho e select nunca discordam.
@@ -4276,6 +4743,12 @@
       document.querySelector('#ri-start').addEventListener('click', startRemoteInstall);
       document.querySelector('#app-edit-cancel').addEventListener('click', () => document.querySelector('#app-edit-dialog').close());
       document.querySelector('#app-edit-save').addEventListener('click', saveAppEdit);
+      document.querySelector('#technical-access-cancel').addEventListener('click', () => {
+        state.pendingTechnicalAccess = null;
+        document.querySelector('#technical-access-dialog').close();
+      });
+      document.querySelector('#technical-access-apply').addEventListener('click', applyTechnicalAccess);
+      document.querySelector('#technical-access-dialog').addEventListener('close', () => { state.pendingTechnicalAccess = null; });
       document.querySelector('#user-save').addEventListener('click', saveUser);
       // Pré-preenche o host da instalação remota com o servidor informado acima.
       els.installServer.addEventListener('input', () => {
@@ -4309,6 +4782,7 @@
       load();
       if (state.view === 'apps') void loadApps();
       if (state.view === 'usuarios') void loadUsers();
+      if (state.view === 'tecnico') void loadTechnicalDocumentation();
     </script>
   </body>
 </html>

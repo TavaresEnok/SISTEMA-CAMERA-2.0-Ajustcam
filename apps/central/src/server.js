@@ -4,6 +4,10 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { resolveConfig, createDatastore } = require('./datastore');
+const {
+  TECHNICAL_DOCUMENTATION,
+  TECHNICAL_DOCUMENTATION_PERMISSION,
+} = require('./technical-documentation');
 const { normalizeComputeNodes, validateComputeNodes, summarizeNodes } = require('./datastore/compute-nodes');
 const { normalizeAiPolicy, validateAiPolicy, applyAiPolicyToRestrictions, describeAiPolicy } = require('./ai-policy');
 const {
@@ -76,6 +80,22 @@ const TRUSTED_PROXIES = compileTrustedProxies(
 );
 const loginAttempts = new Map();
 const MAX_REQUEST_BODY_BYTES = Math.max(16 * 1024, Number(process.env.DRAC_CENTRAL_MAX_BODY_BYTES || 1024 * 1024));
+const ALLOWED_CENTRAL_PERMISSIONS = new Set([TECHNICAL_DOCUMENTATION_PERMISSION]);
+
+function normalizeCentralPermissions(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .map((permission) => String(permission || '').trim())
+    .filter((permission) => ALLOWED_CENTRAL_PERMISSIONS.has(permission)))];
+}
+
+function hasCentralPermission(actor, permission) {
+  return Boolean(actor?.permissions?.includes(permission));
+}
+
+function canManageTechnicalAccess(actor) {
+  return actor?.method === 'session' && actor?.accountKind === 'builtin';
+}
 
 // Scheduler multi-nó (fase 4) — DESLIGADO por default. Com a flag off as rotas
 // nem são registradas: nada é lido, nada é escrito, e o registro de nós continua
@@ -341,6 +361,7 @@ function authenticate(db, email, password) {
       email: ADMIN_EMAIL,
       name: 'Administrador',
       builtin: true,
+      permissions: [TECHNICAL_DOCUMENTATION_PERMISSION],
       authVersion: crypto.createHash('sha256').update(ADMIN_PASSWORD_HASH).digest('hex'),
     };
   }
@@ -350,6 +371,7 @@ function authenticate(db, email, password) {
       email,
       name: u.name || email,
       builtin: false,
+      permissions: normalizeCentralPermissions(u.permissions),
       authVersion: Number.isInteger(u.authVersion) ? u.authVersion : 1,
     };
   }
@@ -618,7 +640,13 @@ function getAuthenticatedUser(req, db) {
   const header = String(req.headers.authorization || '');
   // timing-safe: acertar este token é bypass TOTAL de autenticação da Central.
   if (ADMIN_TOKEN && timingSafeTextEquals(header, `Bearer ${ADMIN_TOKEN}`)) {
-    return { email: 'api-token', method: 'bearer' };
+    return {
+      email: 'api-token',
+      method: 'bearer',
+      accountKind: 'bearer',
+      permissions: [],
+      canManageTechnicalAccess: false,
+    };
   }
   cleanExpiredSessions(db);
   const token = parseCookies(req).drac_central_session;
@@ -644,6 +672,14 @@ function getAuthenticatedUser(req, db) {
       delete db.sessions[key];
       return null;
     }
+    session.lastSeenAt = new Date().toISOString();
+    return {
+      email: session.email,
+      method: 'session',
+      accountKind: 'builtin',
+      permissions: [TECHNICAL_DOCUMENTATION_PERMISSION],
+      canManageTechnicalAccess: true,
+    };
   } else {
     const account = db.users?.[session.email];
     const currentVersion = Number.isInteger(account?.authVersion)
@@ -653,9 +689,15 @@ function getAuthenticatedUser(req, db) {
       delete db.sessions[key];
       return null;
     }
+    session.lastSeenAt = new Date().toISOString();
+    return {
+      email: session.email,
+      method: 'session',
+      accountKind: 'user',
+      permissions: normalizeCentralPermissions(account.permissions),
+      canManageTechnicalAccess: false,
+    };
   }
-  session.lastSeenAt = new Date().toISOString();
-  return { email: session.email, method: 'session' };
 }
 
 async function handleLogin(req, res) {
@@ -698,7 +740,15 @@ async function handleLogin(req, res) {
     res,
     200,
     {
-      user: { email: account.email, name: account.name, role: 'ADMIN' },
+      user: {
+        email: account.email,
+        name: account.name,
+        role: 'ADMIN',
+        method: 'session',
+        accountKind: account.builtin ? 'builtin' : 'user',
+        permissions: normalizeCentralPermissions(account.permissions),
+        canManageTechnicalAccess: Boolean(account.builtin),
+      },
       expiresAt: expiresAt.toISOString(),
     },
     { 'set-cookie': sessionCookie(token, Math.floor(SESSION_TTL_MS / 1000)) },
@@ -720,7 +770,17 @@ async function handleMe(req, res) {
   const user = getAuthenticatedUser(req, db);
   await saveDb(db);
   if (!user) return json(req, res, 200, { authenticated: false, user: null });
-  return json(req, res, 200, { authenticated: true, user: { email: user.email, role: 'ADMIN', method: user.method } });
+  return json(req, res, 200, {
+    authenticated: true,
+    user: {
+      email: user.email,
+      role: 'ADMIN',
+      method: user.method,
+      accountKind: user.accountKind,
+      permissions: user.permissions,
+      canManageTechnicalAccess: user.canManageTechnicalAccess,
+    },
+  });
 }
 
 function metricValue(item, key, fallback = null) {
@@ -2484,9 +2544,21 @@ function publicRemoteInstall(job) {
 
 // ── Usuários da Central (multi-admin) ────────────────────────────────────────
 function publicUsers(db) {
-  const out = [{ email: ADMIN_EMAIL, name: 'Administrador', builtin: true }];
+  const out = [{
+    email: ADMIN_EMAIL,
+    name: 'Administrador',
+    builtin: true,
+    permissions: [TECHNICAL_DOCUMENTATION_PERMISSION],
+  }];
   for (const [email, u] of Object.entries(db.users || {})) {
-    out.push({ email, name: u.name || email, builtin: false, createdAt: u.createdAt || null, createdBy: u.createdBy || null });
+    out.push({
+      email,
+      name: u.name || email,
+      builtin: false,
+      createdAt: u.createdAt || null,
+      createdBy: u.createdBy || null,
+      permissions: normalizeCentralPermissions(u.permissions),
+    });
   }
   return out;
 }
@@ -2499,12 +2571,41 @@ async function handleUpsertUser(req, res, db, actor) {
   const email = String(body.email || '').trim().toLowerCase();
   const name = String(body.name || '').trim();
   const password = String(body.password || '');
+  const hasPermissionsUpdate = Object.prototype.hasOwnProperty.call(body, 'permissions');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(req, res, 400, { error: 'invalid_email', message: 'E-mail inválido.' });
   if (email === ADMIN_EMAIL) return json(req, res, 400, { error: 'reserved_email', message: 'Este e-mail é o administrador do sistema (definido no servidor) e não é editável aqui.' });
   if (password && !isStrongPassword(password)) return json(req, res, 400, { error: 'weak_password', message: 'Use ao menos 12 caracteres, com maiúscula, minúscula e número.' });
+  if (hasPermissionsUpdate) {
+    const requested = body.permissions;
+    const invalid = !Array.isArray(requested)
+      || requested.some((permission) => typeof permission !== 'string' || !ALLOWED_CENTRAL_PERMISSIONS.has(permission));
+    if (invalid) {
+      return json(req, res, 400, {
+        error: 'invalid_permissions',
+        message: 'A lista de permissões contém um valor inválido.',
+      });
+    }
+    if (!canManageTechnicalAccess(actor)) {
+      addAuditEvent(db, req, {
+        type: 'user.technical_access_denied',
+        actor: actor.email,
+        result: 'denied',
+        installationId: email,
+      });
+      await saveDb(db);
+      return json(req, res, 403, {
+        error: 'technical_access_manager_required',
+        message: 'Somente o administrador nativo, em uma sessão interativa, pode alterar o acesso técnico.',
+      });
+    }
+  }
   db.users = db.users || {};
   const existing = db.users[email];
   if (!existing && !password) return json(req, res, 400, { error: 'password_required', message: 'Defina uma senha para o novo usuário.' });
+  const previousPermissions = normalizeCentralPermissions(existing?.permissions);
+  const nextPermissions = hasPermissionsUpdate
+    ? normalizeCentralPermissions(body.permissions)
+    : previousPermissions;
   db.users[email] = {
     name: name || (existing && existing.name) || email,
     passwordHash: password ? hashPassword(password) : existing.passwordHash,
@@ -2515,6 +2616,7 @@ async function handleUpsertUser(req, res, db, actor) {
         ? (Number.isInteger(existing.authVersion) ? existing.authVersion : 1) + 1
         : 1)
       : (Number.isInteger(existing?.authVersion) ? existing.authVersion : 1),
+    permissions: nextPermissions,
   };
   const revokedSessions = password ? revokeUserSessions(db, email) : 0;
   addAuditEvent(db, req, {
@@ -2524,8 +2626,41 @@ async function handleUpsertUser(req, res, db, actor) {
     installationId: email,
     revokedSessions,
   });
+  if (hasPermissionsUpdate && previousPermissions.join('\n') !== nextPermissions.join('\n')) {
+    addAuditEvent(db, req, {
+      type: 'user.technical_access_changed',
+      actor: actor.email,
+      result: 'accepted',
+      installationId: email,
+      technicalAccess: nextPermissions.includes(TECHNICAL_DOCUMENTATION_PERMISSION),
+    });
+  }
   await saveDb(db);
   return json(req, res, 200, { ok: true });
+}
+
+async function handleTechnicalDocumentation(req, res, db, actor) {
+  const allowed = actor.method === 'session'
+    && hasCentralPermission(actor, TECHNICAL_DOCUMENTATION_PERMISSION);
+  if (!allowed) {
+    addAuditEvent(db, req, {
+      type: 'technical_documentation.denied',
+      actor: actor.email,
+      result: 'denied',
+    });
+    await saveDb(db);
+    return json(req, res, 403, {
+      error: 'technical_documentation_forbidden',
+      message: 'Esta conta não possui acesso ao Portal técnico.',
+    });
+  }
+  addAuditEvent(db, req, {
+    type: 'technical_documentation.viewed',
+    actor: actor.email,
+    result: 'accepted',
+  });
+  await saveDb(db);
+  return json(req, res, 200, { document: TECHNICAL_DOCUMENTATION });
 }
 async function handleDeleteUser(req, res, db, actor, emailRaw) {
   const email = String(emailRaw || '').toLowerCase();
@@ -2604,6 +2739,13 @@ async function route(req, res) {
       }
       if (req.method === 'POST' && url.pathname === '/api/admin/provision') {
         return handleProvision(req, res, db, actor);
+      }
+
+      // O documento técnico não faz parte dos assets públicos e exige sessão
+      // interativa + permissão explícita. O bearer de automação administrativa
+      // continua válido nas rotas operacionais, mas nunca recebe este conteúdo.
+      if (req.method === 'GET' && url.pathname === '/api/admin/technical-documentation') {
+        return handleTechnicalDocumentation(req, res, db, actor);
       }
 
       // ── Usuários da Central ────────────────────────────────────────────────
