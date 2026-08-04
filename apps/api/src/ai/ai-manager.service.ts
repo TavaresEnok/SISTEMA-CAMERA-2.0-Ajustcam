@@ -214,9 +214,27 @@ export class AiManagerService implements OnModuleInit {
             if (Date.now() - lastAt < 5 * 60_000) continue;
             this.lastDegradedRecoveryAt.set(cam.id, Date.now());
             this.logger.warn(`Processador de IA AUSENTE para câmera armada ${cam.name} — religando análise.`);
-            await this.startCamera(cam.id).catch((error) => {
+            // O RESULTADO precisa aparecer. `startCamera` tem vários retornos que
+            // NÃO iniciam nada e não lançam — o mais traiçoeiro é `camera_disabled`,
+            // quando a câmera está armada em SYSTEM (ou seja, depende do detector)
+            // com o detector DESLIGADO.
+            //
+            // Sem este log, o ciclo dizia "religando" a cada 5 minutos, desistia em
+            // silêncio, e a câmera ficava sem gravar nada com tudo parecendo normal.
+            // Medido: 5 câmeras ONLINE, 10 horas, zero gravações — e o log só
+            // repetindo "religando".
+            const resultado = await this.startCamera(cam.id).catch((error) => {
               this.logger.warn(`Falha ao religar análise de ${cam.name}: ${(error as Error).message}`);
+              return null;
             });
+            const st = resultado ? String((resultado as { status?: string }).status ?? '') : '';
+            if (resultado && st !== 'started' && st !== 'already_running' && st !== 'running') {
+              const motivo = (resultado as { reason?: string }).reason;
+              this.logger.error(
+                `Câmera ${cam.name} está armada por movimento do SISTEMA mas a análise NÃO subiu ` +
+                  `(${st}${motivo ? '/' + motivo : ''}). Enquanto isso, ela não grava nada.`,
+              );
+            }
           }
 
           // RECONCILIAÇÃO REVERSA: processador rodando para câmera NÃO armada é

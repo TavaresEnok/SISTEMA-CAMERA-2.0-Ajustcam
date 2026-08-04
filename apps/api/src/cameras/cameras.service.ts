@@ -5,6 +5,7 @@ import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
 import { statfs } from 'node:fs/promises';
+import { aiEnabledEfetivo } from './helpers/motion-detector.helper';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
@@ -238,7 +239,11 @@ export class CamerasService {
         recordingFps: normalizedProfile.recordingFps,
         recordingBitrateKbps: normalizedProfile.recordingBitrateKbps,
         audioEnabled: dto.audioEnabled ?? false,
-        aiEnabled: dto.aiEnabled ?? true,
+        aiEnabled: aiEnabledEfetivo({
+          recordingMode: dto.recordingMode ?? 'continuous',
+          motionTrigger: dto.motionTrigger ?? (dto.hasEdgeAi ? 'CAMERA' : 'SYSTEM'),
+          aiEnabled: dto.aiEnabled ?? true,
+        }),
         alarmsEnabled: dto.alarmsEnabled ?? true,
         hasEdgeAi: dto.hasEdgeAi ?? false,
         motionTrigger: dto.motionTrigger ?? (dto.hasEdgeAi ? 'CAMERA' : 'SYSTEM'),
@@ -405,9 +410,23 @@ export class CamerasService {
         recordingFps: normalizedProfile.recordingFps,
         recordingBitrateKbps: normalizedProfile.recordingBitrateKbps,
         audioEnabled: dto.audioEnabled,
-        aiEnabled: dto.aiEnabled,
         alarmsEnabled: dto.alarmsEnabled !== undefined ? dto.alarmsEnabled : existing.alarmsEnabled,
         hasEdgeAi: dto.hasEdgeAi !== undefined ? dto.hasEdgeAi : existing.hasEdgeAi,
+        // INVARIANTE: gravar por movimento do SISTEMA exige o detector LIGADO.
+        //
+        // `motionTrigger=SYSTEM` significa "quem detecta é o MOG2". Com
+        // `aiEnabled=false` a combinação é contraditória e o resultado é a câmera
+        // NUNCA gravar: o gerenciador tenta subir a análise, encontra o detector
+        // desligado e desiste — a cada 5 minutos, para sempre.
+        //
+        // Custou 7 câmeras nesse estado, 5 delas ONLINE e mudas por 10 horas sem
+        // nada na tela indicando problema. A regra passa a ser garantida na
+        // escrita, e não confiada a quem preenche o formulário.
+        aiEnabled: aiEnabledEfetivo({
+          recordingMode: dto.recordingMode ?? existing.recordingMode,
+          motionTrigger: dto.motionTrigger ?? existing.motionTrigger,
+          aiEnabled: dto.aiEnabled,
+        }),
         motionTrigger: dto.motionTrigger ?? existing.motionTrigger,
         // Zonas: `undefined` preserva o que existe; array vazio LIMPA (volta a
         // monitorar a câmera inteira) — por isso a checagem explícita.
@@ -1464,7 +1483,11 @@ export class CamerasService {
         streamVideoCodec: 'h264',
         detectedVideoCodec: 'h264',
         audioEnabled: dto.audioEnabled ?? false,
-        aiEnabled: dto.aiEnabled ?? true,
+        aiEnabled: aiEnabledEfetivo({
+          recordingMode: dto.recordingMode ?? 'continuous',
+          motionTrigger: dto.motionTrigger ?? (dto.hasEdgeAi ? 'CAMERA' : 'SYSTEM'),
+          aiEnabled: dto.aiEnabled ?? true,
+        }),
         alarmsEnabled: dto.alarmsEnabled ?? true,
         ...(privacy?.isPrivate ? { isPrivate: true, ownerUserId: privacy.ownerUserId } : {}),
       },
