@@ -51,25 +51,7 @@ const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
   maintenance: 'Manutenção',
 };
 
-const STATUS_BADGE: Record<string, string> = {
-  online: 'bg-[hsl(var(--status-online)_/_0.12)] text-[hsl(var(--status-online))] border-[hsl(var(--status-online)_/_0.3)]',
-  recording: 'bg-[hsl(var(--destructive)_/_0.1)] text-[hsl(var(--destructive))] border-[hsl(var(--destructive)_/_0.3)]',
-  motion: 'bg-[hsl(var(--chart-2)_/_0.12)] text-[hsl(var(--chart-2))] border-[hsl(var(--chart-2)_/_0.3)]',
-  alarm: 'bg-[hsl(var(--destructive)_/_0.1)] text-[hsl(var(--destructive))] border-[hsl(var(--destructive)_/_0.3)]',
-  offline: 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] border-border',
-  no_signal: 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] border-border',
-  maintenance: 'bg-[hsl(var(--chart-2)_/_0.12)] text-[hsl(var(--chart-2))] border-[hsl(var(--chart-2)_/_0.3)]',
-};
 
-const STATUS_DOT: Record<string, string> = {
-  online: 'bg-[hsl(var(--status-online))]',
-  recording: 'bg-[hsl(var(--status-rec))] rec-pulse',
-  motion: 'bg-[hsl(var(--status-motion))]',
-  alarm: 'bg-[hsl(var(--status-alarm))] rec-pulse',
-  offline: 'bg-[hsl(var(--status-offline))]',
-  no_signal: 'bg-[hsl(var(--status-offline))]',
-  maintenance: 'bg-[hsl(var(--status-warning))]',
-};
 
 const STATUS_PILLS = ['all', 'online', 'recording', 'motion', 'alarm', 'offline'] as const;
 
@@ -109,26 +91,6 @@ function formatLiveProtocol(protocol?: string | null) {
   }
 }
 
-function formatCameraStatus(status: string) {
-  switch (status) {
-    case 'online':
-      return 'Online';
-    case 'recording':
-      return 'Gravando';
-    case 'motion':
-      return 'Movimento';
-    case 'alarm':
-      return 'Alarme';
-    case 'offline':
-      return 'Offline';
-    case 'no_signal':
-      return 'Sem sinal';
-    case 'maintenance':
-      return 'Manutenção';
-    default:
-      return status.replace('_', ' ');
-  }
-}
 
 function formatRecordingMode(mode: string) {
   switch (mode) {
@@ -1504,7 +1466,7 @@ export default function CamerasPage() {
                     </td>
                     <td className="px-3 py-2.5 font-mono text-[11px] text-[hsl(var(--muted-foreground))] whitespace-nowrap">{cam.ipAddress}</td>
                     <td className="px-3 py-2.5">
-                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${STATUS_BADGE[cam.status] ?? STATUS_BADGE.offline}`}>
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${CLASSE_CONEXAO[estadoConexao(cam.status)]}`}>
                         {ROTULO_CONEXAO[estadoConexao(cam.status)]}
                       </span>
                     </td>
@@ -1652,8 +1614,8 @@ export default function CamerasPage() {
               <div>
                 <div className="text-sm font-semibold mb-0.5">{liveCam.name}</div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${STATUS_BADGE[liveCam.status] ?? STATUS_BADGE.offline}`}>
-                    {formatCameraStatus(liveCam.status)}
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${CLASSE_CONEXAO[estadoConexao(liveCam.status)]}`}>
+                    {ROTULO_CONEXAO[estadoConexao(liveCam.status)]}
                   </span>
                   <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${CLASSE_MODO_GRAVACAO}`}>
                     {recordingModeCopy.label}
