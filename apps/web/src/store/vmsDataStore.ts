@@ -29,6 +29,8 @@ export interface Camera {
   signalStrength: number;
   recordingMode: 'continuous' | 'motion' | 'schedule' | 'manual';
   retentionDays: number;
+  /** Segue a política do grupo? Ausente em API antiga = segue (o padrão). */
+  retentionFollowsGroup?: boolean;
   preferredRtspTransport: 'tcp' | 'udp';
   preferredLiveProtocol: 'auto' | 'flv' | 'hls' | 'llhls' | 'webrtc' | 'mjpeg';
   rtspPath?: string;

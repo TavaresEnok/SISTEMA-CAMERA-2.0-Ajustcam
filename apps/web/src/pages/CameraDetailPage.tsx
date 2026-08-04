@@ -96,6 +96,7 @@ type CameraConfig = {
   recordingEnabled: boolean;
   recordingMode: RecordingMode;
   retentionDays: string;
+  retentionFollowsGroup: boolean;
   preferredRtspTransport: 'tcp' | 'udp';
   preferredLiveProtocol: 'hls' | 'llhls' | 'webrtc' | 'mjpeg';
   streamVideoCodec: VideoCodec;
@@ -203,7 +204,8 @@ const emptyConfig: CameraConfig = {
   analyticsSubtype: '',
   recordingEnabled: true,
   recordingMode: 'continuous',
-  retentionDays: '7',
+  retentionDays: '3',
+  retentionFollowsGroup: true,
   preferredRtspTransport: 'tcp',
   preferredLiveProtocol: 'webrtc',
   streamVideoCodec: 'original',
@@ -645,7 +647,8 @@ export default function CameraDetailPage() {
           analyticsSubtype: data.analyticsSubtype == null ? '' : String(data.analyticsSubtype),
           recordingEnabled: Boolean(data.recordingEnabled),
           recordingMode: data.recordingMode ?? (data.recordingEnabled ? 'continuous' : 'manual'),
-          retentionDays: String(data.retentionDays ?? 7),
+          retentionDays: String(data.retentionDays ?? 3),
+          retentionFollowsGroup: data.retentionFollowsGroup !== false,
           preferredRtspTransport: data.preferredRtspTransport ?? 'tcp',
           preferredLiveProtocol: normalizePreferredLiveProtocol(data.preferredLiveProtocol),
           streamVideoCodec: normalizeVideoCodec(data.streamVideoCodec),
@@ -958,6 +961,7 @@ export default function CameraDetailPage() {
           recordingEnabled: form.recordingEnabled,
           recordingMode: form.recordingMode,
           retentionDays: Number(form.retentionDays),
+          retentionFollowsGroup: form.retentionFollowsGroup,
           preferredRtspTransport: form.preferredRtspTransport,
           preferredLiveProtocol: form.preferredLiveProtocol === 'mjpeg' ? 'webrtc' : form.preferredLiveProtocol,
           streamVideoCodec: 'h264',
@@ -1658,6 +1662,9 @@ export default function CameraDetailPage() {
                 <div className="rounded-xl border border-border bg-background/55 p-4">
                   <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Retenção</div>
                   <div className="mt-2 text-sm font-semibold">{cam.retentionDays} dias</div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {cam.retentionFollowsGroup === false ? 'Prazo próprio desta câmera' : 'Herdado do grupo'}
+                  </div>
                 </div>
                 <div className="rounded-xl border border-border bg-background/55 p-4">
                   <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Armazenamento</div>
@@ -1883,8 +1890,14 @@ export default function CameraDetailPage() {
                           <option value="manual">Manual</option>
                         </SettingsSelect>
                       </SettingsField>
+                      <SettingsSwitch
+                        checked={form.retentionFollowsGroup}
+                        onChange={(value) => updateField('retentionFollowsGroup', value)}
+                        label="Seguir a retenção do grupo"
+                        description="Desligue para esta câmera guardar por um prazo próprio, independente do grupo."
+                      />
                       <SettingsField label="Retenção (dias)">
-                        <SettingsInput type="number" min={1} value={form.retentionDays} onChange={(event) => updateField('retentionDays', event.target.value)} className="font-mono" />
+                        <SettingsInput type="number" min={1} disabled={form.retentionFollowsGroup} value={form.retentionDays} onChange={(event) => updateField('retentionDays', event.target.value)} className="font-mono" />
                       </SettingsField>
                       <SettingsField label="Codec de arquivo" hint="Arquiva o codec original (cópia, sem reconversão).">
                         <SettingsSelect value="copy" disabled>
