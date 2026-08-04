@@ -38,6 +38,7 @@ import {
   parsePreviewFrame,
   type PreviewFrame,
 } from '../lib/camera-preview-frame';
+import { ROTULO_CONEXAO, atividadeAgora, estadoConexao } from '../lib/camera-status';
 const STATUSES = ['all', 'online', 'recording', 'motion', 'alarm', 'offline', 'no_signal', 'maintenance'] as const;
 const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
   all: 'Todos os status',
@@ -1505,7 +1506,7 @@ export default function CamerasPage() {
                     <td className="px-3 py-2.5 font-mono text-[11px] text-[hsl(var(--muted-foreground))] whitespace-nowrap">{cam.ipAddress}</td>
                     <td className="px-3 py-2.5">
                       <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] ${STATUS_BADGE[cam.status] ?? STATUS_BADGE.offline}`}>
-                        {formatCameraStatus(cam.status)}
+                        {ROTULO_CONEXAO[estadoConexao(cam.status)]}
                       </span>
                     </td>
                     <td className="px-3 py-2.5">
@@ -1514,6 +1515,11 @@ export default function CamerasPage() {
                           {recordingModeCopy.label}
                         </span>
                         <span className="text-[10px] text-[hsl(var(--muted-foreground))]">{cam.retentionDays} dias</span>
+                        {/* A atividade do INSTANTE mora aqui, junto do modo — não na coluna de
+                            conexão, onde ela competia com "Online" como se fosse alternativa. */}
+                        {atividadeAgora(cam.status) && (
+                          <span className="text-[10px] text-[hsl(var(--status-online))]">{atividadeAgora(cam.status)}</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-3 py-2.5">
@@ -1590,11 +1596,11 @@ export default function CamerasPage() {
                         <div className="text-[13px] font-semibold truncate">{cam.name}</div>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[cam.status] ?? STATUS_DOT.offline}`} />
-                          <span className="text-[10px] text-muted-foreground">{formatCameraStatus(cam.status)}</span>
+                          <span className="text-[10px] text-muted-foreground">{ROTULO_CONEXAO[estadoConexao(cam.status)]}</span>
                         </div>
                       </div>
                       <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${isDisabled ? 'border-amber-500/40 bg-amber-500/10 text-amber-500' : STATUS_BADGE[cam.status] ?? STATUS_BADGE.offline}`}>
-                        {isDisabled ? 'Desativada' : formatCameraStatus(cam.status)}
+                        {isDisabled ? 'Desativada' : (atividadeAgora(cam.status) ?? formatRecordingMode(cam.recordingMode))}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] text-muted-foreground font-mono">
