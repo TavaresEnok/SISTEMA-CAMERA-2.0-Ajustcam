@@ -188,6 +188,22 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
    * cadastro apontando para o mesmo lugar — duas linhas disputando os mesmos
    * objetos, e a varredura de órfãos apagando o que a outra ainda usa.
    */
+  /**
+   * Devolve o storage da tabela com a OPERAÇÃO que o operador escolheu.
+   *
+   * `materializar` monta a linha do banco, que guarda endereço e credencial —
+   * não guarda `mode` nem `localWindowHours`, porque essas são decisões de
+   * operação e vivem na configuração provisionada. Sem reaplicá-las aqui, o
+   * offload lia sempre `tier`/24h: o operador escolhia "Direto — apaga o local
+   * assim que confirma o envio", nada era liberado, e o disco enchia sem que
+   * nenhum log apontasse a causa. Custou o disco chegar a 95% com o guardião
+   * interrompendo gravação.
+   */
+  private comOperacao(linha: StorageResolvido | null, config: StorageResolvido): StorageResolvido | null {
+    if (!linha) return null;
+    return { ...linha, mode: config.mode, localWindowHours: config.localWindowHours };
+  }
+
   private async reconciliar(config: StorageResolvido): Promise<StorageResolvido | null> {
     const endereco = {
       endpoint: config.endpoint,
@@ -198,17 +214,43 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
 
     const nomeDesejado = config.name || config.bucket;
     if (existente?.isActive && existente.accessKeyId === config.accessKeyId) {
-      // Caminho quente: nada mudou no ENDEREÇO. É o que roda a cada gravação
-      // enviada, então não faz escrita à toa — exceto pelo nome, que o operador
-      // pode ter corrigido na Central e que só aparece na tela. Sem isto, um
-      // storage renomeado ficava com o rótulo antigo para sempre.
-      if (existente.name !== nomeDesejado) {
-        await this.prisma.cloudStorage
-          .update({ where: { id: existente.id }, data: { name: nomeDesejado } })
-          .catch(() => undefined);
-        return this.materializar({ ...existente, name: nomeDesejado });
+      // Caminho quente: o ENDEREÇO e a Access Key são os mesmos. É o que roda a
+      // cada gravação enviada, então não escreve à toa — mas duas coisas ainda
+      // podem ter mudado e PRECISAM chegar aqui.
+      //
+      // O SEGREDO é a que dói. Comparar só endereço e Access Key fazia a rotação
+      // de credencial nunca alcançar a tabela: o operador corrigia a chave na
+      // Central, a Central passava a mandar a nova, e o offload continuava
+      // assinando com a velha. Custou 16 horas e 2.286 gravações paradas, com o
+      // único sintoma sendo `SignatureDoesNotMatch` num log de aviso.
+      //
+      // A comparação é sobre o texto em claro: AES-GCM usa nonce novo a cada
+      // cifragem, então dois cifrados do MESMO segredo são diferentes byte a
+      // byte — comparar os cifrados reescreveria a linha em toda passagem.
+      let segredoAtual: string | null = null;
+      try {
+        segredoAtual = this.crypto.decrypt(existente.secretAccessKeyEncrypted);
+      } catch {
+        // Ilegível conta como diferente: reescrever conserta a linha.
+        segredoAtual = null;
       }
-      return this.materializar(existente);
+      const precisaTrocarSegredo = segredoAtual !== config.secretAccessKey;
+      const precisaTrocarNome = existente.name !== nomeDesejado;
+
+      if (precisaTrocarSegredo || precisaTrocarNome) {
+        const dadosNovos = {
+          ...(precisaTrocarNome ? { name: nomeDesejado } : {}),
+          ...(precisaTrocarSegredo ? { secretAccessKeyEncrypted: this.crypto.encrypt(config.secretAccessKey) } : {}),
+        };
+        await this.prisma.cloudStorage
+          .update({ where: { id: existente.id }, data: dadosNovos })
+          .catch(() => undefined);
+        if (precisaTrocarSegredo) {
+          this.logger.log(`Credencial do storage "${nomeDesejado}" atualizada a partir da Central.`);
+        }
+        return this.comOperacao(this.materializar({ ...existente, ...dadosNovos } as typeof existente), config);
+      }
+      return this.comOperacao(this.materializar(existente), config);
     }
 
     const dados = {
@@ -259,7 +301,7 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
         `Storage "${linha.name}" (${linha.bucket}) passou a receber as gravações; os anteriores viram somente-leitura.`,
       );
     }
-    return this.materializar(linha);
+    return this.comOperacao(this.materializar(linha), config);
   }
 
   /**
@@ -337,6 +379,9 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
       id: registro.id,
       name: registro.name,
       enabled: true,
+      // Padrões seguros para storage ARQUIVADO: ele é somente-leitura, e nada
+      // aqui decide apagar arquivo. Para o storage ATIVO, o modo e a janela
+      // reais vêm da configuração provisionada — veja `comOperacao`.
       mode: 'tier',
       provider: registro.provider,
       endpoint: registro.endpoint,

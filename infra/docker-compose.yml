@@ -311,6 +311,13 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - AUTH_REFRESH_INACTIVITY_DAYS=${AUTH_REFRESH_INACTIVITY_DAYS:-7}
       - CAMERA_SECRET_KEY=${CAMERA_SECRET_KEY:?CAMERA_SECRET_KEY is required}
+      # ENVIO PARA A NUVEM. O padrão (25 por rodada, a cada 15 min) sustenta o
+      # regime permanente, mas não drena FILA: quando o offload fica parado —
+      # credencial errada, storage fora do ar — a fila cresce em minutos e o
+      # padrão levaria quase um dia para recuperar, com o disco enchendo. Medido:
+      # 2.285 gravações acumuladas em 16h de parada.
+      - CLOUD_OFFLOAD_BATCH=${CLOUD_OFFLOAD_BATCH:-200}
+      - CLOUD_OFFLOAD_INTERVAL_MINUTES=${CLOUD_OFFLOAD_INTERVAL_MINUTES:-5}
       - CAMERA_SECRET_KEY_LEGACY=${CAMERA_SECRET_KEY_LEGACY:-}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       - EVIDENCE_HMAC_SECRET=${EVIDENCE_HMAC_SECRET:?EVIDENCE_HMAC_SECRET is required}

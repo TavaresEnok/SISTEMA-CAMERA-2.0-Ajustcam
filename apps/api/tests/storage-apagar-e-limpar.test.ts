@@ -387,3 +387,131 @@ test('excluir NÃO torna o acervo ilegível: a leitura continua resolvendo pela 
   assert.equal(leitura.bucket, 'acervo-1t',
     'excluir tira o DESTINO das gravações novas, não o acesso ao que já foi gravado');
 });
+
+// ── ROTAÇÃO DE CREDENCIAL ───────────────────────────────────────────────────
+//
+// O caminho quente comparava só ENDEREÇO e Access Key. Trocar apenas o SEGREDO
+// — que é o que acontece quando alguém corrige uma chave digitada errado —
+// nunca chegava na tabela: a Central passava a mandar a nova, e o offload
+// continuava assinando com a velha. Custou 16 horas e 2.286 gravações paradas,
+// com o único sintoma sendo `SignatureDoesNotMatch` num log de aviso.
+
+test('trocar SÓ o segredo, com a mesma Access Key, atualiza a linha', async () => {
+  let gravado: any = null;
+  const linha = { ...ANTIGO, isActive: true, secretAccessKeyEncrypted: 'cifrado:SEGREDO-VELHO' };
+  const svc = makeResolver({
+    cloudConnector: {
+      getCloudStorageConfig: async () => ({
+        ...NOVO_PROVISIONADO, endpoint: ANTIGO.endpoint, bucket: ANTIGO.bucket, prefix: '',
+        accessKeyId: ANTIGO.accessKeyId, secretAccessKey: 'SEGREDO-NOVO',
+      }),
+      getCloudStorageState: async () => 'configured',
+    },
+  });
+  svc.prisma = {
+    cloudStorage: {
+      findFirst: async () => linha,
+      findUnique: async () => linha,
+      count: async () => 1,
+      update: async (args: any) => { gravado = args.data; return linha; },
+      updateMany: async () => ({ count: 0 }),
+      create: async () => { throw new Error('não devia criar outro cadastro'); },
+    },
+    recording: { updateMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: any) => fn(svc.prisma),
+  };
+
+  const r = await svc.storageParaEscrita();
+  assert.equal(gravado?.secretAccessKeyEncrypted, 'cifrado:SEGREDO-NOVO',
+    'sem isto o offload assina com a chave velha e leva 403 para sempre');
+  assert.equal(r.secretAccessKey, 'SEGREDO-NOVO', 'e o que sai daqui já é a credencial nova');
+});
+
+test('segredo IGUAL não reescreve a linha — AES-GCM cifra diferente a cada vez', async () => {
+  let escreveu = false;
+  const linha = { ...ANTIGO, isActive: true, secretAccessKeyEncrypted: 'cifrado:MESMO' };
+  const svc = makeResolver({
+    cloudConnector: {
+      getCloudStorageConfig: async () => ({
+        ...NOVO_PROVISIONADO, endpoint: ANTIGO.endpoint, bucket: ANTIGO.bucket, prefix: '',
+        accessKeyId: ANTIGO.accessKeyId, secretAccessKey: 'MESMO', name: ANTIGO.name,
+      }),
+      getCloudStorageState: async () => 'configured',
+    },
+  });
+  svc.prisma = {
+    cloudStorage: {
+      findFirst: async () => linha, findUnique: async () => linha, count: async () => 1,
+      update: async () => { escreveu = true; return linha; },
+      updateMany: async () => ({ count: 0 }),
+    },
+    recording: { updateMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: any) => fn(svc.prisma),
+  };
+
+  await svc.storageParaEscrita();
+  assert.equal(escreveu, false,
+    'comparar os CIFRADOS reescreveria a linha em toda gravação enviada, porque o nonce muda');
+});
+
+test('credencial ilegível na tabela é reescrita, não mantida', async () => {
+  let gravado: any = null;
+  const linha = { ...ANTIGO, isActive: true, secretAccessKeyEncrypted: 'lixo-ilegivel' };
+  const svc = makeResolver({
+    crypto: {
+      decrypt: (v: string) => { if (!v.startsWith('cifrado:')) throw new Error('ilegível'); return v.slice(8); },
+      encrypt: (v: string) => `cifrado:${v}`,
+    },
+    cloudConnector: {
+      getCloudStorageConfig: async () => ({
+        ...NOVO_PROVISIONADO, endpoint: ANTIGO.endpoint, bucket: ANTIGO.bucket, prefix: '',
+        accessKeyId: ANTIGO.accessKeyId, secretAccessKey: 'BOA', name: ANTIGO.name,
+      }),
+      getCloudStorageState: async () => 'configured',
+    },
+  });
+  svc.prisma = {
+    cloudStorage: {
+      findFirst: async () => linha, findUnique: async () => linha, count: async () => 1,
+      update: async (args: any) => { gravado = args.data; return linha; },
+      updateMany: async () => ({ count: 0 }),
+    },
+    recording: { updateMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: any) => fn(svc.prisma),
+  };
+
+  await svc.storageParaEscrita();
+  assert.equal(gravado?.secretAccessKeyEncrypted, 'cifrado:BOA',
+    'manter o ilegível deixaria o storage morto sem chance de se recuperar sozinho');
+});
+
+test('modo e janela do OPERADOR chegam ao offload, não os padrões da tabela', async () => {
+  // A tabela guarda endereço e credencial; `mode` e `localWindowHours` são
+  // decisão de operação e vivem na configuração provisionada. Sem reaplicá-las,
+  // o offload lia sempre `tier`/24h: o operador escolhia "Direto — apaga o local
+  // assim que confirma", nada era liberado, e o disco enchia sem nenhum log
+  // apontando a causa.
+  const linha = { ...ANTIGO, isActive: true };
+  const svc = makeResolver({
+    cloudConnector: {
+      getCloudStorageConfig: async () => ({
+        ...NOVO_PROVISIONADO, endpoint: ANTIGO.endpoint, bucket: ANTIGO.bucket, prefix: '',
+        accessKeyId: ANTIGO.accessKeyId, secretAccessKey: 'SEGREDO', name: ANTIGO.name,
+        mode: 'mount', localWindowHours: 2,
+      }),
+      getCloudStorageState: async () => 'configured',
+    },
+  });
+  svc.prisma = {
+    cloudStorage: {
+      findFirst: async () => linha, findUnique: async () => linha, count: async () => 1,
+      update: async () => linha, updateMany: async () => ({ count: 0 }),
+    },
+    recording: { updateMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: any) => fn(svc.prisma),
+  };
+
+  const r = await svc.storageParaEscrita();
+  assert.equal(r.mode, 'mount', 'modo Direto tem de chegar — é ele que zera a janela de liberação');
+  assert.equal(r.localWindowHours, 2, 'e a janela escolhida, não o 24h fixo da tabela');
+});
