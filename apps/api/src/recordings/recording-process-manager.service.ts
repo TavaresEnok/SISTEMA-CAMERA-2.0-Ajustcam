@@ -1630,7 +1630,19 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
         knownFiles.add(fullPath);
         continue;
       }
-      if (statSync(fullPath).size <= 0) continue;
+      // Vazio aqui é lixo CONFIRMADO: o segmento que o ffmpeg ainda pode estar
+      // escrevendo é o mais novo, e ele já ficou de fora de `candidates`. O que
+      // sobra com 0 byte é de uma gravação que morreu ao iniciar.
+      //
+      // Antes isto era `continue`, e o arquivo ficava no disco PARA SEMPRE: esta
+      // varredura o pulava, e a varredura de órfãos pula câmera ativa. Ninguém
+      // mais passava por ele.
+      if (statSync(fullPath).size <= 0) {
+        await unlink(fullPath).catch(() => undefined);
+        knownFiles.add(fullPath);
+        this.logger.log(`Segmento vazio descartado (gravação interrompida ao iniciar): ${basename(fullPath)}`);
+        continue;
+      }
       try {
         await this.remuxAndRegisterTsSegment(cameraId, fullPath, segmentSeconds);
         knownFiles.add(fullPath);
