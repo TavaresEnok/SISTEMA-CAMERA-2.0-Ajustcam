@@ -162,6 +162,7 @@ test('a URL de publicação sai pronta nos dois formatos de interface', () => {
 
 test('host curto configurado prevalece, mantém porta explícita e os 128 bits', () => {
   const chave = 'c'.repeat(32);
+  const compacta = encodeCompactIngestKey(chave)!;
   const alvo = buildPublishTarget({
     host: 'ajustcam.ajustconsulting.com.br',
     compactHost: '168.194.13.70',
@@ -170,8 +171,8 @@ test('host curto configurado prevalece, mantém porta explícita e os 128 bits',
   });
 
   assert.ok(alvo.canonicalFullUrl.length > RTMP_SINGLE_FIELD_MAX_LENGTH);
-  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/drac/${chave}`);
-  assert.equal(alvo.fullUrl.length, RTMP_SINGLE_FIELD_MAX_LENGTH);
+  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/d/${compacta}`);
+  assert.equal(alvo.fullUrl.length, 50);
   assert.equal(alvo.fullUrlFitsSingleField, true);
   assert.equal(alvo.streamKey, chave, 'o formato separado continua compatível com a chave hexadecimal');
   assert.equal(ingestKeyFromPathName(alvo.fullUrl.split(':1935/')[1]), chave);
@@ -193,8 +194,9 @@ test('sem host curto, domínio do AjustCam usa alias Base64URL sem reduzir os 12
   assert.equal(ingestKeyFromPathName(alvo.fullUrl.split('.br/')[1]), chave);
 });
 
-test('IP curto permanece como fallback para um domínio ainda maior que 63 caracteres', () => {
+test('IP curto e alias Base64URL permanecem como fallback para domínio ainda maior', () => {
   const chave = 'c'.repeat(32);
+  const compacta = encodeCompactIngestKey(chave)!;
   const alvo = buildPublishTarget({
     host: 'dominio-publico-extremamente-comprido.empresa.exemplo.test',
     compactHost: '168.194.13.70',
@@ -202,8 +204,8 @@ test('IP curto permanece como fallback para um domínio ainda maior que 63 carac
     key: chave,
   });
 
-  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/drac/${chave}`);
-  assert.equal(alvo.fullUrl.length, RTMP_SINGLE_FIELD_MAX_LENGTH);
+  assert.equal(alvo.fullUrl, `rtmp://168.194.13.70:1935/d/${compacta}`);
+  assert.equal(alvo.fullUrl.length, 50);
   assert.equal(alvo.fullUrlFitsSingleField, true);
 });
 

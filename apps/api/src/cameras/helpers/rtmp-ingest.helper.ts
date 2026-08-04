@@ -188,14 +188,14 @@ export function buildPublishTarget(input: {
     && /^[a-z0-9.-]+$/i.test(compactHost)
     && !compactHost.startsWith('.')
     && !compactHost.endsWith('.');
-  const compactHostFullUrl = compactHostSeguro
-    ? `${scheme}://${compactHost}:${input.port}/${RTMP_INGEST_APP}/${input.key}`
+  const compactHostFullUrl = compactHostSeguro && compactKey
+    ? `${scheme}://${compactHost}:${input.port}/${RTMP_INGEST_COMPACT_APP}/${compactKey}`
     : null;
   // Quando o operador configurou um host compacto, ele é uma decisão explícita
   // de compatibilidade e tem precedência sobre encurtar o path no domínio
   // principal. Isso mantém a porta visível para firmwares que não aplicam a
-  // porta padrão do RTMP corretamente. Nunca truncamos o segredo: no host curto
-  // continuamos usando os 32 hexadecimais (128 bits) canônicos.
+  // porta padrão do RTMP corretamente. A representação Base64URL reduz apenas
+  // o texto (32 → 22 caracteres), preservando os mesmos 16 bytes/128 bits.
   const compactFullUrl = canonicalFullUrl.length > RTMP_SINGLE_FIELD_MAX_LENGTH
     ? [compactHostFullUrl, domainCompactFullUrl]
       .find((url): url is string => Boolean(url && url.length <= RTMP_SINGLE_FIELD_MAX_LENGTH)) ?? null

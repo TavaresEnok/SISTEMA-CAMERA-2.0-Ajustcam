@@ -37,10 +37,9 @@ A resposta traz os dois campos que a interface da câmera pede:
 
 Se o domínio tornar a URL maior que o campo do equipamento e
 `MEDIAMTX_RTMP_SHORT_HOST` estiver configurado, a API prioriza esse endereço
-curto com a porta 1935 explícita e mantém `drac/<32 hex>` em `fullUrl`. A chave
-continua com os mesmos 128 bits e nunca é recortada. O alias
-`d/<22 base64url>` permanece aceito e é usado como fallback quando não houver
-host curto adequado; sem alternativa segura, a API responde
+curto com a porta 1935 explícita. Para deixar margem ao firmware, o endereço
+usa `d/<22 base64url>`: são os mesmos 16 bytes/128 bits da chave, apenas em
+outra representação, nunca um recorte. Sem alternativa segura, a API responde
 `fullUrlFitsSingleField=false`.
 
 **2. Na câmera**, procure *Rede → RTMP* (ou *Live Streaming*, *Push Stream*):
@@ -119,10 +118,10 @@ Grade, tela cheia e "máxima qualidade" leem a mesma ingestão.
 
 **Campos curtos existem.** Equipamentos Intelbras medidos aceitam no máximo 63
 caracteres em "Endereço personalizado". Na instalação oficial, o
-`MEDIAMTX_RTMP_SHORT_HOST` permite usar IP + porta explícita + `drac/` + chave
-hexadecimal em exatamente 63 caracteres, preservando os 128 bits. O formato
-compacto por domínio (`d/<22 base64url>`) continua disponível como fallback e
-permanece autenticado pela mesma chave canônica.
+`MEDIAMTX_RTMP_SHORT_HOST` permite usar IP + porta explícita + `d/` + chave
+Base64URL em 50 caracteres, preservando os 128 bits e deixando 13 caracteres
+de margem para firmwares que reservam espaço interno. O formato histórico
+`drac/<32 hex>` continua aceito e autenticado pela mesma chave canônica.
 
 **Alguns equipamentos ignoram o caminho.** A Positivo CIP-B1312-M medida em campo
 usa somente host/porta e publica em um nome derivado do número de série. O fluxo de
