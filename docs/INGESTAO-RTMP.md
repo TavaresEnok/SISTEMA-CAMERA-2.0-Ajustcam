@@ -35,12 +35,13 @@ A resposta traz os dois campos que a interface da câmera pede:
 }
 ```
 
-Se o domínio tornar a URL maior que o campo do equipamento, a API usa
-`MEDIAMTX_RTMP_SHORT_HOST` para devolver em `fullUrl` uma alternativa compacta
-por IP/host curto. A chave continua com 128 bits; ela nunca é recortada para
-fazer a URL caber. Sem alternativa curta configurada, a resposta marca
-`fullUrlFitsSingleField=false` e a interface orienta usar servidor e chave em
-campos separados ou o caminho próprio do equipamento.
+Se o domínio tornar a URL maior que o campo do equipamento, a API mantém o
+domínio, omite a porta padrão 1935 e usa o alias `d/<22 base64url>` em `fullUrl`.
+Essa é apenas outra representação dos mesmos 16 bytes aleatórios: a chave
+continua com 128 bits e nunca é recortada. O formato histórico
+`drac/<32 hex>` permanece aceito. Se até o alias não couber, a API pode usar
+`MEDIAMTX_RTMP_SHORT_HOST` como fallback; sem alternativa segura, responde
+`fullUrlFitsSingleField=false`.
 
 **2. Na câmera**, procure *Rede → RTMP* (ou *Live Streaming*, *Push Stream*):
 
@@ -117,9 +118,11 @@ câmera.
 Grade, tela cheia e "máxima qualidade" leem a mesma ingestão.
 
 **Campos curtos existem.** Equipamentos Intelbras medidos aceitam no máximo 63
-caracteres em "Endereço personalizado". Um domínio longo mais a chave completa
-ultrapassa esse limite. Configure `MEDIAMTX_RTMP_SHORT_HOST` com um IP público ou
-hostname curto roteável; a interface escolhe essa alternativa automaticamente.
+caracteres em "Endereço personalizado". Para o domínio oficial do AjustCam, a
+URL usa exatamente 63 caracteres: domínio + `/d/` + chave Base64URL de 22
+caracteres. São os mesmos 128 bits do hexadecimal de 32 caracteres. Um IP ou
+hostname configurado em `MEDIAMTX_RTMP_SHORT_HOST` é apenas fallback para
+domínios ainda maiores.
 
 **Alguns equipamentos ignoram o caminho.** A Positivo CIP-B1312-M medida em campo
 usa somente host/porta e publica em um nome derivado do número de série. O fluxo de

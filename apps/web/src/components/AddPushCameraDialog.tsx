@@ -182,8 +182,8 @@ export function AddPushCameraDialog({
               <div className="rounded-md border border-[hsl(var(--status-online)_/_0.35)] bg-[hsl(var(--status-online)_/_0.08)] p-3">
                 <p className="text-[11px] font-semibold text-[hsl(var(--status-online))]">Compatível com campos curtos</p>
                 <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-                  O sistema escolheu automaticamente o endereço público compacto para caber no limite de{' '}
-                  {alvo.singleFieldMaxLength ?? 63} caracteres da Intelbras. A chave continua completa e segura.
+                  O sistema manteve o domínio e representou os mesmos 128 bits em formato compacto para caber no limite de{' '}
+                  {alvo.singleFieldMaxLength ?? 63} caracteres da Intelbras. A chave não foi enfraquecida.
                 </p>
               </div>
             )}

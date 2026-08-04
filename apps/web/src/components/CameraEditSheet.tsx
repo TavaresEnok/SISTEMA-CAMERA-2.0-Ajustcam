@@ -412,7 +412,8 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                             <div className="rounded-md border border-[hsl(var(--status-online)_/_0.35)] bg-[hsl(var(--status-online)_/_0.08)] p-3">
                               <p className="text-[11px] font-semibold text-[hsl(var(--status-online))]">Endereço compacto selecionado</p>
                               <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-                                Cabe no limite de {ingest?.singleFieldMaxLength ?? 63} caracteres da Intelbras sem reduzir a chave.
+                                Mantém o domínio e os 128 bits da chave, cabendo no limite de{' '}
+                                {ingest?.singleFieldMaxLength ?? 63} caracteres da Intelbras.
                               </p>
                             </div>
                           )}

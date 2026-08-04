@@ -11,7 +11,7 @@ import {
 import * as os from 'node:os';
 import { envNumber } from '../common/config/env-number.helper';
 import {
-  ingestPathName,
+  ingestPathNames,
   isAcceptableIngestPath,
   isPushSourced,
   isValidIngestKey,
@@ -1837,7 +1837,25 @@ export class MediamtxProxyService implements OnApplicationBootstrap, OnModuleDes
       } catch {
         ingestKey = null;
       }
-      if (isValidIngestKey(ingestKey)) ingestPath = ingestPathName(ingestKey);
+      if (isValidIngestKey(ingestKey)) {
+        const candidatos = ingestPathNames(ingestKey);
+        // A URL nova publica no alias compacto; a antiga continua em `drac/`.
+        // Se alguma das duas estiver ativa, a entrega acompanha a publicação
+        // real. Sem publicação ainda, prepara o alias recomendado na interface.
+        ingestPath = candidatos[0];
+        for (const candidato of candidatos) {
+          try {
+            if (await this.isPathPublishing(candidato)) {
+              ingestPath = candidato;
+              break;
+            }
+          } catch (error: any) {
+            // 404 significa apenas "não está publicando neste formato". Uma
+            // falha real da API não pode nos fazer trocar um path às cegas.
+            if (error?.status !== 404) throw error;
+          }
+        }
+      }
     }
     if (!ingestPath) {
       // Câmera marcada como push mas sem chave nem caminho vinculado: cadastro

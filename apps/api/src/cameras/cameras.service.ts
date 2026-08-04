@@ -14,6 +14,7 @@ import {
   generateIngestKey,
   hashIngestKey,
   ingestHashMatches,
+  ingestPathNames,
   isAcceptableIngestPath,
   isPushSourced,
   isValidIngestKey,
@@ -1543,16 +1544,23 @@ export class CamerasService {
   ) {
     let publicando = false;
     try {
-      let caminho: string | null = null;
+      let caminhos: string[] = [];
       if (isAcceptableIngestPath(camera.rtmpIngestPath)) {
-        caminho = normalizeIngestPath(camera.rtmpIngestPath);
+        caminhos = [normalizeIngestPath(camera.rtmpIngestPath)];
       } else if (camera.rtmpIngestKeyEncrypted) {
         try {
           const chave = this.cryptoService.decrypt(camera.rtmpIngestKeyEncrypted);
-          if (isValidIngestKey(chave)) caminho = `drac/${chave}`;
+          // Aceita primeiro o alias curto novo e depois o path hexadecimal
+          // histórico. Assim a frota pode migrar câmera a câmera, sem downtime.
+          if (isValidIngestKey(chave)) caminhos = ingestPathNames(chave);
         } catch { /* chave ilegível: segue como não publicando */ }
       }
-      if (caminho) publicando = await this.ingestPathIsLive(caminho);
+      for (const caminho of caminhos) {
+        if (await this.ingestPathIsLive(caminho)) {
+          publicando = true;
+          break;
+        }
+      }
     } catch {
       // MediaMTX fora do ar não é prova de câmera offline: mantém o status
       // anterior em vez de inventar uma queda que não aconteceu.

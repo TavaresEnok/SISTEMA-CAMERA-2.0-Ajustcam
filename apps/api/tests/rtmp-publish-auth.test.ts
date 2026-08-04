@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { CameraStreamController } from '../src/camera-stream/camera-stream.controller';
 import { PendingIngestRegistry } from '../src/cameras/pending-ingest.registry';
 import {
+  compactIngestPathName,
   generateIngestKey,
   hashIngestKey,
   ingestPathName,
@@ -80,6 +81,15 @@ test('publicação com chave válida por RTMP é autorizada', async () => {
   assert.equal(r.corpo?.authorized, true);
 });
 
+test('publicação pelo alias curto Base64URL resolve a mesma chave de 128 bits', async () => {
+  const r = await autorizar(
+    { action: 'publish', protocol: 'rtmp', path: compactIngestPathName(CHAVE) },
+    { cameraPorChave: async (k: unknown) => (k === CHAVE ? CAMERA_VALIDA : null) },
+  );
+  assert.equal(r.status, 200);
+  assert.equal(r.corpo?.authorized, true);
+});
+
 test('RTMPS também é aceito', async () => {
   const r = await autorizar(
     { action: 'publish', protocol: 'rtmps', path: ingestPathName(CHAVE) },
@@ -131,6 +141,7 @@ test('PUBLICADOR NÃO ASSUME PATH DE CÂMERA — a garantia central', async () =
     'cam_5b55e86c16cd4976bc23a08e699aa5f3_orig',
     'cam_5b55e86c16cd4976bc23a08e699aa5f3_source',
     `drac/${CHAVE}/../cam_5b55e86c16cd4976bc23a08e699aa5f3`,
+    `${compactIngestPathName(CHAVE)}/../cam_5b55e86c16cd4976bc23a08e699aa5f3`,
   ];
   for (const alvo of alvos) {
     const r = await autorizar(

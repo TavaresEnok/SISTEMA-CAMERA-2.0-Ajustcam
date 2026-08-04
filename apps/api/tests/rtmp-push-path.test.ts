@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MediamtxProxyService } from '../src/camera-stream/mediamtx-proxy.service';
 import {
+  compactIngestPathName,
   generateIngestKey,
   ingestPathName,
   SOURCE_MODE_PULL,
@@ -59,16 +60,31 @@ test('câmera em push lê do path de ingestão, sem discar para a câmera', asyn
 
   const r = await mgr.configurePushSourcedPath(cameraPush(chave), 'grid');
 
-  assert.equal(r.sourceUrl, `rtsp://mediamtx:8554/${ingestPathName(chave)}`);
+  assert.equal(r.sourceUrl, `rtsp://mediamtx:8554/${compactIngestPathName(chave)}`);
   assert.equal(r.sourceVideoCodec, 'h264', 'RTMP clássico entrega H.264');
   assert.equal(r.transcodedForLive, false, 'push não pode custar transcode');
   assert.equal(r.deliveryMode, 'grid');
 
   const criado = chamadas.find((c) => c.metodo === 'POST');
   assert.ok(criado, 'o path deveria ter sido criado');
-  assert.equal(criado!.corpo.source, `rtsp://mediamtx:8554/${ingestPathName(chave)}`);
+  assert.equal(criado!.corpo.source, `rtsp://mediamtx:8554/${compactIngestPathName(chave)}`);
   assert.equal(criado!.corpo.sourceOnDemand, true, 'repasse só enquanto alguém assiste');
   assert.notEqual(criado!.corpo.source, 'publisher', 'não deve subir FFmpeg para câmera que publica');
+});
+
+test('publicação antiga ativa continua sendo lida do path hexadecimal', async () => {
+  const chave = generateIngestKey();
+  const mgr = makeProxy({
+    cryptoService: { decrypt: (v: string) => v.replace(/^cifrado:/, '') },
+    pathNameFromCameraId: () => `cam_${CAMERA_ID}_grid`,
+    buildInternalRtspUrl: (p: string) => `rtsp://mediamtx:8554/${p}`,
+    isPathPublishing: async (p: string) => p === ingestPathName(chave),
+    getPath: async () => { throw new Error('não existe'); },
+    apiRequest: async () => '{}',
+  });
+
+  const r = await mgr.configurePushSourcedPath(cameraPush(chave), 'grid');
+  assert.equal(r.sourceUrl, `rtsp://mediamtx:8554/${ingestPathName(chave)}`);
 });
 
 test('os três modos leem a MESMA ingestão — quem publica manda um fluxo só', async () => {
@@ -90,7 +106,7 @@ test('os três modos leem a MESMA ingestão — quem publica manda um fluxo só'
 
 test('path já correto não é recriado — recriar derruba quem está assistindo', async () => {
   const chave = generateIngestKey();
-  const fonte = `rtsp://mediamtx:8554/${ingestPathName(chave)}`;
+  const fonte = `rtsp://mediamtx:8554/${compactIngestPathName(chave)}`;
   const chamadas: string[] = [];
   const mgr = makeProxy({
     cryptoService: { decrypt: (v: string) => v.replace(/^cifrado:/, '') },
@@ -102,7 +118,7 @@ test('path já correto não é recriado — recriar derruba quem está assistind
 
   const r = await mgr.configurePushSourcedPath(cameraPush(chave), 'grid');
   assert.equal(r.sourceUrl, fonte);
-  assert.deepEqual(chamadas, [], 'nenhuma mutação deveria ocorrer quando a config já está certa');
+  assert.deepEqual(chamadas.filter((metodo) => metodo !== 'GET'), [], 'nenhuma mutação deveria ocorrer quando a config já está certa');
 });
 
 test('modo push sem chave gerada falha explicitamente, não fica "Conectando"', async () => {
