@@ -1,3 +1,4 @@
+import { marcandoTrabalho } from '../../common/observability/event-loop-lag.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
@@ -24,7 +25,9 @@ export class CloudOffloadProcessor extends WorkerHost {
   }
 
   async process(job: Job): Promise<void> {
-    const resultado = await this.offload.runOnce();
+    // Marcado para o monitor de travada conseguir NOMEAR o culpado: sem isso
+    // ele diz que o laço parou 11s e não diz por causa de quê.
+    const resultado = await marcandoTrabalho('envio para a nuvem', () => this.offload.runOnce());
     if (resultado.skipped) {
       // Sem storage, sem política ou ciclo em andamento: nível DEBUG de
       // propósito. A cada 15 minutos, isso viraria ruído em INFO e esconderia

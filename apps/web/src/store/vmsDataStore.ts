@@ -471,8 +471,29 @@ export const useVmsDataStore = create<VmsDataState>((set, get) => ({
   lastUpdatedAt: null,
   resourceErrors: {},
   load: async () => {
-    if (!useAuthStore.getState().accessToken) {
+    const auth = useAuthStore.getState();
+    if (!auth.accessToken) {
       clearFullLoadRetry();
+      // NÃO ter token AGORA não prova que a sessão acabou.
+      //
+      // O access token vive só na memória e expira em 15 minutos; entre a
+      // expiração e a renovação existe uma janela em que ele é nulo. Com a API
+      // travada nesse instante, a renovação demora — e a janela vira segundos
+      // ou minutos.
+      //
+      // Apagar as coleções aqui era o que ESVAZIAVA a tela: o operador via
+      // "dados desatualizados", a lista de câmeras sumia, dava para navegar
+      // entre abas em branco, e tudo voltava sozinho quando a renovação
+      // completava. Nada disso era perda de sessão — era um buraco de token.
+      //
+      // Só limpa quando a sessão REALMENTE terminou (sem usuário). Havendo
+      // usuário, o que está na tela continua valendo, marcado como
+      // desatualizado: dado velho identificado é melhor que tela vazia.
+      if (auth.user) {
+        set({ isLoading: false, isRefreshing: false, stale: true });
+        scheduleFullLoadRetry();
+        return;
+      }
       set({
         cameras: [], users: [], events: [], alarms: [], recordings: [], layouts: [],
         overview: null, system: null, auditLogs: [], operationsTimeline: [], loaded: false,

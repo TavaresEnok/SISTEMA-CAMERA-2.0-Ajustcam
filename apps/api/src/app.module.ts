@@ -35,6 +35,7 @@ import { AppBuilderModule } from './app-builder/app-builder.module';
 import { LiveLayoutsModule } from './live-layouts/live-layouts.module';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard } from '@nestjs/throttler';
+import { EventLoopLagService } from './common/observability/event-loop-lag.service';
 
 @Module({
   imports: [
@@ -83,6 +84,10 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     AiModule,
   ],
   providers: [
+    // Mede por dentro quanto tempo o laço de eventos fica parado. É o que
+    // esvazia a tela e mostra "dados desatualizados" — medir de fora só
+    // pega a travada que coincide com a amostragem.
+    EventLoopLagService,
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
