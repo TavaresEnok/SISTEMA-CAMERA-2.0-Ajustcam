@@ -4,7 +4,10 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # Install pnpm
-RUN npm install -g pnpm
+# pnpm PINADO na versão declarada em package.json — ver comentário longo em
+# apps/api/Dockerfile. Sem versão, o build quebra sozinho quando o pnpm
+# lança uma major nova.
+RUN npm install -g pnpm@9.15.0
 
 # Copy workspace files
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
