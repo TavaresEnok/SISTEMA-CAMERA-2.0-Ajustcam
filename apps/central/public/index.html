@@ -1598,6 +1598,13 @@
         detailTab: 'visao',
         // Qual instalação está com o formulário de storage aberto (null = nenhum).
         cloudEditing: null,
+        // Último resultado do teste de desempenho de storage. O DONO é o
+        // state, não o DOM: qualquer repintura (da seção, do detalhe inteiro,
+        // ou a recarga de versão) apenas reprojeta o que está aqui. Guardar só
+        // no DOM foi o defeito: bastava um ancestral ser reescrito para o
+        // número que o operador esperou 10s desaparecer.
+        // { instalacao, html, em } | null.
+        cloudPerfResult: null,
         // Recorte rápido aplicado pelos cartões de KPI / chips (null = nenhum).
         quickFilter: localStorage.getItem('drac-central-quick') || null,
         auditFilter: 'all',
@@ -2571,19 +2578,57 @@
         if (healed.length) return `<span class="badge ok" title="auto-curou: ${escapeHtml(healed.join(', '))}">auto-curou</span>`;
         return '';
       }
-      function renderRows(items) {
-        if (!state.loaded) { els.rows.innerHTML = `<tr><td colspan="8">${skeleton(6, 13)}</td></tr>`; return; }
-        if (!items.length) {
-          els.rows.innerHTML = `<tr><td colspan="8"><div class="empty" style="min-height:120px">Nenhum cliente neste recorte.</div></td></tr>`;
+      /* ── Tabelas: repintar SÓ a linha que mudou ──────────────────────────
+         Reescrever o tbody inteiro a cada ciclo destruía a tabela toda quando
+         UMA instalação mandava heartbeat (60s): todas as linhas piscavam por
+         causa de um "Último sinal" novo. Aqui cada <tr> guarda a própria
+         assinatura: linha igual não é tocada; linha diferente é a única
+         recriada. Mudou a ESTRUTURA (filtro, ordenação, instalação nova ou
+         removida), reconstrói tudo — aí o redesenho é a resposta esperada a
+         uma ação, não uma piscada gratuita. */
+      function reconciliarLinhas(tbody, linhas, ligar) {
+        const htmlCompleto = linhas.map((l) => l.html).join('');
+        const atuais = Array.from(tbody.children).filter((tr) => tr.dataset && tr.dataset.id);
+        const mesmaEstrutura = atuais.length === linhas.length
+          && atuais.every((tr, i) => tr.dataset.id === linhas[i].id);
+        if (!mesmaEstrutura) {
+          // O guarda de repintura já tem exatamente este HTML? Então o DOM
+          // também tem, com os listeners no lugar — religar duplicaria tudo.
+          if (tbody.dataset.assinatura === htmlCompleto) return;
+          tbody.innerHTML = htmlCompleto;
+          tbody.dataset.assinatura = htmlCompleto;
+          Array.from(tbody.children).forEach((tr, i) => {
+            if (!tr.dataset) return;
+            tr.dataset.assinaturaLinha = linhas[i].html;
+            ligar(tr);
+          });
           return;
         }
-        els.rows.innerHTML = items.map((item) => {
-          const camOnline = number(metric(item, 'cameraOnline', 0));
-          const camTotal = number(metric(item, 'cameraTotal', 0));
-          const camIssue = camIssues(item);
-          const disk = metric(item, 'diskUsagePercent', null);
-          const alarms = number(metric(item, 'openAlarms', 0));
-          return `
+        let mudou = false;
+        atuais.forEach((tr, i) => {
+          if (tr.dataset.assinaturaLinha === linhas[i].html) return;
+          const molde = document.createElement('template');
+          molde.innerHTML = linhas[i].html.trim();
+          const nova = molde.content.firstElementChild;
+          if (!nova) return;
+          nova.dataset.assinaturaLinha = linhas[i].html;
+          ligar(nova);
+          tr.replaceWith(nova);
+          mudou = true;
+        });
+        // Linhas trocadas por fora do setter de innerHTML: o cache do guarda
+        // (dataset.assinatura) precisa continuar contando a verdade, senão a
+        // próxima escrita idêntica seria pulada com o DOM já diferente.
+        if (mudou) tbody.dataset.assinatura = htmlCompleto;
+      }
+
+      function linhaOperacaoHtml(item) {
+        const camOnline = number(metric(item, 'cameraOnline', 0));
+        const camTotal = number(metric(item, 'cameraTotal', 0));
+        const camIssue = camIssues(item);
+        const disk = metric(item, 'diskUsagePercent', null);
+        const alarms = number(metric(item, 'openAlarms', 0));
+        return `
             <tr data-id="${escapeHtml(item.id)}" class="${item.id === state.selectedId ? 'selected' : ''}">
               <td data-label="Cliente"><div class="cell-id">${monogram(item)}<div class="cell-stack"><div class="client-name">${escapeHtml(displayName(item))}</div><div class="subtext" style="margin:0">${escapeHtml(item.id)}</div></div></div></td>
               <td data-label="Comunicação"><div class="cell-stack"><div style="display:flex;gap:5px;flex-wrap:wrap"><span class="badge ${communicationTone(item)}${liveClass(item)}">${communicationLabel(item)}</span>${infraChip(item)}</div><div class="subtext" style="margin:0">${item.status === 'PENDING_INSTALL' ? 'sem heartbeat ainda' : `<span data-idade="${escapeHtml(item.id)}"></span>`}</div></div></td>
@@ -2594,10 +2639,18 @@
               <td data-label="Servidor"><div class="cell-stack"><span>${escapeHtml(item.server?.hostname || '—')}</span><div class="subtext" style="margin:0">${escapeHtml(platformLabel(item.server?.platform) || item.version || '')}</div></div></td>
               <td data-label="Último sinal"><div class="cell-stack"><span>${item.lastHeartbeatAt ? dtf.format(new Date(item.lastHeartbeatAt)) : '—'}</span>${configPending(item) ? '<span class="badge warn" style="margin-top:4px">config. pendente</span>' : ''}</div></td>
             </tr>`;
-        }).join('');
-        els.rows.querySelectorAll('tr[data-id]').forEach(row => row.addEventListener('click', () => {
-          openInstallationDetail(row.dataset.id);
-        }));
+      }
+      function renderRows(items) {
+        if (!state.loaded) { els.rows.innerHTML = `<tr><td colspan="8">${skeleton(6, 13)}</td></tr>`; return; }
+        if (!items.length) {
+          els.rows.innerHTML = `<tr><td colspan="8"><div class="empty" style="min-height:120px">Nenhum cliente neste recorte.</div></td></tr>`;
+          return;
+        }
+        reconciliarLinhas(
+          els.rows,
+          items.map((item) => ({ id: item.id, html: linhaOperacaoHtml(item) })),
+          (tr) => tr.addEventListener('click', () => openInstallationDetail(tr.dataset.id)),
+        );
       }
 
       // ── Inteligência artificial por instalação ─────────────────────────────
@@ -2795,7 +2848,7 @@
         // Os dois painéis ficam FORA do cartão de propósito: `.resource.allowed`
         // pinta todo o texto de verde e apaga a hierarquia dos números medidos.
         const html = `${cartao}
-          <div id="cloud-perf-result"></div>
+          <div id="cloud-perf-result">${perfSalvoHtml(item.id)}</div>
           <div id="cloud-delete-confirm"></div>
           ${!editando ? `<div class="license-actions" style="margin-top:11px"><button id="cloud-add" class="primary">${configurado ? 'Trocar armazenamento' : 'Adicionar armazenamento'}</button></div>` : ''}
           ${formulario}`;
@@ -2804,17 +2857,17 @@
         // desempenho já na tela e faria a aba piscar duas vezes por minuto sem
         // nenhum dado ter mudado. Sair antes também evita empilhar listeners
         // repetidos nos MESMOS nós, que dispararia cada clique várias vezes.
-        /* ── O RESULTADO DO TESTE NÃO PODE MORRER NO REFRESH ──────────────
-           Medir o desempenho do S3 GRAVA `lastTestAt`/`lastTestOk` no servidor.
-           Ou seja: o próprio teste muda os dados da instalação, o refresh de
-           30s traz o valor novo, a assinatura desta seção muda de verdade e o
-           bloco é repintado — apagando o resultado que o operador acabou de
-           mandar medir. Ele espera 10 segundos por um número que some sozinho.
-
-           Repintar está certo (o dado mudou mesmo). O que não pode é levar
-           junto o que foi escrito aqui depois. Então o conteúdo transitório é
-           guardado antes e devolvido depois. */
-        const transitorios = ['#cloud-perf-result', '#cloud-feedback', '#cloud-delete-confirm']
+        /* ── O QUE FOI ESCRITO DEPOIS NÃO PODE MORRER NO REFRESH ──────────
+           Repintar esta seção está certo quando o dado mudou (o próprio teste
+           de S3 grava `lastTestAt`/`lastTestOk`, então a assinatura muda de
+           verdade). O que não pode é levar junto o que foi escrito nos nós
+           depois da pintura. O resultado do desempenho NÃO está mais nesta
+           lista de resgate: o dono dele é `state.cloudPerfResult` e ele entra
+           pela própria assinatura (perfSalvoHtml acima) — sobrevive até à
+           repintura do detalhe INTEIRO, que recria esta seção do zero e
+           tornava este resgate via DOM inútil. Feedbacks e a confirmação de
+           exclusão continuam aqui: são efêmeros por natureza. */
+        const transitorios = ['#cloud-feedback', '#cloud-delete-confirm']
           .map((sel) => [sel, body.querySelector(sel)?.innerHTML || ''])
           .filter(([, conteudo]) => conteudo);
 
@@ -2824,8 +2877,6 @@
           const destino = body.querySelector(sel);
           if (destino) destino.innerHTML = conteudo;
         }
-        // E o que atravessou uma recarga de versão volta pela mesma porta.
-        devolverPerfRestaurado(body, item.id);
 
         body.querySelector('#cloud-add')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
         body.querySelector('#cloud-edit')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
@@ -2865,9 +2916,6 @@
       // Além disso o número já é história: reidratar uma medição velha como se
       // fosse fresca engana quem está comparando fornecedor.
       const RECARGA_PERF_VALIDADE_MS = 15 * 60 * 1000;
-      // Preenchido no boot a partir do que a aba anterior salvou; consumido
-      // uma única vez por devolverPerfRestaurado().
-      let perfRestaurado = null;
       let ultimaDigitacao = 0;
       document.addEventListener('input', () => { ultimaDigitacao = Date.now(); }, true);
 
@@ -2890,7 +2938,6 @@
       }
 
       function capturarTela() {
-        const perfEl = document.querySelector('#cloud-perf-result');
         return {
           detailTab: state.detailTab,
           busca: els.search?.value || '',
@@ -2899,9 +2946,9 @@
             contract: els.contract?.value || 'all',
             sort: els.sort?.value || '',
           },
-          perf: perfEl && perfEl.innerHTML
-            ? { instalacao: state.selectedId, html: perfEl.innerHTML, em: Date.now() }
-            : null,
+          // Direto do state — que é o dono do resultado. Ler do DOM aqui já
+          // falhou uma vez: uma repintura qualquer o esvaziava antes da hora.
+          perf: state.cloudPerfResult,
         };
       }
       function salvarTelaParaRecarga() {
@@ -2931,17 +2978,15 @@
           if (els.sort && tela.filtros.sort) els.sort.value = tela.filtros.sort;
         }
         if (tela.perf && tela.perf.html && Date.now() - tela.perf.em <= RECARGA_PERF_VALIDADE_MS) {
-          perfRestaurado = tela.perf;
+          state.cloudPerfResult = tela.perf;
         }
       }
-      // Devolve ao DOM o resultado de desempenho que atravessou a recarga.
-      // Uma única vez, e só na instalação onde foi medido — reidratar na
-      // instalação errada atribuiria o link de um fornecedor ao outro.
-      function devolverPerfRestaurado(body, installationId) {
-        if (!perfRestaurado || perfRestaurado.instalacao !== installationId) return;
-        const destino = body.querySelector('#cloud-perf-result');
-        if (destino && !destino.innerHTML) destino.innerHTML = perfRestaurado.html;
-        perfRestaurado = null;
+      // O conteúdo do `#cloud-perf-result` vem SEMPRE daqui. Só na instalação
+      // onde foi medido — projetar na errada atribuiria o link de um
+      // fornecedor ao outro.
+      function perfSalvoHtml(installationId) {
+        const p = state.cloudPerfResult;
+        return p && p.instalacao === installationId ? p.html : '';
       }
 
       // ── Versão carregada nesta aba ─────────────────────────────────────────
@@ -3023,6 +3068,10 @@
         // segundo clique dispara OUTRA medição — que sobe mais uma amostra ao
         // bucket do cliente e briga com a primeira pela mesma banda.
         state.cloudMedindo = installationId;
+        // Medição nova supersede a anterior — inclusive se falhar, como o
+        // comportamento de sempre: a tela não volta a mostrar número velho
+        // como se fosse a resposta do teste que acabou de dar erro.
+        state.cloudPerfResult = null;
         if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
         const tamanhoEscolhido = Number(body.querySelector('#cloud-perf-size')?.value || 0);
         alvo.innerHTML = `<div class="subtext" style="margin-top:9px">${tamanhoEscolhido > 0
@@ -3051,7 +3100,7 @@
           // abaixo de 80ms o upload é dominado pela transferência; acima de
           // 400ms cada objeto paga pedágio que vira fila com muitas câmeras.
           const classe = d.latencia.medianaMs <= 80 ? 'good' : d.latencia.medianaMs <= 400 ? 'warn' : 'bad';
-          alvo.innerHTML = `
+          const resultadoHtml = `
             <div class="perf">
               <div class="perf-head">
                 <strong>Desempenho a partir da Central</strong>
@@ -3101,6 +3150,9 @@
                 o mesmo botão existe na tela de Armazenamento dela, e é aquele número que dimensiona.
               </div>
             </div>`;
+          // Primeiro o state (o dono), depois a projeção imediata na tela.
+          state.cloudPerfResult = { instalacao: installationId, html: resultadoHtml, em: Date.now() };
+          alvo.innerHTML = resultadoHtml;
         } catch {
           alvo.innerHTML = '';
           if (feedback) feedback.innerHTML = '<span class="badge warn">Falha ao medir</span>';
@@ -3468,49 +3520,40 @@
             <div class="deploy-step pending"><div class="deploy-dot">3</div><div><strong>Primeiro heartbeat</strong><span>A Central muda para conectado automaticamente.</span></div></div>
           </div>`;
 
+        /* ── CASCA ESTÁVEL, CORPOS VOLÁTEIS ────────────────────────────────
+           Este template é a CASCA do detalhe: abas, molduras de painel e
+           formulários — coisas que só mudam por ação do operador ou por
+           mudança rara de estado (contrato, provisionamento). NADA aqui pode
+           interpolar valor que muda a cada heartbeat (60s) ou a cada janela
+           nova da série temporal (30s): um único caractere diferente muda a
+           assinatura, o innerHTML reescreve o detalhe INTEIRO e leva junto
+           tudo o que foi escrito depois — o resultado do teste de S3, o
+           feedback de conexão, a posição de leitura. Era exatamente o que
+           acontecia: o gráfico entrava inline aqui, a janela dele desliza a
+           CADA ciclo, e o detalhe era destruído duas vezes por minuto.
+
+           O que é volátil vive nos corpos com id (#estado-body etc.),
+           pintados por pintarCorposDoDetalhe() — cada um com assinatura
+           própria, então só o bloco cujo dado mudou é tocado. */
         const html = `
           <div class="detail-tab-panel active" data-tab-panel="visao">
             ${item.policyPending ? '<div class="alert-item" style="margin-bottom:14px;border-color:var(--amber-line);background:var(--amber-soft)"><span class="badge warn">Aguardando sincronização</span><div style="margin-top:6px">A política foi alterada na Central e será aplicada quando a instalação enviar o próximo sinal.</div></div>' : ''}
             <div class="grid-2">
               <section class="panel">
                 <div class="panel-head"><div><div class="panel-title">Estado operacional</div><div class="panel-subtitle">Leitura do último heartbeat</div></div></div>
-                <div class="detail-body">
-                  <div class="kv">
-                    <div>Produção</div><div><span class="badge ${readinessClass(item)}">${readinessLabel(item)}</span></div>
-                    <div>Perfil de lançamento</div><div>${escapeHtml(item.launchProfile || item.metrics?.launchProfile || 'standard')}</div>
-                    <div>Gravações</div><div>${fmt.format(number(metric(item, 'recordingCount', 0)))} segmentos</div>
-                    <div>Gravação ativa</div><div>${fmt.format(number(metric(item, 'activeRecordingCount', 0)))}</div>
-                    <div>Live com transcode</div><div>${fmt.format(number(metric(item, 'streamLiveTranscodeLikely', 0)))}</div>
-                    <div>Falhas de live (24h)</div><div>${fmt.format(number(metric(item, 'streamLiveFailuresLast24h', 0)))}</div>
-                    <div>Câmeras com gravação em atenção</div><div>${fmt.format(number(metric(item, 'recordingAttentionCameras', 0)))}</div>
-                    <div>Gap de gravação (24h)</div><div>${fmt.format(Math.round(number(metric(item, 'recordingGapSecondsLast24h', 0)) / 60))} min</div>
-                    <div>Ajustes seguros aplicados</div><div>${fmt.format(number(metric(item, 'streamOptimizationSafeActions', 0)))}</div>
-                  </div>
-                </div>
+                <div class="detail-body" id="estado-body"></div>
               </section>
               <section class="panel">
                 <div class="panel-head"><div><div class="panel-title">Servidor do cliente</div><div class="panel-subtitle">Inventário reportado pelo agente</div></div></div>
-                <div class="detail-body">
-                  <div class="kv">
-                    <div>Nome</div><div>${escapeHtml(item.server?.hostname || '—')}</div>
-                    <div>Sistema</div><div>${escapeHtml(platformLabel(item.server?.platform))}</div>
-                    <div>Processador</div><div>${escapeHtml(item.server?.cpuCount ?? '—')} núcleos</div>
-                    <div>Versão do DRAC</div><div>${escapeHtml(item.version || '—')}</div>
-                    <div>Armazenamento</div><div>${item.storage?.disk ? `${bytes(item.storage.disk.usedBytes)} / ${bytes(item.storage.disk.totalBytes)}` : '—'}</div>
-                  </div>
-                  <div class="section">
-                    <div class="section-title">Câmeras online <span class="hint">últimas amostras</span></div>
-                    ${renderSpark(item)}
-                  </div>
-                </div>
+                <div class="detail-body" id="servidor-body"></div>
               </section>
             </div>
             <section class="panel" style="margin-top:14px">
               <div class="panel-head"><div><div class="panel-title">Tendências</div><div class="panel-subtitle">Histórico de heartbeat desta instalação</div></div></div>
-              <div class="detail-body">${renderTrends(item)}</div>
+              <div class="detail-body" id="trends-body"></div>
             </section>
-            ${installationChartHtml(item)}
-            ${problemCamerasHtml(item)}
+            <div id="chart-slot"></div>
+            <div id="cams-problema-slot"></div>
           </div>
 
           <div class="detail-tab-panel" data-tab-panel="contrato">
@@ -3594,12 +3637,11 @@
             </section>
           </div>`;
 
-        // Só troca o DOM quando o HTML mudou. Reescrever a cada 30s destruía e
-        // recriava tudo: a tela piscava, a rolagem se perdia e quem estava lendo
-        // o rodapé era jogado para o topo — duas vezes por minuto, com dados
-        // idênticos. As subseções têm guarda própria e continuam sendo chamadas.
+        // Só troca o DOM quando a CASCA mudou — o que é raro. Os corpos
+        // voláteis são pintados na sequência, cada um com guarda própria.
         const trocou = pintarSeMudou(els.detail, html);
 
+        pintarCorposDoDetalhe(item);
         renderAiSection(item);
         renderCloudSection(item);
         renderScaleSection(item.id);
@@ -3612,14 +3654,61 @@
         els.detail.querySelector('#copy-selected-diagnostics')?.addEventListener('click', () => copyDiagnosticsFor(item.id));
         els.detail.querySelector('#copy-selected-installer')?.addEventListener('click', () => copyInstallerFor(item.id));
         els.detail.querySelector('#delete-pending-install')?.addEventListener('click', () => deletePendingInstallation(item.id));
-        if (lastInstallationChartModel) wireChart(els.detail, lastInstallationChartModel);
+      }
+
+      /* ── Corpos voláteis do detalhe ──────────────────────────────────────
+         O conteúdo que muda a cada heartbeat ou a cada ciclo. Cada corpo tem
+         a própria assinatura: heartbeat novo repinta os três blocos de
+         métricas e NADA mais; a janela deslizante do gráfico repinta só o
+         gráfico. O resto do detalhe — formulários, resultado do teste de S3,
+         feedbacks — nem é tocado. */
+      function estadoOperacionalHtml(item) {
+        return `<div class="kv">
+            <div>Produção</div><div><span class="badge ${readinessClass(item)}">${readinessLabel(item)}</span></div>
+            <div>Perfil de lançamento</div><div>${escapeHtml(item.launchProfile || item.metrics?.launchProfile || 'standard')}</div>
+            <div>Gravações</div><div>${fmt.format(number(metric(item, 'recordingCount', 0)))} segmentos</div>
+            <div>Gravação ativa</div><div>${fmt.format(number(metric(item, 'activeRecordingCount', 0)))}</div>
+            <div>Live com transcode</div><div>${fmt.format(number(metric(item, 'streamLiveTranscodeLikely', 0)))}</div>
+            <div>Falhas de live (24h)</div><div>${fmt.format(number(metric(item, 'streamLiveFailuresLast24h', 0)))}</div>
+            <div>Câmeras com gravação em atenção</div><div>${fmt.format(number(metric(item, 'recordingAttentionCameras', 0)))}</div>
+            <div>Gap de gravação (24h)</div><div>${fmt.format(Math.round(number(metric(item, 'recordingGapSecondsLast24h', 0)) / 60))} min</div>
+            <div>Ajustes seguros aplicados</div><div>${fmt.format(number(metric(item, 'streamOptimizationSafeActions', 0)))}</div>
+          </div>`;
+      }
+      function servidorClienteHtml(item) {
+        return `<div class="kv">
+            <div>Nome</div><div>${escapeHtml(item.server?.hostname || '—')}</div>
+            <div>Sistema</div><div>${escapeHtml(platformLabel(item.server?.platform))}</div>
+            <div>Processador</div><div>${escapeHtml(item.server?.cpuCount ?? '—')} núcleos</div>
+            <div>Versão do DRAC</div><div>${escapeHtml(item.version || '—')}</div>
+            <div>Armazenamento</div><div>${item.storage?.disk ? `${bytes(item.storage.disk.usedBytes)} / ${bytes(item.storage.disk.totalBytes)}` : '—'}</div>
+          </div>
+          <div class="section">
+            <div class="section-title">Câmeras online <span class="hint">últimas amostras</span></div>
+            ${renderSpark(item)}
+          </div>`;
+      }
+      function pintarCorposDoDetalhe(item) {
+        pintarSeMudou(els.detail.querySelector('#estado-body'), estadoOperacionalHtml(item));
+        pintarSeMudou(els.detail.querySelector('#servidor-body'), servidorClienteHtml(item));
+        pintarSeMudou(els.detail.querySelector('#trends-body'), renderTrends(item));
+        // O gráfico religa os próprios controles quando (e só quando) o SVG
+        // dele foi de fato trocado — religar na repintura da casca deixava
+        // legendas mortas quando só o gráfico mudava.
+        const chartTrocou = pintarSeMudou(els.detail.querySelector('#chart-slot'), installationChartHtml(item));
+        if (chartTrocou && lastInstallationChartModel) wireChart(els.detail, lastInstallationChartModel);
+        pintarSeMudou(els.detail.querySelector('#cams-problema-slot'), problemCamerasHtml(item));
       }
 
       function renderInventory() {
         const query = (els.inventorySearch?.value || '').trim().toLowerCase();
         const items = state.installations.filter((item) => !query
           || [item.id, displayName(item), item.server?.hostname, item.version].join(' ').toLowerCase().includes(query));
-        els.inventoryRows.innerHTML = items.length ? items.map(item => {
+        if (!items.length) {
+          els.inventoryRows.innerHTML = '<tr><td colspan="8"><div class="empty" style="min-height:120px">Nenhum cliente encontrado.</div></td></tr>';
+          return;
+        }
+        const linha = (item) => {
           const mem = item.server?.totalMemoryBytes ? Math.round(((item.server.totalMemoryBytes - item.server.freeMemoryBytes) / item.server.totalMemoryBytes) * 100) : null;
           return `<tr data-id="${escapeHtml(item.id)}">
             <td data-label="Cliente"><div class="cell-id">${monogram(item)}<div class="cell-stack"><div class="client-name">${escapeHtml(displayName(item))}</div><div class="subtext" style="margin:0">${escapeHtml(item.id)}</div></div></div></td>
@@ -3637,17 +3726,19 @@
               ${item.app && item.app.packageId ? `<div class="subtext mono" style="text-align:right">${escapeHtml(item.app.packageId)}</div>` : ''}
             </td>
           </tr>`;
-        }).join('') : '<tr><td colspan="8"><div class="empty" style="min-height:120px">Nenhum cliente encontrado.</div></td></tr>';
-        els.inventoryRows.querySelectorAll('[data-genapp]').forEach(btn => btn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          generateAppForClient(btn.dataset.genapp);
-        }));
-        els.inventoryRows.querySelectorAll('[data-editapp]').forEach(btn => btn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          openAppEdit(btn.dataset.editapp);
-        }));
-        // Clicar na linha abre a instalação, igual à tabela de Operação.
-        els.inventoryRows.querySelectorAll('tr[data-id]').forEach(row => row.addEventListener('click', () => openInstallationDetail(row.dataset.id)));
+        };
+        reconciliarLinhas(els.inventoryRows, items.map((item) => ({ id: item.id, html: linha(item) })), (tr) => {
+          tr.querySelectorAll('[data-genapp]').forEach(btn => btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            generateAppForClient(btn.dataset.genapp);
+          }));
+          tr.querySelectorAll('[data-editapp]').forEach(btn => btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openAppEdit(btn.dataset.editapp);
+          }));
+          // Clicar na linha abre a instalação, igual à tabela de Operação.
+          tr.addEventListener('click', () => openInstallationDetail(tr.dataset.id));
+        });
       }
 
       function renderContractBoard() {

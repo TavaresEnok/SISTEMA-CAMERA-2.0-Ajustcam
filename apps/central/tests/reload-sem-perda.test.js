@@ -6,25 +6,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-// ── A RECARGA DE VERSÃO NÃO PODE ENGOLIR O TRABALHO DO OPERADOR ─────────────
+// ── O TRABALHO DO OPERADOR SOBREVIVE A RECARGA E A REPINTURA ────────────────
 //
-// Relato: o operador roda o teste de desempenho do S3, espera ~10s, o número
-// aparece — e até 30s depois a página recarrega sozinha e apaga tudo,
-// voltando para a aba padrão.
+// Dois defeitos com o MESMO sintoma ("fiz o teste de S3, esperei o número, e
+// ele sumiu sozinho"):
 //
-// A recarga automática em si está certa (aba aberta por horas rodando JS de
-// antes do deploy é pior). O que estava errado:
-//   1. a guarda só ADIAVA a recarga durante a medição; terminou, o ciclo
-//      seguinte recarregava e apagava o resultado recém-lido;
-//   2. nada da tela atravessava a recarga — aba do detalhe, busca, filtros e
-//      o resultado morriam juntos;
-//   3. no sentido oposto, um cursor esquecido num campo segurava a recarga
-//      PARA SEMPRE, e o operador ficava em código velho sem saber.
+//  1. A recarga automática de versão apagava a tela. Conserto: a tela
+//     atravessa o reload por sessionStorage e o adiamento ganhou prazo.
+//  2. Mesmo SEM recarga, a repintura de 30s destruía o resultado: a série
+//     temporal desliza a janela a cada ciclo, a assinatura do detalhe inteiro
+//     mudava sempre, e o innerHTML global recriava tudo — inclusive o
+//     #cloud-perf-result, cujo "resgate" vivia só no DOM que acabava de
+//     morrer. Conserto: o resultado mora em `state.cloudPerfResult` (o DOM é
+//     projeção), a casca do detalhe é estável com corpos voláteis separados,
+//     e as tabelas repintam SÓ a linha que mudou.
 //
-// O conserto: a tela é salva em sessionStorage antes do reload e devolvida no
-// boot; e o adiamento passa a ter prazo — só edição NÃO SALVA segura sem
-// limite. Como no arquivo vizinho, as funções são EXTRAÍDAS do painel e
-// EXECUTADAS, não conferidas por palavras no texto-fonte.
+// Como no arquivo vizinho, as funções são EXTRAÍDAS do painel e EXECUTADAS,
+// não conferidas por palavras no texto-fonte.
 
 const PANEL = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 
@@ -86,8 +84,8 @@ test('medição de S3 no ar segura a recarga', () => {
 });
 
 test('medição terminada e foco fora de campo: a recarga PODE acontecer', () => {
-  // Este é o cenário do relato. A recarga é permitida — o que protege o
-  // resultado agora é a travessia por sessionStorage, testada mais abaixo.
+  // O que protege o resultado é a travessia por sessionStorage + o state ser
+  // o dono dele — não o bloqueio eterno da recarga.
   assert.equal(seguro({ tagName: 'BODY' }, null, 999999), true);
 });
 
@@ -97,38 +95,30 @@ test('digitação recente segura, mesmo com o campo intocado', () => {
 });
 
 test('cursor esquecido num campo INTOCADO deixa de segurar após 90s ocioso', () => {
-  // O furo antigo: bastava largar o cursor num campo e a aba nunca mais
-  // atualizava — o operador ficava em código velho sem saber.
   const campo = { tagName: 'INPUT', value: 'MinIO do escritório', defaultValue: 'MinIO do escritório' };
   assert.equal(seguro(campo, null, 90000), true);
   assert.equal(seguro(campo, null, 89999), false, 'antes do prazo ainda é digitação em curso');
 });
 
 test('edição NÃO SALVA segura sem prazo', () => {
-  // value≠defaultValue = tem coisa digitada que o HTML não trouxe. Perder
-  // isso é pior que rodar código velho; o carimbo clicável fica à vista.
   const campo = { tagName: 'TEXTAREA', value: 'chave nova digitada', defaultValue: '' };
   assert.equal(seguro(campo, null, 99999999), false);
 });
 
 test('SELECT focado não conta como edição não salva', () => {
-  // Um select não guarda texto digitado; depois do prazo ocioso, recarrega.
   const campo = { tagName: 'SELECT', value: '64', defaultValue: '' };
   assert.equal(seguro(campo, null, 90000), true);
 });
 
-// ── A tela atravessa a recarga: salvar → ler → aplicar → devolver ───────────
+// ── A tela atravessa a recarga: salvar → ler → aplicar → projetar ───────────
 
-function contextoDeCaptura({ perfHtml = '', agora = 1000000 } = {}) {
+function contextoDeCaptura({ perf = null } = {}) {
   const armazem = armazemFake();
-  const perfEl = { innerHTML: perfHtml };
   return rodar(['capturarTela', 'salvarTelaParaRecarga', 'lerTelaSalva'], {
     CHAVE_RECARGA,
     JSON,
-    Date: { now: () => agora },
     sessionStorage: armazem,
-    document: { querySelector: (sel) => (sel === '#cloud-perf-result' ? perfEl : null) },
-    state: { detailTab: 'armazenamento', selectedId: 'inst-7' },
+    state: { detailTab: 'armazenamento', selectedId: 'inst-7', cloudPerfResult: perf },
     els: {
       search: { value: 'eveo' },
       communication: { value: 'ONLINE' },
@@ -140,25 +130,27 @@ function contextoDeCaptura({ perfHtml = '', agora = 1000000 } = {}) {
 }
 
 test('salvar e ler devolvem a MESMA tela: resultado, aba, busca e filtros', () => {
-  const ctx = contextoDeCaptura({ perfHtml: '<div class="perf">12ms</div>' });
+  const perf = { instalacao: 'inst-7', html: '<div class="perf">12ms</div>', em: 1000000 };
+  const ctx = contextoDeCaptura({ perf });
   ctx.salvarTelaParaRecarga();
   const tela = ctx.lerTelaSalva(ctx.armazem);
   assert.equal(tela.detailTab, 'armazenamento');
   assert.equal(tela.busca, 'eveo');
   assert.deepEqual(tela.filtros, { communication: 'ONLINE', contract: 'all', sort: 'disk' });
-  assert.deepEqual(tela.perf, { instalacao: 'inst-7', html: '<div class="perf">12ms</div>', em: 1000000 });
+  // O perf vem do STATE, que é o dono do resultado. Ler do DOM aqui já
+  // falhou uma vez: qualquer repintura o esvaziava antes da hora.
+  assert.deepEqual(tela.perf, perf);
 });
 
 test('a tela salva vale para UMA recarga: a segunda leitura vem vazia', () => {
-  // Se ficasse, um F5 de amanhã reidrataria o resultado de ontem.
-  const ctx = contextoDeCaptura({ perfHtml: '<b>x</b>' });
+  const ctx = contextoDeCaptura({ perf: { instalacao: 'i', html: '<b>x</b>', em: 1 } });
   ctx.salvarTelaParaRecarga();
   assert.ok(ctx.lerTelaSalva(ctx.armazem));
   assert.equal(ctx.lerTelaSalva(ctx.armazem), null);
 });
 
-test('sem resultado na tela, perf salvo é null — não um html vazio', () => {
-  const ctx = contextoDeCaptura({ perfHtml: '' });
+test('sem resultado no state, perf salvo é null — não um html vazio', () => {
+  const ctx = contextoDeCaptura({ perf: null });
   ctx.salvarTelaParaRecarga();
   assert.equal(ctx.lerTelaSalva(ctx.armazem).perf, null);
 });
@@ -173,8 +165,7 @@ function contextoDeAplicacao({ agora = 2000000 } = {}) {
   return rodar(['aplicarTelaSalva'], {
     RECARGA_PERF_VALIDADE_MS: VALIDADE_MS,
     Date: { now: () => agora },
-    perfRestaurado: null,
-    state: { detailTab: 'visao' },
+    state: { detailTab: 'visao', cloudPerfResult: null },
     els: {
       search: { value: '' },
       communication: { value: 'all' },
@@ -186,25 +177,24 @@ function contextoDeAplicacao({ agora = 2000000 } = {}) {
 
 test('aplicar devolve o operador à aba, busca e filtros onde estava', () => {
   const ctx = contextoDeAplicacao();
+  const perf = { instalacao: 'inst-7', html: '<b>12ms</b>', em: 2000000 - 1000 };
   ctx.aplicarTelaSalva({
     detailTab: 'armazenamento',
     busca: 'eveo',
     filtros: { communication: 'ONLINE', contract: 'ACTIVE', sort: 'disk' },
-    perf: { instalacao: 'inst-7', html: '<b>12ms</b>', em: 2000000 - 1000 },
+    perf,
   });
   assert.equal(ctx.state.detailTab, 'armazenamento', 'sem isto o operador "volta para a aba padrão"');
   assert.equal(ctx.els.search.value, 'eveo');
   assert.equal(ctx.els.communication.value, 'ONLINE');
   assert.equal(ctx.els.sort.value, 'disk');
-  assert.deepEqual(ctx.perfRestaurado, { instalacao: 'inst-7', html: '<b>12ms</b>', em: 2000000 - 1000 });
+  assert.deepEqual(ctx.state.cloudPerfResult, perf, 'o resultado volta para o state — o render projeta de lá');
 });
 
 test('medição velha demais NÃO é reidratada', () => {
-  // Reidratar medição de meia hora atrás como se fosse fresca engana quem
-  // está comparando fornecedor de storage.
   const ctx = contextoDeAplicacao();
   ctx.aplicarTelaSalva({ perf: { instalacao: 'i', html: '<b>x</b>', em: 2000000 - VALIDADE_MS - 1 } });
-  assert.equal(ctx.perfRestaurado, null);
+  assert.equal(ctx.state.cloudPerfResult, null);
 });
 
 test('aplicar com tela nula (boot normal, sem recarga) não lança', () => {
@@ -213,39 +203,42 @@ test('aplicar com tela nula (boot normal, sem recarga) não lança', () => {
   assert.equal(ctx.state.detailTab, 'visao');
 });
 
-function bodyComPerf(inicial = '') {
-  const destino = { innerHTML: inicial };
-  return { destino, body: { querySelector: (sel) => (sel === '#cloud-perf-result' ? destino : null) } };
-}
+// ── perfSalvoHtml: o DOM é projeção do state ────────────────────────────────
 
-test('devolver injeta o resultado na instalação certa e consome', () => {
-  const ctx = rodar(['devolverPerfRestaurado'], {
-    perfRestaurado: { instalacao: 'inst-7', html: '<b>12ms</b>', em: 1 },
+test('a seção projeta o resultado da instalação certa, e só dela', () => {
+  const ctx = rodar(['perfSalvoHtml'], {
+    state: { cloudPerfResult: { instalacao: 'inst-7', html: '<b>12ms</b>', em: 1 } },
   });
-  const { destino, body } = bodyComPerf();
-  ctx.devolverPerfRestaurado(body, 'inst-7');
-  assert.equal(destino.innerHTML, '<b>12ms</b>');
-  assert.equal(ctx.perfRestaurado, null, 'consumir uma vez: repinturas seguintes já preservam via transitórios');
+  assert.equal(ctx.perfSalvoHtml('inst-7'), '<b>12ms</b>');
+  // Projetar na instalação errada atribuiria o link de um fornecedor ao outro.
+  assert.equal(ctx.perfSalvoHtml('inst-OUTRA'), '');
 });
 
-test('instalação errada não recebe o resultado — e ele fica guardado para a certa', () => {
-  // Reidratar no lugar errado atribuiria o link de um fornecedor ao outro.
-  const ctx = rodar(['devolverPerfRestaurado'], {
-    perfRestaurado: { instalacao: 'inst-7', html: '<b>12ms</b>', em: 1 },
-  });
-  const { destino, body } = bodyComPerf();
-  ctx.devolverPerfRestaurado(body, 'inst-OUTRA');
-  assert.equal(destino.innerHTML, '');
-  assert.ok(ctx.perfRestaurado, 'a instalação certa ainda pode renderizar depois');
+test('sem resultado guardado a projeção é vazia', () => {
+  const ctx = rodar(['perfSalvoHtml'], { state: { cloudPerfResult: null } });
+  assert.equal(ctx.perfSalvoHtml('inst-7'), '');
 });
 
-test('resultado fresco já na tela não é sobrescrito pelo antigo', () => {
-  const ctx = rodar(['devolverPerfRestaurado'], {
-    perfRestaurado: { instalacao: 'inst-7', html: '<b>velho</b>', em: 1 },
-  });
-  const { destino, body } = bodyComPerf('<b>fresco</b>');
-  ctx.devolverPerfRestaurado(body, 'inst-7');
-  assert.equal(destino.innerHTML, '<b>fresco</b>');
+test('renderCloudSection desenha o resultado A PARTIR do state, não resgata do DOM', () => {
+  const corpo = extrairFuncao('renderCloudSection');
+  assert.ok(
+    corpo.includes('id="cloud-perf-result">${perfSalvoHtml(item.id)}'),
+    'o resultado tem de entrar pela assinatura da seção — resgatar do DOM morre quando o ANCESTRAL repinta',
+  );
+  const listaDeResgate = corpo.match(/const transitorios = \[([^\]]*)\]/)?.[1] || '';
+  assert.ok(
+    !listaDeResgate.includes('#cloud-perf-result'),
+    'com dois donos (state e resgate do DOM) um sobrescreve o outro — o state é o único dono',
+  );
+});
+
+test('medir grava o resultado no state antes de pintar a tela', () => {
+  const corpo = extrairFuncao('medirDesempenhoStorage');
+  const noState = corpo.indexOf('state.cloudPerfResult = { instalacao: installationId');
+  const naTela = corpo.indexOf('alvo.innerHTML = resultadoHtml');
+  assert.ok(noState > -1, 'sem gravar no state, a primeira repintura do detalhe apaga o resultado de novo');
+  assert.ok(naTela > noState, 'o state é o dono; a tela é projeção');
+  assert.ok(corpo.indexOf('state.cloudPerfResult = null') > -1, 'medição nova supersede a anterior');
 });
 
 // ── marcarVersao de ponta a ponta: adia, salva e recarrega ──────────────────
@@ -288,7 +281,6 @@ test('deploy detectado em momento seguro: salva a tela E SÓ ENTÃO agenda a rec
   await ctx.marcarVersao();
   ctx.buildNoServidor = '2026-08-05 11:00';
   await ctx.marcarVersao();
-  // A ordem é o contrato inteiro: recarregar antes de salvar perde a tela.
   assert.deepEqual(ctx.eventos, ['tela-salva', 'reload-agendado']);
 });
 
@@ -307,14 +299,194 @@ test('deploy no meio da medição: adia com aviso; medição acabou, o ciclo seg
   assert.deepEqual(ctx.eventos, ['tela-salva', 'reload-agendado'], 'o adiamento é adiamento, não cancelamento');
 });
 
-// ── O ponto de costura na seção de nuvem ────────────────────────────────────
+// ── A casca do detalhe é estável; o volátil vive nos corpos ─────────────────
 
-test('renderCloudSection devolve o restaurado DEPOIS dos transitórios e antes de religar os botões', () => {
-  const corpo = extrairFuncao('renderCloudSection');
-  const transitorios = corpo.indexOf('for (const [sel, conteudo] of transitorios)');
-  const restaurado = corpo.indexOf('devolverPerfRestaurado(body, item.id)');
-  const listeners = corpo.indexOf("querySelector('#cloud-add')");
-  assert.ok(restaurado > -1, 'sem esta chamada o resultado salvo nunca volta à tela');
-  assert.ok(restaurado > transitorios, 'devolver antes dos transitórios seria sobrescrito por eles');
-  assert.ok(restaurado < listeners, 'devolver depois de religar os botões atrasaria o que o operador está esperando ver');
+test('a casca do detalhe NÃO interpola conteúdo que muda a cada ciclo', () => {
+  // Foi a causa raiz do "reinicia a cada 30s": a janela do gráfico desliza a
+  // CADA ciclo; inline na casca, mudava a assinatura do detalhe inteiro e o
+  // innerHTML global destruía tudo — inclusive o resultado do teste de S3.
+  const corpo = extrairFuncao('renderDetail');
+  const casca = corpo.slice(corpo.indexOf('const html = `'), corpo.indexOf('pintarSeMudou(els.detail, html)'));
+  for (const volatil of ['renderSpark(', 'renderTrends(', 'installationChartHtml(', 'problemCamerasHtml(', 'metric(item']) {
+    assert.ok(!casca.includes(volatil), `${volatil}…) voltou para dentro da casca — a assinatura muda a cada ciclo e o detalhe inteiro volta a ser destruído`);
+  }
+  for (const slot of ['id="estado-body"', 'id="servidor-body"', 'id="trends-body"', 'id="chart-slot"', 'id="cams-problema-slot"']) {
+    assert.ok(casca.includes(slot), `a casca precisa do corpo ${slot}`);
+  }
+  const corpos = corpo.indexOf('pintarCorposDoDetalhe(item)');
+  const desiste = corpo.indexOf('if (!trocou) return');
+  assert.ok(corpos > -1 && desiste > corpos, 'os corpos são pintados SEMPRE — mesmo quando a casca não mudou');
+});
+
+function elementoPintavel() {
+  const el = { dataset: {}, escritas: [] };
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return this._h || ''; },
+    set(v) { this._h = v; this.escritas.push(v); },
+  });
+  return el;
+}
+
+test('heartbeat novo repinta SÓ os corpos cujo dado mudou — a casca fica de pé', () => {
+  const corposPorId = {
+    '#estado-body': elementoPintavel(),
+    '#servidor-body': elementoPintavel(),
+    '#trends-body': elementoPintavel(),
+    '#chart-slot': elementoPintavel(),
+    '#cams-problema-slot': elementoPintavel(),
+  };
+  const wires = [];
+  const ctx = rodar(['pintarSeMudou', 'pintarCorposDoDetalhe', 'estadoOperacionalHtml', 'servidorClienteHtml'], {
+    els: { detail: { querySelector: (sel) => corposPorId[sel] || null } },
+    // Dependências dos templates reais, reduzidas ao essencial.
+    escapeHtml: String,
+    fmt: { format: String },
+    number: Number,
+    metric: (item, key, dflt) => (item.metrics && item.metrics[key] != null ? item.metrics[key] : dflt),
+    readinessClass: () => 'ok',
+    readinessLabel: () => 'Pronto',
+    platformLabel: () => 'Linux',
+    bytes: (v) => `${v}B`,
+    Math,
+    renderSpark: (item) => `<spark>${item.metrics.cameraOnline}</spark>`,
+    renderTrends: () => '<trends>estáveis</trends>',
+    installationChartHtml: (item) => `<chart>${item.chartJanela}</chart>`,
+    problemCamerasHtml: () => '',
+    wireChart: () => wires.push('chart'),
+    lastInstallationChartModel: { reduced: [1] },
+  });
+  const item = {
+    metrics: { recordingCount: 10, cameraOnline: 5 },
+    server: { hostname: 'srv', cpuCount: 4 },
+    storage: null,
+    chartJanela: 'janela-1',
+  };
+
+  ctx.pintarCorposDoDetalhe(item);
+  ctx.pintarCorposDoDetalhe(item);
+  for (const [sel, el] of Object.entries(corposPorId)) {
+    assert.ok(el.escritas.length <= 1, `${sel} repintado com dado idêntico — a piscada voltou`);
+  }
+  assert.deepEqual(wires, ['chart'], 'o gráfico religa os controles quando pintado');
+
+  // Chega um heartbeat: só as métricas mudam.
+  item.metrics = { recordingCount: 11, cameraOnline: 4 };
+  ctx.pintarCorposDoDetalhe(item);
+  assert.equal(corposPorId['#estado-body'].escritas.length, 2, 'métrica nova TEM de repintar o estado');
+  assert.equal(corposPorId['#servidor-body'].escritas.length, 2, 'o sparkline de câmeras mora no corpo do servidor');
+  assert.equal(corposPorId['#trends-body'].escritas.length, 1, 'tendência idêntica não repinta');
+  assert.equal(corposPorId['#chart-slot'].escritas.length, 1, 'gráfico com a mesma janela não repinta');
+
+  // Desliza a janela do gráfico: só o gráfico.
+  item.chartJanela = 'janela-2';
+  ctx.pintarCorposDoDetalhe(item);
+  assert.equal(corposPorId['#chart-slot'].escritas.length, 2);
+  assert.equal(corposPorId['#estado-body'].escritas.length, 2, 'a janela do gráfico não pode repintar o resto');
+  assert.deepEqual(wires, ['chart', 'chart'], 'religa só quando o SVG trocou de verdade');
+});
+
+// ── reconciliarLinhas: heartbeat de UMA instalação não destrói a tabela ─────
+
+function bancadaDeTabela() {
+  const eventos = [];
+  function fakeTr(id, html) {
+    return {
+      dataset: { id },
+      _html: html,
+      replaceWith(nova) {
+        const i = tbody.children.indexOf(this);
+        tbody.children[i] = nova;
+        eventos.push(`replace:${id}`);
+      },
+    };
+  }
+  const tbody = {
+    children: [],
+    dataset: {},
+  };
+  Object.defineProperty(tbody, 'innerHTML', {
+    get() { return this._h || ''; },
+    set(v) {
+      this._h = v;
+      eventos.push('rebuild');
+      this.children = [...v.matchAll(/<tr data-id="([^"]+)"/g)].map((m) => fakeTr(m[1], v));
+    },
+  });
+  const documento = {
+    createElement: () => {
+      const molde = { _h: '' };
+      Object.defineProperty(molde, 'innerHTML', { set(v) { this._h = v; }, get() { return this._h; } });
+      molde.content = {
+        get firstElementChild() {
+          const id = /data-id="([^"]+)"/.exec(molde._h)?.[1];
+          return id ? fakeTr(id, molde._h) : null;
+        },
+      };
+      return molde;
+    },
+  };
+  return { tbody, documento, eventos };
+}
+
+function rodarReconciliar(b) {
+  return rodar(['reconciliarLinhas'], { document: b.documento, Array }).reconciliarLinhas;
+}
+
+const linha = (id, extra = '') => ({ id, html: `<tr data-id="${id}">${id}${extra}</tr>` });
+
+test('mesmos dados duas vezes: a tabela não é tocada', () => {
+  const b = bancadaDeTabela();
+  const reconciliar = rodarReconciliar(b);
+  const ligadas = [];
+  const linhas = [linha('a'), linha('b'), linha('c')];
+  reconciliar(b.tbody, linhas, (tr) => ligadas.push(tr.dataset.id));
+  reconciliar(b.tbody, linhas, (tr) => ligadas.push(tr.dataset.id));
+  assert.deepEqual(b.eventos, ['rebuild'], 'a segunda passada com dado idêntico não pode mexer no DOM');
+  assert.deepEqual(ligadas, ['a', 'b', 'c'], 'religar duplicaria cada clique');
+});
+
+test('heartbeat de UMA instalação troca SÓ a linha dela', () => {
+  const b = bancadaDeTabela();
+  const reconciliar = rodarReconciliar(b);
+  reconciliar(b.tbody, [linha('a'), linha('b'), linha('c')], () => {});
+  const antesA = b.tbody.children[0];
+  const antesC = b.tbody.children[2];
+
+  reconciliar(b.tbody, [linha('a'), linha('b', ' sinal-novo'), linha('c')], () => {});
+  assert.deepEqual(b.eventos, ['rebuild', 'replace:b'], 'era o defeito: TODAS as linhas morriam por um "Último sinal" novo');
+  assert.equal(b.tbody.children[0], antesA, 'linha sem mudança preserva o nó (e o texto de idade que vive nele)');
+  assert.equal(b.tbody.children[2], antesC);
+});
+
+test('o cache do guarda continua verdadeiro depois da troca pontual', () => {
+  const b = bancadaDeTabela();
+  const reconciliar = rodarReconciliar(b);
+  reconciliar(b.tbody, [linha('a'), linha('b')], () => {});
+  const linhas = [linha('a'), linha('b', ' novo')];
+  reconciliar(b.tbody, linhas, () => {});
+  assert.equal(
+    b.tbody.dataset.assinatura,
+    linhas.map((l) => l.html).join(''),
+    'cache mentindo = a próxima escrita idêntica é pulada com o DOM já diferente',
+  );
+});
+
+test('mudou a ordem (ordenação/filtro): reconstrói tudo, uma vez', () => {
+  const b = bancadaDeTabela();
+  const reconciliar = rodarReconciliar(b);
+  reconciliar(b.tbody, [linha('a'), linha('b')], () => {});
+  reconciliar(b.tbody, [linha('b'), linha('a')], () => {});
+  assert.deepEqual(b.eventos, ['rebuild', 'rebuild']);
+});
+
+test('estrutura nova mas HTML idêntico ao do cache: não religa listeners', () => {
+  // Só acontece se o DOM foi mexido por fora; religar aqui duplicaria cliques.
+  const b = bancadaDeTabela();
+  const reconciliar = rodarReconciliar(b);
+  const ligadas = [];
+  const linhas = [linha('a')];
+  reconciliar(b.tbody, linhas, (tr) => ligadas.push(tr.dataset.id));
+  b.tbody.children = []; // alguém zerou o DOM por fora, cache ficou
+  reconciliar(b.tbody, linhas, (tr) => ligadas.push(tr.dataset.id));
+  assert.deepEqual(ligadas, ['a']);
 });

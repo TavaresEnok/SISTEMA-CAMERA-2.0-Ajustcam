@@ -32,17 +32,17 @@ function corpoDaFuncao(nome) {
 }
 
 test('AS DUAS tabelas abrem o detalhe ao clicar na linha', () => {
+  // As linhas hoje nascem em reconciliarLinhas (repintura por linha, para o
+  // heartbeat de UMA instalação não destruir a tabela inteira): o clique é
+  // ligado no callback `ligar`, em cada <tr> criado — inclusive nos recriados
+  // um a um quando só uma linha muda.
   for (const fn of ['renderRows', 'renderInventory']) {
     const corpo = corpoDaFuncao(fn);
+    assert.match(corpo, /reconciliarLinhas\(/, `${fn}: as linhas devem nascer pela reconciliação, que é quem religa os cliques`);
     assert.match(
       corpo,
-      /querySelectorAll\('tr\[data-id\]'\)\.forEach\(row => row\.addEventListener\('click'/,
+      /tr\.addEventListener\('click', \(\) => openInstallationDetail\(tr\.dataset\.id\)\)/,
       `${fn}: linha sem handler de clique — o usuário clica no cliente e nada acontece`,
-    );
-    assert.match(
-      corpo,
-      /openInstallationDetail\(row\.dataset\.id\)/,
-      `${fn}: o clique precisa passar a instalação da linha para a navegação`,
     );
   }
 });
@@ -77,17 +77,17 @@ test('botões de ação NÃO disparam a navegação da linha', () => {
   }
 });
 
-test('o handler é registrado DEPOIS de escrever o innerHTML', () => {
+test('o handler é registrado DEPOIS de escrever o DOM, nos dois caminhos', () => {
   // Ordem importa: innerHTML descarta os nós antigos junto com seus listeners.
-  // Registrar antes deixa a tabela renderizada e morta — exatamente o mesmo
-  // sintoma ("clico e não acontece nada") que este arquivo existe para impedir,
-  // e ainda mais difícil de enxergar porque o código parece correto.
-  const corpo = corpoDaFuncao('renderInventory');
-  const escreveu = corpo.indexOf('els.inventoryRows.innerHTML');
-  const registrou = corpo.indexOf("querySelectorAll('tr[data-id]')");
-  assert.ok(escreveu > -1 && registrou > -1);
-  assert.ok(
-    registrou > escreveu,
-    'o listener foi registrado antes do innerHTML — seria descartado na hora',
-  );
+  // Registrar antes deixa a tabela renderizada e morta — o mesmo sintoma
+  // ("clico e não acontece nada") que este arquivo existe para impedir. A
+  // fronteira que escreve DOM hoje é reconciliarLinhas, então é lá que a
+  // ordem se garante — no rebuild inteiro e na troca de linha única.
+  const corpo = corpoDaFuncao('reconciliarLinhas');
+  const escreveuTudo = corpo.indexOf('tbody.innerHTML = htmlCompleto');
+  const ligouTudo = corpo.indexOf('ligar(tr)');
+  assert.ok(escreveuTudo > -1 && ligouTudo > escreveuTudo, 'religar antes do innerHTML seria descartado na hora');
+  const criouLinha = corpo.indexOf('molde.content.firstElementChild');
+  const ligouLinha = corpo.indexOf('ligar(nova)');
+  assert.ok(criouLinha > -1 && ligouLinha > criouLinha, 'a linha recriada precisa nascer com o próprio clique ligado');
 });

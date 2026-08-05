@@ -172,10 +172,12 @@ test('a idade do último sinal NÃO é escrita dentro do html dos blocos', () =>
   // Se `timeAgo(ageSeconds)` voltar para dentro de um template, a assinatura
   // volta a mudar a cada 30s e a guarda acima deixa de ter efeito — o painel
   // pisca de novo, com todo o código "correto" no lugar.
-  // `reasonsFor` alimenta a fila de atenção; as outras duas desenham a tabela
-  // da Operação e o cabeçalho do detalhe. São os três lugares onde a idade
-  // aparecia interpolada.
-  for (const nome of ['renderRows', 'renderDetailHero', 'reasonsFor']) {
+  // `reasonsFor` alimenta a fila de atenção; as outras duas desenham a linha
+  // da tabela de Operação e o cabeçalho do detalhe. São os três lugares onde
+  // a idade aparecia interpolada. (A linha da Operação hoje mora em
+  // `linhaOperacaoHtml`, extraída de renderRows para a reconciliação por
+  // linha — a regra vale igual.)
+  for (const nome of ['linhaOperacaoHtml', 'renderDetailHero', 'reasonsFor']) {
     const corpo = extrairFuncao(nome);
     assert.ok(
       !/timeAgo\(\s*(item|a|b)\.ageSeconds\s*\)/.test(corpo),
@@ -221,10 +223,14 @@ test('renderCloudSection guarda o transitório ANTES de pintar e devolve DEPOIS'
   const pintou = corpo.indexOf('pintarSeMudou(body, html)');
   const devolveu = corpo.indexOf('for (const [sel, conteudo] of transitorios)');
 
-  assert.ok(guardou > -1, 'sem a captura, o resultado do teste de S3 morre no refresh');
+  assert.ok(guardou > -1, 'sem a captura, feedbacks e a confirmação de exclusão morrem no refresh');
   assert.ok(pintou > guardou, 'capturar depois de pintar captura o vazio — não adianta nada');
   assert.ok(devolveu > pintou, 'devolver antes de pintar é sobrescrito na hora seguinte');
-  assert.ok(corpo.includes('#cloud-perf-result'), 'o resultado do desempenho tem de estar na lista');
+  // O resultado do desempenho NÃO está mais na lista de resgate: o dono dele
+  // é `state.cloudPerfResult` e ele entra pela assinatura (perfSalvoHtml) —
+  // o resgate via DOM morria junto quando o detalhe INTEIRO repintava.
+  // O comportamento novo é coberto em reload-sem-perda.test.js.
+  assert.ok(corpo.includes('perfSalvoHtml(item.id)'), 'o resultado tem de ser projetado do state');
 });
 
 test('medição em curso trava a repintura da seção de nuvem', () => {
