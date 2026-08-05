@@ -399,6 +399,20 @@ export class CameraHealthCheckProcessor extends WorkerHost {
         || frameAgeSeconds == null
         || frameAgeSeconds > staleSeconds;
 
+      // O AVISO SOZINHO NÃO GRAVA NADA. Este bloco detectava o detector cego e
+      // só registrava o evento; a câmera continuava armada por movimento, sem
+      // receber movimento nenhum, e portanto sem gravar — em silêncio, com o
+      // painel dizendo que estava tudo armado. Agora o diagnóstico vira ação:
+      // cego → gravação contínua; voltou → devolve ao modo movimento.
+      // Best-effort e isolado: falhar aqui não pode derrubar o health-check.
+      try {
+        await this.recordingManager.definirFailsafeDetectorCego(camera.id, stale);
+      } catch (error) {
+        this.logger.warn(
+          `Fail-safe do detector cego falhou camera=${camera.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
       if (stale) {
         if (await this.shouldEmitWithCooldown(camera.id, 'HEALTH_MOTION_DETECTOR_STALE', cooldownSeconds)) {
           await this.camerasService.registerEvent(

@@ -202,13 +202,45 @@ export class CloudOffloadService {
       return { uploaded: 0, failed: 0, bytesUploaded: 0 };
     }
 
+    const filtroPendente = { cloudKey: null, triggerMode: { in: tipos } };
+
+    // ── O LOTE FIXO NUNCA ALCANÇA A FILA ATRASADA ──────────────────────────
+    // 25 por ciclo de 15 min são ~100 gravações/hora. Esta frota PRODUZ cerca
+    // de 300 por hora. Em regime normal não faz diferença (o envio também é
+    // disparado quando cada segmento fecha), mas depois de qualquer interrupção
+    // do fornecedor — as horas de `NoSuchBucket` desta instalação, por exemplo —
+    // a fila acumulada NUNCA drena: entra mais coisa por hora do que sai, e o
+    // atraso vira permanente. "Quando o S3 voltar, sobe tudo" só é verdade se o
+    // ritmo de recuperação puder superar o de produção.
+    //
+    // Com fila grande o lote cresce (até um teto), e o próprio tamanho da fila
+    // aparece no log — atraso de arquivamento silencioso é como se descobre
+    // tarde demais que um mês não subiu.
+    // Diagnóstico: falhar aqui não pode impedir o envio. Sem o número, segue com
+    // o lote normal. (try/catch, e não `.catch()`: driver/mock sem o método
+    // lança na hora da chamada, antes de existir promessa para rejeitar.)
+    let pendentesTotal = 0;
+    try {
+      pendentesTotal = await this.prisma.recording.count({ where: filtroPendente });
+    } catch {
+      pendentesTotal = 0;
+    }
+    const loteMaximo = envNumber('CLOUD_OFFLOAD_BATCH_MAX', 200, { min: 1, max: 2_000, integer: true });
+    const lote = pendentesTotal > batch * 2 ? Math.min(loteMaximo, Math.max(batch, Math.ceil(pendentesTotal / 4))) : batch;
+    if (lote > batch) {
+      this.logger.warn(
+        `Fila de envio para a nuvem com ${pendentesTotal} gravação(ões) atrasada(s) — subindo ${lote} neste ciclo `
+        + `(lote normal ${batch}) para a fila drenar em vez de crescer.`,
+      );
+    }
+
     const pendentes = await this.prisma.recording.findMany({
       // O filtro por tipo vai no BANCO, não em memória: sem ele, uma instalação
       // que só arquiva movimento leria repetidamente as contínuas pendentes e
       // nunca chegaria às que interessam.
-      where: { cloudKey: null, triggerMode: { in: tipos } },
+      where: filtroPendente,
       orderBy: { startedAt: 'asc' },
-      take: batch,
+      take: lote,
       select: { id: true, cameraId: true, filePath: true, sizeBytes: true, triggerMode: true },
     });
 

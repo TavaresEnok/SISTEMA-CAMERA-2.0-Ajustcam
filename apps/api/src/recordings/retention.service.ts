@@ -1061,13 +1061,59 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       });
       let noProgressBatches = 0;
       this.logger.warn(`Espaço em disco crítico: ${initialPercent}%. Removendo apenas gravações sem hold até ${target}%.`);
+
+      // ── A CÓPIA QUE AINDA NÃO SUBIU É A ÚNICA QUE EXISTE ───────────────────
+      // O guardião apagava a MAIS ANTIGA, ponto. Com a nuvem fora do ar (ex.:
+      // NoSuchBucket) nada sobe, o disco enche, e ele começa a destruir
+      // justamente o que ainda não tinha cópia em lugar nenhum — perda
+      // definitiva, em silêncio, causada por uma falha temporária de terceiro.
+      //
+      // Com nuvem configurada, a ordem passa a ser: primeiro o que JÁ ESTÁ NO
+      // BUCKET (apagar o local é só liberar espaço, o vídeo continua existindo);
+      // e só quando não houver mais nada assim é que se toca no que não subiu —
+      // aí sim gritando, porque é destruição de material único.
+      // Saber se há nuvem é PREFERÊNCIA de ordem, não permissão para agir: se a
+      // consulta falhar, o guardião tem de continuar liberando espaço com o
+      // critério antigo. Desarmá-lo aqui deixaria o disco encher até a guarda de
+      // 92% parar TODAS as câmeras — o oposto do que este código existe para
+      // evitar. (try/catch, e não `.catch()`: mock/driver sem o método lança na
+      // hora da chamada, antes de existir promessa para rejeitar.)
+      let nuvemAtiva = false;
+      try {
+        nuvemAtiva = (await this.prisma.cloudStorage.count({ where: { isActive: true } })) > 0;
+      } catch {
+        nuvemAtiva = false;
+      }
+      const semHold = protection.recordingIds.size ? { id: { notIn: [...protection.recordingIds] } } : {};
+      let avisouPerdaUnica = false;
+
       for (let iteration = 0; iteration < 100 && current > target; iteration += 1) {
-        const oldest = await this.prisma.recording.findMany({
-          where: protection.recordingIds.size ? { id: { notIn: [...protection.recordingIds] } } : {},
+        const selecionar = (where: Record<string, unknown>) => this.prisma.recording.findMany({
+          where,
           orderBy: { startedAt: 'asc' },
           take: 20,
-          select: { id: true, cameraId: true, filePath: true, cloudKey: true, cloudStorageId: true },
+          select: { id: true, cameraId: true, filePath: true, cloudKey: true, cloudStorageId: true, cloudUploadedAt: true },
         });
+
+        let oldest = nuvemAtiva
+          ? await selecionar({ ...semHold, cloudUploadedAt: { not: null } })
+          : await selecionar(semHold);
+
+        if (nuvemAtiva && !oldest.length) {
+          // Acabaram as que têm cópia na nuvem. O disco continua crítico, então
+          // não há escolha: ou se apaga material único, ou a gravação PARA na
+          // guarda de 92% e a câmera fica sem registrar nada. Apagar o mais
+          // antigo é o menor dos danos — mas isto precisa estar berrando no log.
+          oldest = await selecionar(semHold);
+          if (oldest.length && !avisouPerdaUnica) {
+            avisouPerdaUnica = true;
+            this.logger.error(
+              'Guardião de disco vai apagar gravação que NUNCA subiu para a nuvem: não sobrou nenhuma com cópia remota '
+              + 'e o disco segue crítico. Isto é perda DEFINITIVA de imagem. Verifique o envio para a nuvem (bucket/credencial) — '
+              + 'enquanto ele estiver falhando, cada hora de disco cheio destrói material sem cópia.',
+            );
+          }
+        }
         if (!oldest.length) break;
         let batchDeleted = 0;
         for (const recording of oldest) {

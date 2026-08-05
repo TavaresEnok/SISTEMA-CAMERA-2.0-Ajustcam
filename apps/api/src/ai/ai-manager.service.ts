@@ -153,6 +153,22 @@ export class AiManagerService implements OnModuleInit {
   // Auto-recuperação de processadores degradados: exige 2 ciclos seguidos
   // "degraded" antes de agir (evita transientes) e respeita cooldown por câmera.
   private readonly degradedStrikes = new Map<string, number>();
+  // Criados sob demanda, e não como inicializador de campo: parte da suíte monta
+  // este serviço com `Object.create` do protótipo, e inicializador de campo só
+  // roda em construtor — o campo sairia `undefined`, o `.keys()` lançaria, e o
+  // try/catch do watchdog engoliria o erro deixando a auto-recuperação MUDA.
+  private reiniciosSemSucessoInterno: Map<string, number> | null = null;
+  /** Reinícios de análise que NÃO tiraram a câmera do estado degradado. */
+  private get reiniciosSemSucesso(): Map<string, number> {
+    if (!this.reiniciosSemSucessoInterno) this.reiniciosSemSucessoInterno = new Map();
+    return this.reiniciosSemSucessoInterno;
+  }
+  private fontesForcadasInternasInterno: Set<string> | null = null;
+  /** Câmeras cuja análise deve ler a entrega interna do MediaMTX, sem sondar. */
+  private get fontesForcadasInternas(): Set<string> {
+    if (!this.fontesForcadasInternasInterno) this.fontesForcadasInternasInterno = new Set();
+    return this.fontesForcadasInternasInterno;
+  }
   // Contagem de ticks em que um processador apareceu ÓRFÃO (ativo para câmera
   // não armada). Só paramos no 2º tick seguido: um teste manual rápido de IA
   // não pode morrer no meio por azar de timing do watchdog.
@@ -196,6 +212,12 @@ export class AiManagerService implements OnModuleInit {
       const degraded: string[] = Array.isArray(health?.degraded_processors) ? health.degraded_processors : [];
       for (const cameraId of [...this.degradedStrikes.keys()]) {
         if (!degraded.includes(cameraId)) this.degradedStrikes.delete(cameraId);
+      }
+      // Saiu do degradado: o que está valendo funciona. Zera o contador de
+      // reinícios, mas NÃO tira a fonte forçada — foi ela que curou; voltar a
+      // sondar devolveria a câmera ao laço de cegueira no ciclo seguinte.
+      for (const cameraId of [...this.reiniciosSemSucesso.keys()]) {
+        if (!degraded.includes(cameraId)) this.reiniciosSemSucesso.delete(cameraId);
       }
 
       // Processador AUSENTE (ex.: ai-service reiniciou e perdeu tudo): religa a
@@ -310,6 +332,28 @@ export class AiManagerService implements OnModuleInit {
         if (Date.now() - lastAt < cooldownMs) continue;
         this.lastDegradedRecoveryAt.set(cameraId, Date.now());
         this.degradedStrikes.delete(cameraId);
+
+        // ── REINICIAR COM A MESMA FONTE RUIM É UM LAÇO ────────────────────
+        // "Fonte re-resolvida" resolve quando a fonte MUDOU. Quando ela está
+        // simplesmente ilegível para o detector — substream HEVC que o OpenCV
+        // não decodifica, sonda de codec que falhou e devolveu "não é HEVC" —
+        // cada reinício reabre exatamente a mesma URL e falha igual. Medido:
+        // 9 câmeras presas em `no_frame_received` por mais de meia hora,
+        // reiniciando a cada ciclo, todas cegas.
+        //
+        // Depois de N reinícios sem sair do degradado, para de confiar na
+        // sonda e força a entrega interna do MediaMTX (H.264 já transcodado),
+        // que é o mesmo caminho que o fallback de HEVC usa quando acerta.
+        const reinicios = (this.reiniciosSemSucesso.get(cameraId) ?? 0) + 1;
+        this.reiniciosSemSucesso.set(cameraId, reinicios);
+        const limiteParaForcar = envNumber('AI_FORCE_INTERNAL_SOURCE_AFTER_RESTARTS', 2, { min: 1, max: 10 });
+        if (reinicios >= limiteParaForcar && !this.fontesForcadasInternas.has(cameraId)) {
+          this.fontesForcadasInternas.add(cameraId);
+          this.logger.warn(
+            `Câmera ${cameraId} continua cega após ${reinicios} reinícios — forçando a entrega interna `
+            + 'H.264 do MediaMTX para a análise (a captura direta não está sendo decodificada).',
+          );
+        }
 
         this.logger.warn(`Processador de IA degradado (câmera ${cameraId}) — reiniciando análise com fonte re-resolvida.`);
         try {
@@ -1001,12 +1045,21 @@ export class AiManagerService implements OnModuleInit {
     const analyticsIsHevc = isHevcCodec(analyticsCodec);
     const hevcFallbackEnabled = String(process.env.AI_ANALYTICS_HEVC_FALLBACK ?? 'true').toLowerCase() !== 'false';
 
-    if (analyticsIsHevc && hevcFallbackEnabled) {
+    // A sonda diz o que o codec É; a cegueira repetida diz o que o detector
+    // CONSEGUE ler. Quando o watchdog já reiniciou a análise várias vezes sem
+    // sair do degradado, a segunda evidência vale mais: força a entrega
+    // interna, mesmo que a sonda tenha dito h264 (ou tenha falhado e devolvido
+    // nada, que é o caso que mais engana — `null` não é HEVC, então o fallback
+    // nunca entrava e a câmera ficava presa na fonte que não se decodifica).
+    const forcarInterno = this.fontesForcadasInternas.has(cam.id);
+    if ((analyticsIsHevc || forcarInterno) && hevcFallbackEnabled) {
       const fallback = await this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid');
       const fallbackRtspUrl = this.mediamtxProxy.buildInternalRtspUrl(fallback.pathName);
       if (fallbackRtspUrl) {
         const fallbackRtspUrlSanitized = sanitizeRtspUrl(fallbackRtspUrl);
-        this.logger.warn(`IA analytics de ${cam.name} esta em HEVC (${analyticsCodec}); usando path H.264 reduzido do MediaMTX: ${fallback.pathName}`);
+        this.logger.warn(forcarInterno && !analyticsIsHevc
+          ? `IA analytics de ${cam.name} usando path interno do MediaMTX (${fallback.pathName}) por captura direta ilegível — sonda dizia ${analyticsCodec ?? 'codec desconhecido'}.`
+          : `IA analytics de ${cam.name} esta em HEVC (${analyticsCodec}); usando path H.264 reduzido do MediaMTX: ${fallback.pathName}`);
         return {
           rtspUrl: fallbackRtspUrl,
           info: {
@@ -1021,7 +1074,9 @@ export class AiManagerService implements OnModuleInit {
             analyticsSourceCodec: analyticsCodec,
             analyticsTranscodedForAi: Boolean(fallback.transcodedForLive),
             analyticsMediaMtxPath: fallback.pathName,
-            analyticsFallbackReason: 'hevc_direct_capture_unstable',
+            analyticsFallbackReason: forcarInterno && !analyticsIsHevc
+              ? 'direct_capture_blind_after_restarts'
+              : 'hevc_direct_capture_unstable',
           },
         };
       }

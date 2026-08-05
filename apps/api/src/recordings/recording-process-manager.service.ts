@@ -623,8 +623,112 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     this.motionStopTimers.set(cameraId, timer);
   }
 
+  // ── FAIL-SAFE DO DETECTOR CEGO ──────────────────────────────────────────────
+  //
+  // Em modo movimento, "não detectar" e "não haver movimento" produzem o MESMO
+  // resultado na tela: nenhuma gravação. A diferença é que o segundo é correto e
+  // o primeiro é o pior defeito possível num sistema de segurança — a câmera
+  // está de pé, o operador vê "gravação por movimento ativa", e não existe
+  // imagem nenhuma do que aconteceu.
+  //
+  // Medido em produção (2026-08-05): 9 de 9 câmeras armadas com o detector em
+  // `no_frame_received`, 10+ falhas consecutivas de captura, backoff no teto de
+  // 60s — cegas por mais de meia hora. O health-check JÁ sabia disso (emitia
+  // HEALTH_MOTION_DETECTOR_STALE), mas ninguém ligava o aviso à gravação: o
+  // evento ia para o histórico e a câmera seguia sem gravar.
+  //
+  // A regra passa a ser a de qualquer sistema de segurança: NA DÚVIDA, GRAVA.
+  // Detector cego → gravação contínua até ele voltar. Custa disco (e a retenção
+  // já sabe liberar espaço); não custar nada é ficar sem a imagem do fato.
+  // Sob demanda, não inicializador de campo: parte da suíte monta este serviço
+  // com `Object.create` do protótipo, onde inicializador de campo não roda. Um
+  // `undefined` aqui faria `stopMotionRecordingAfterQuiet` lançar no meio do
+  // caminho — ou seja, quebraria a parada normal por post-roll.
+  private blindFailsafeInterno: Set<string> | null = null;
+  private get blindFailsafe(): Set<string> {
+    if (!this.blindFailsafeInterno) this.blindFailsafeInterno = new Set();
+    return this.blindFailsafeInterno;
+  }
+
+  /** Câmeras gravando por fail-safe agora (o detector delas está cego). */
+  camerasEmFailsafeCego(): string[] {
+    return [...this.blindFailsafe];
+  }
+
+  /**
+   * Liga/desliga a gravação contínua de emergência de uma câmera cujo detector
+   * de movimento parou de receber frames. Idempotente: o health-check chama a
+   * cada ciclo com o estado atual, e só a TRANSIÇÃO faz trabalho.
+   */
+  async definirFailsafeDetectorCego(cameraId: string, cego: boolean): Promise<'ligado' | 'desligado' | 'inalterado'> {
+    const jaEstava = this.blindFailsafe.has(cameraId);
+    if (cego === jaEstava) return 'inalterado';
+
+    const camera = await this.prisma.camera.findUnique({
+      where: { id: cameraId },
+      select: { id: true, name: true, recordingMode: true, enabled: true },
+    });
+    // Só vale para câmera habilitada e armada por movimento. Fora disso não há
+    // o que compensar: quem grava contínuo já grava, e quem está desabilitada
+    // não deve ganhar gravação por um detector cego.
+    if (!camera || camera.enabled === false || camera.recordingMode !== 'motion') {
+      this.blindFailsafe.delete(cameraId);
+      return 'inalterado';
+    }
+
+    if (cego) {
+      this.blindFailsafe.add(cameraId);
+      // O post-roll pendente mataria a gravação de emergência no meio.
+      this.clearMotionStopTimer(cameraId);
+      try {
+        const alreadyRecording = this.controlMode === 'local'
+          ? this.active.has(cameraId)
+          : (await this.getStatus(cameraId).catch(() => ({ isRecording: false }))).isRecording;
+        if (!alreadyRecording) await this.start(cameraId, this.getMotionSegmentSeconds());
+        await this.camerasService.registerEvent(
+          cameraId,
+          'MOTION_FAILSAFE_RECORDING_STARTED',
+          'WARNING',
+          'Detector de movimento sem frames: gravando de forma contínua até ele voltar.',
+          { motivo: 'detector_cego' },
+        );
+        this.logger.warn(
+          `FAIL-SAFE: detector de ${camera.name} está cego — gravando CONTÍNUO até voltar. `
+          + 'Sem isto a câmera não registraria nada.',
+        );
+      } catch (error) {
+        // Não conseguiu subir a gravação (câmera fora, disco cheio): mantém a
+        // marca para tentar de novo no próximo ciclo do health-check.
+        this.logger.error(
+          `FAIL-SAFE: detector de ${camera.name} cego e a gravação de emergência NÃO subiu: `
+          + `${error instanceof Error ? error.message : 'erro desconhecido'}. A câmera está sem registrar.`,
+        );
+      }
+      return 'ligado';
+    }
+
+    this.blindFailsafe.delete(cameraId);
+    // Detector voltou: devolve à disciplina do movimento. Não corta na hora —
+    // usa o mesmo post-roll do fluxo normal, senão o instante da recuperação
+    // ficaria sem imagem justamente quando o detector volta a enxergar.
+    this.scheduleMotionStop(cameraId, this.getMotionPostRollSeconds());
+    await this.camerasService.registerEvent(
+      cameraId,
+      'MOTION_FAILSAFE_RECORDING_STOPPED',
+      'INFO',
+      'Detector de movimento voltou: gravação contínua de emergência encerrada.',
+      { postRollSeconds: this.getMotionPostRollSeconds() },
+    ).catch(() => undefined);
+    this.logger.log(`FAIL-SAFE encerrado: detector de ${camera.name} voltou a enxergar.`);
+    return 'desligado';
+  }
+
   private async stopMotionRecordingAfterQuiet(cameraId: string, postRollSeconds: number) {
     this.motionStopTimers.delete(cameraId);
+    // Enquanto o detector estiver cego, NINGUÉM para esta gravação. Um post-roll
+    // agendado antes da cegueira (ou o de um movimento que ainda pingou) cairia
+    // aqui e desligaria justamente a cobertura de emergência.
+    if (this.blindFailsafe.has(cameraId)) return;
     const camera = await this.prisma.camera.findUnique({
       where: { id: cameraId },
       select: { recordingMode: true, recordingEnabled: true },
