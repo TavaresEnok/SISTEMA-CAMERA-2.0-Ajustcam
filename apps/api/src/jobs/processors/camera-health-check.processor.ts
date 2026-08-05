@@ -278,8 +278,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
             );
             try {
               const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 5, max: 3600, integer: true });
-              await this.recordingManager.stop(camera.id);
-              await this.recordingManager.start(camera.id, defaultSegment);
+              await this.reiniciarGravacaoPreservandoArmada(camera.id, defaultSegment);
               await this.camerasService.registerEvent(
                 camera.id,
                 'HEALTH_RECORDING_RECONNECT_SUCCESS',
@@ -350,6 +349,34 @@ export class CameraHealthCheckProcessor extends WorkerHost {
       select: { id: true },
     });
     return !recent;
+  }
+
+  /**
+   * Reinicia a gravação SEM abrir a janela do desarme permanente.
+   *
+   * `stop()` grava `recordingEnabled: false` (é a semântica dele: o desejado
+   * passou a ser "não gravar"). Se o `start()` seguinte falhar — disco cheio é
+   * o caso clássico: `assertMinimumStorageFree` lança — a câmera ficava com
+   * `recordingEnabled=false` para sempre: ela sai do filtro
+   * `where: { recordingEnabled: true }` deste health-check e NUNCA mais é
+   * reavaliada, mesmo depois de a retenção liberar espaço. Era a noite inteira
+   * sem imagem: o defeito que `suspendRecordingForDiskGuard` corrigiu no
+   * gerenciador foi reaberto aqui, pela própria auto-cura.
+   *
+   * A regra: quem estava ARMADA antes do reinício volta a estar armada se o
+   * reinício falhar. O erro continua subindo — o chamador registra o evento.
+   */
+  private async reiniciarGravacaoPreservandoArmada(cameraId: string, segmentSeconds: number) {
+    await this.recordingManager.stop(cameraId);
+    try {
+      await this.recordingManager.start(cameraId, segmentSeconds);
+    } catch (error) {
+      await this.prisma.camera.update({
+        where: { id: cameraId },
+        data: { recordingEnabled: true },
+      }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async checkMotionDetectorHealth() {
@@ -640,8 +667,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
                   );
                   try {
                     const defaultSegment = envNumber('RECORDING_SEGMENT_SECONDS', 300, { min: 5, max: 3600, integer: true });
-                    await this.recordingManager.stop(camera.id);
-                    await this.recordingManager.start(camera.id, defaultSegment);
+                    await this.reiniciarGravacaoPreservandoArmada(camera.id, defaultSegment);
                     await this.camerasService.registerEvent(
                       camera.id,
                       'HEALTH_STREAM_FPS_REMEDIATION_SUCCESS',

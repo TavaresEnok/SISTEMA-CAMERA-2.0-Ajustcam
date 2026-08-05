@@ -3,42 +3,41 @@ import assert from 'node:assert/strict';
 import { RetentionService } from '../src/recordings/retention.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// O GUARDIÃO DE DISCO NÃO PODE VIRAR TRITURADORA DE ACERVO.
+// O GUARDIÃO DE DISCO NÃO PODE VIRAR TRITURADORA DE ACERVO — NEM DESISTIR À TOA.
 //
-// `checkDiskUsage` apaga por PRESSÃO DE DISCO, não por idade: sem filtro de
-// data, da mais velha para a mais nova, em até 100 lotes de 20 = 2000 gravações
-// por passagem. A premissa embutida é "apagar gravação reduz o uso do disco".
+// `checkDiskUsage` apaga por PRESSÃO DE DISCO, não por idade: da mais velha
+// para a mais nova, em até 100 lotes de 20. A premissa é "apagar gravação
+// libera espaço". Quando ela é falsa (volume não montado, disco cheio por
+// outro dono), o laço destruiria prova sem conseguir nada — daí o freio.
 //
-// Quando a premissa é falsa, o laço destrói prova sem conseguir nada. O caso
-// real: o volume das gravações NÃO monta, `recordingsRoot` cai no disco do
-// sistema (cheio por outro motivo) e nenhuma exclusão move o percentual.
-//
-// O Frigate trava a mesma classe de acidente antes de sincronizar disco↔banco
-// (`util/media.py`, `SAFETY_THRESHOLD = 0.5`): contagem anormal de exclusão é
-// sintoma de mount/config errado, não de acervo velho. Aqui o sinal escolhido é
-// mais preciso que um limiar de contagem — se o lote apagou DE FATO e o uso do
-// disco não caiu, o espaço não é das gravações.
+// O freio original media progresso no PERCENTUAL ARREDONDADO — e isso o
+// quebrava no sentido oposto: um lote de 20 gravações (~240 MB) não move 1
+// ponto percentual num disco real (1 ponto em 4 TB são 40 GB), então o freio
+// disparava SEMPRE em disco grande. O guardião apagava 60 gravações legítimas,
+// registrava um erro FALSO de "volume não montado" e desistia; o disco subia
+// até os 92% que param todas as câmeras. O progresso agora é medido em BYTES
+// LIVRES: qualquer exclusão real aparece, em qualquer tamanho de disco.
 //
 // O que estes testes travam:
-//   1. disco que não cede ⇒ o laço ABORTA após N lotes (não vai até 2000);
-//   2. o aborto é ERROR no log, com a causa provável (mount) — silêncio aqui
-//      seria pior que o bug, porque o disco continua cheio e ninguém sabe;
-//   3. progresso real NÃO dispara o freio (uma limpeza legítima sempre libera
-//      espaço) — este é o teste que impede o freio de virar um falso positivo;
-//   4. progresso intermitente RESETA o contador (só sequências sem progresso
-//      contam), senão uma limpeza lenta seria abortada no meio.
+//   1. disco que não cede UM BYTE ⇒ aborta após N lotes, com ERROR e causa;
+//   2. lote que libera bytes SEM mover o percentual ⇒ NÃO dispara o freio
+//      (o caso do disco grande — a regressão que existia);
+//   3. progresso intermitente reseta o contador;
+//   4. abaixo do gatilho, nada roda.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Cenario = {
   /** Percentuais devolvidos por `diskUsagePercent`, em ordem de chamada. */
-  leituras: number[];
-  maxNoProgress?: string;
+  percentuais: number[];
+  /** Bytes livres devolvidos por `diskFreeBytes`, em ordem de chamada. */
+  livres: number[];
 };
 
 function buildSvc(cenario: Cenario) {
   const logs: string[] = [];
   const apagadas: string[] = [];
-  let leituraIndex = 0;
+  let pIndex = 0;
+  let fIndex = 0;
   let proximoId = 0;
 
   const svc: any = Object.create(RetentionService.prototype);
@@ -50,6 +49,7 @@ function buildSvc(cenario: Cenario) {
   svc.config = { get: (key: string) => (key === 'recordingsRoot' ? '/mnt/gravacoes' : undefined) };
   svc.settings = { isAutoCleanupEnabled: async () => true };
   svc.prisma = {
+    cloudStorage: { count: async () => 0 },
     recording: {
       // Acervo inesgotável: se o laço não parar sozinho, ele apaga para sempre.
       findMany: async (args: any) => Array.from({ length: args.take ?? 20 }, () => {
@@ -65,8 +65,13 @@ function buildSvc(cenario: Cenario) {
     return true;
   };
   svc.diskUsagePercent = async () => {
-    const valor = cenario.leituras[Math.min(leituraIndex, cenario.leituras.length - 1)];
-    leituraIndex += 1;
+    const valor = cenario.percentuais[Math.min(pIndex, cenario.percentuais.length - 1)];
+    pIndex += 1;
+    return valor;
+  };
+  svc.diskFreeBytes = async () => {
+    const valor = cenario.livres[Math.min(fIndex, cenario.livres.length - 1)];
+    fIndex += 1;
     return valor;
   };
 
@@ -91,51 +96,61 @@ async function comEnv<T>(vars: Record<string, string | undefined>, fn: () => Pro
 }
 
 const GATILHO = { RETENTION_DISK_TRIGGER_PERCENT: '90', RETENTION_DISK_TARGET_PERCENT: '85' };
+const GB = 1024 * 1024 * 1024;
 
-test('disco que não cede: aborta após o teto de lotes sem progresso', async () => {
-  // Sempre 95%: apagar não muda nada (volume não montado / disco de outro dono).
-  const { svc, logs, apagadas } = buildSvc({ leituras: [95] });
+test('disco que não cede UM BYTE: aborta após o teto de lotes sem progresso', async () => {
+  // Percentual e bytes livres constantes: apagar não muda nada (volume não
+  // montado / disco de outro dono).
+  const { svc, logs, apagadas } = buildSvc({ percentuais: [95], livres: [2 * GB] });
   await comEnv({ ...GATILHO, RETENTION_DISK_MAX_NOPROGRESS_BATCHES: '3' }, () => svc.checkDiskUsage());
 
   assert.equal(apagadas.length, 60, '3 lotes de 20 e para — sem o freio seriam 2000');
-  const erro = logs.find((l) => l.startsWith('error:'));
+  const erro = logs.find((l) => l.startsWith('error:') && l.includes('ABORTADO'));
   assert.ok(erro, 'o aborto tem que aparecer como ERROR, não em silêncio');
-  assert.match(erro!, /ABORTADO/);
   assert.match(erro!, /montado/, 'a mensagem precisa apontar a causa provável (mount)');
 });
 
+test('DISCO GRANDE: bytes liberados sem mover o percentual NÃO disparam o freio', async () => {
+  // A regressão que existia: 4 TB, cada lote libera ~240 MB (visível em bytes,
+  // invisível no percentual inteiro). O guardião tem de continuar até o alvo.
+  const { svc, logs, apagadas } = buildSvc({
+    percentuais: [91, 91, 91, 91, 84],           // o percentual "não se move"…
+    livres: [100 * GB, 100.2 * GB, 100.4 * GB, 100.6 * GB, 100.9 * GB], // …mas cada lote libera bytes
+  });
+  await comEnv({ ...GATILHO, RETENTION_DISK_MAX_NOPROGRESS_BATCHES: '3' }, () => svc.checkDiskUsage());
+
+  assert.ok(apagadas.length >= 60, `parou cedo demais (${apagadas.length}) — o freio disparou com progresso real`);
+  assert.equal(
+    logs.filter((l) => l.startsWith('error:') && l.includes('ABORTADO')).length,
+    0,
+    'liberar bytes É progresso, em qualquer tamanho de disco — abortar aqui deixa o disco subir aos 92% que param as câmeras',
+  );
+});
+
 test('teto configurável muda o ponto de aborto', async () => {
-  const { svc, apagadas } = buildSvc({ leituras: [95] });
+  const { svc, apagadas } = buildSvc({ percentuais: [95], livres: [2 * GB] });
   await comEnv({ ...GATILHO, RETENTION_DISK_MAX_NOPROGRESS_BATCHES: '1' }, () => svc.checkDiskUsage());
   assert.equal(apagadas.length, 20, 'teto 1 ⇒ um único lote');
 });
 
-test('limpeza legítima NÃO dispara o freio', async () => {
-  // Cada leitura cai: 95 → 92 → 88 → 84 (abaixo do alvo 85, o laço termina).
-  const { svc, logs, apagadas } = buildSvc({ leituras: [95, 92, 88, 84] });
-  await comEnv({ ...GATILHO, RETENTION_DISK_MAX_NOPROGRESS_BATCHES: '3' }, () => svc.checkDiskUsage());
-
-  assert.ok(apagadas.length > 0, 'a limpeza real precisa acontecer');
-  assert.equal(logs.filter((l) => l.startsWith('error:')).length, 0, 'progresso real não pode ser tratado como acidente');
-  assert.ok(logs.some((l) => l.includes('Guardião de disco concluído')), 'termina pelo caminho normal');
-});
-
 test('progresso intermitente reseta o contador (não aborta limpeza lenta)', async () => {
-  // 95 (inicial) → 95 (sem progresso) → 95 (sem progresso) → 90 (progresso!)
-  // → 95,95 (sem progresso de novo) → 84 (chega ao alvo).
-  // Com teto 3, um reset no meio impede o aborto.
-  const { svc, logs } = buildSvc({ leituras: [95, 95, 95, 90, 95, 95, 84] });
+  // livres: base → 2 lotes sem liberar → libera → 2 sem liberar → o percentual
+  // chega ao alvo. Com teto 3, o reset no meio impede o aborto.
+  const { svc, logs } = buildSvc({
+    percentuais: [95, 95, 95, 95, 95, 95, 84],
+    livres: [10 * GB, 10 * GB, 10 * GB, 11 * GB, 11 * GB, 11 * GB, 12 * GB],
+  });
   await comEnv({ ...GATILHO, RETENTION_DISK_MAX_NOPROGRESS_BATCHES: '3' }, () => svc.checkDiskUsage());
 
   assert.equal(
-    logs.filter((l) => l.startsWith('error:')).length,
+    logs.filter((l) => l.startsWith('error:') && l.includes('ABORTADO')).length,
     0,
     'sequência sem progresso foi quebrada por um lote que liberou espaço — não é o acidente que o freio caça',
   );
 });
 
 test('disco abaixo do gatilho: o guardião nem roda', async () => {
-  const { svc, apagadas } = buildSvc({ leituras: [50] });
+  const { svc, apagadas } = buildSvc({ percentuais: [50], livres: [500 * GB] });
   await comEnv(GATILHO, () => svc.checkDiskUsage());
   assert.equal(apagadas.length, 0, 'sem pressão de disco não se apaga nada');
 });

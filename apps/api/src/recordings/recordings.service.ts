@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { createReadStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { rename, rm, stat } from 'node:fs/promises';
@@ -14,7 +14,7 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { AccessControlService } from '../access-control/access-control.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
-import { S3Client } from '../cloud-storage/s3-client';
+import { S3Client, S3Error } from '../cloud-storage/s3-client';
 import { CloudStorageResolverService } from '../cloud-storage/cloud-storage-resolver.service';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
@@ -522,41 +522,59 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
    * mantém o 404 de sempre.
    */
   private async streamFromCloudIfAvailable(
-    recording: { id: string; filePath: string; cloudKey?: string | null },
+    recording: { id: string; filePath: string; cloudKey?: string | null; cloudStorageId?: string | null },
     res: Response,
     options?: { download?: boolean },
   ): Promise<boolean> {
     const cloudKey = recording.cloudKey;
     if (!cloudKey) return false;
 
-    const config = await this.cloudConnector.getCloudStorageConfig().catch(() => null);
+    // Lê do storage DE ORIGEM desta gravação, não do ativo — o mesmo motivo de
+    // materializeFromCloud: usar o ativo faria o playback procurar a chave
+    // antiga no bucket NOVO depois de qualquer troca de fornecedor, e o acervo
+    // inteiro "sumiria" da tela (os dados continuariam no bucket antigo,
+    // inalcançáveis). Era exatamente o defeito que a coluna `cloudStorageId` e
+    // o resolver existem para impedir.
+    const config = await this.storageResolver
+      .storageDaGravacao(recording.cloudStorageId ?? null)
+      .catch(() => null);
     if (!config) {
       // A gravação diz estar na nuvem, mas o storage foi removido do painel.
       // Sinalizar é melhor que devolver "não encontrado", que mandaria o
       // operador procurar no disco um arquivo que está no bucket.
       throw new NotFoundException(
-        'Esta gravação foi arquivada na nuvem, mas o armazenamento em nuvem não está configurado nesta instalação.',
+        'Esta gravação foi arquivada na nuvem, mas o armazenamento de origem dela não está mais configurado nesta instalação.',
       );
     }
 
-    const client = new S3Client({
-      endpoint: config.endpoint,
-      region: config.region,
-      bucket: config.bucket,
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-      prefix: config.prefix,
-      forcePathStyle: config.forcePathStyle,
-    });
+    const client = this.storageResolver.clienteDe(config);
 
-    // A chave gravada no banco já inclui o prefixo; o cliente o aplicaria de
-    // novo, então o removemos antes de pedir.
+    // A chave gravada no banco já é relativa ao prefixo do storage; este corte
+    // só existe para acervo antigo que porventura a tenha gravado completa.
     const semPrefixo = config.prefix && cloudKey.startsWith(`${config.prefix}/`)
       ? cloudKey.slice(config.prefix.length + 1)
       : cloudKey;
 
     const range = res.req.headers.range;
-    const objeto = await client.getObjectStream(semPrefixo, range);
+    let objeto: Awaited<ReturnType<S3Client['getObjectStream']>>;
+    try {
+      objeto = await client.getObjectStream(semPrefixo, range);
+    } catch (error) {
+      // Erro do bucket não pode virar "Internal server error" mudo: o operador
+      // precisa distinguir "objeto sumiu do bucket" de "API quebrada".
+      if (error instanceof S3Error && (error.status === 404 || error.code === 'NoSuchKey' || error.code === 'NoSuchBucket')) {
+        throw new NotFoundException(
+          `Esta gravação foi arquivada na nuvem, mas o bucket não a devolveu (${error.code}). `
+          + 'Verifique o armazenamento em nuvem desta instalação.',
+        );
+      }
+      if (error instanceof S3Error) {
+        throw new ServiceUnavailableException(
+          `O armazenamento em nuvem respondeu ${error.status} (${error.code}) ao buscar esta gravação.`,
+        );
+      }
+      throw error;
+    }
 
     res.status(objeto.status === 206 ? 206 : 200);
     res.setHeader('Content-Type', objeto.contentType || 'video/mp4');
@@ -594,6 +612,30 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       if (!res.writableEnded) res.end();
     }
     return true;
+  }
+
+  /**
+   * `createReadStream(...).pipe(res)` SEM handler de erro derruba o processo:
+   * `pipe()` não instala listener de 'error' na ORIGEM, e um ENOENT assíncrono
+   * (a retenção ou a poda da nuvem tiram o arquivo entre o `statSync` e o
+   * `open` interno do stream — não há lock nenhum entre eles) vira
+   * uncaughtException — que o main.ts deliberadamente NÃO engole. A API caía
+   * por um clique de playback na hora errada, e a gravação contínua não volta
+   * sozinha depois do restart.
+   */
+  private pipeArquivo(res: Response, filePath: string, range?: { start: number; end: number }) {
+    const stream = range ? createReadStream(filePath, range) : createReadStream(filePath);
+    stream.on('error', (error) => {
+      this.logger.warn(`Stream de arquivo falhou (${filePath}): ${(error as Error).message}`);
+      if (!res.headersSent) {
+        res.status(404).end();
+      } else {
+        // Cabeçalho já foi: encerrar "com sucesso" entregaria um corpo mais
+        // curto que o Content-Length prometido como se fosse o vídeo inteiro.
+        res.destroy(error as Error);
+      }
+    });
+    stream.pipe(res);
   }
 
   async streamRecording(recordingId: string, res: Response, options?: { allowAutoCompat?: boolean }) {
@@ -639,7 +681,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
     if (!range) {
       res.setHeader('Content-Length', fileSize);
-      createReadStream(filePath).pipe(res);
+      this.pipeArquivo(res, filePath);
       return;
     }
 
@@ -657,7 +699,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.status(206);
     res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
     res.setHeader('Content-Length', validEnd - validStart + 1);
-    createReadStream(filePath, { start: validStart, end: validEnd }).pipe(res);
+    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
   }
 
   private async ensureCompatibleFile(recordingId: string): Promise<string> {
@@ -829,7 +871,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
     if (!range) {
       res.setHeader('Content-Length', fileSize);
-      createReadStream(filePath).pipe(res);
+      this.pipeArquivo(res, filePath);
       return;
     }
 
@@ -847,7 +889,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.status(206);
     res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
     res.setHeader('Content-Length', validEnd - validStart + 1);
-    createReadStream(filePath, { start: validStart, end: validEnd }).pipe(res);
+    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
   }
 
   async prepareCompatiblePlayback(recordingId: string) {
@@ -888,7 +930,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
     if (!range) {
       res.setHeader('Content-Length', fileSize);
-      createReadStream(filePath).pipe(res);
+      this.pipeArquivo(res, filePath);
       return;
     }
 
@@ -906,7 +948,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.status(206);
     res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
     res.setHeader('Content-Length', validEnd - validStart + 1);
-    createReadStream(filePath, { start: validStart, end: validEnd }).pipe(res);
+    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
   }
 
   // Streama um ZIP com várias gravações sem materializar nada em disco/memória.
@@ -1218,7 +1260,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.setHeader('Content-Length', String(statSync(thumbPath).size));
-    createReadStream(thumbPath).pipe(res);
+    this.pipeArquivo(res, thumbPath);
   }
 
   private async acquireThumbnailGenerationSlot() {
@@ -1351,7 +1393,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.setHeader('Content-Length', String(statSync(spritePath).size));
-    createReadStream(spritePath).pipe(res);
+    this.pipeArquivo(res, spritePath);
   }
 
   private async ensureTimelinePreviewGenerated(
@@ -3140,7 +3182,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException('Arquivo do clip não encontrado no disco.');
     }
     res.setHeader('Content-Disposition', `attachment; filename="clip-${clip.id}.mp4"`);
-    createReadStream(filePath).pipe(res);
+    this.pipeArquivo(res, filePath);
   }
 
   async createThumbnailTokens(user: AuthUser, recordingIds: string[]) {

@@ -192,29 +192,68 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       if (removidos >= TETO) break;
       try {
         const client = this.storageResolver.clienteDe(storage);
-        const objetos = await client.listObjects('', LOTE);
-        if (!objetos.length) continue;
-        const chaves = objetos.map((o: { key: string }) => o.key).filter(Boolean);
+        // `listObjectsPage`, NUNCA `listObjects`: só a versão paginada devolve
+        // a chave RELATIVA ao prefixo do storage — que é o formato gravado em
+        // `Recording.cloudKey` e o que `deleteObject` espera (ele prefixa de
+        // novo). A versão antiga comparava chave COM prefixo contra banco SEM
+        // prefixo: nada casava, TODO objeto parecia órfão, e os deletes iam
+        // para `prefixo/prefixo/...` — a varredura mentia no log e não limpava
+        // nada; corrigida a chave sem esta troca, apagaria o acervo vivo. E
+        // sem paginação ela só enxergava as primeiras 500 chaves para sempre.
+        let token: string | null = null;
+        // "Formato provado" = pelo menos UMA chave listada casou com um dono no
+        // banco. Enquanto isso não acontecer, a varredura não confia no próprio
+        // pareamento — e uma página só de órfãos DEPOIS da prova é legítima
+        // (ex.: o acervo inteiro de uma câmera excluída).
+        let formatoProvado = false;
+        do {
+          const pagina = await client.listObjectsPage('', token, LOTE);
+          token = pagina.nextToken;
+          const chaves = pagina.objects.map((o: { key: string }) => o.key).filter(Boolean);
+          if (!chaves.length) continue;
 
-        // Quem AINDA tem dono no banco fica. A consulta é por storage: a mesma
-        // chave pode existir em dois buckets após uma migração, e só o par
-        // (chave, storage) identifica o objeto sem ambiguidade.
-        const comDono = await this.prisma.recording.findMany({
-          where: { cloudKey: { in: chaves }, cloudStorageId: storage.id },
-          select: { cloudKey: true },
-        });
-        const protegidas = new Set(comDono.map((r) => r.cloudKey).filter(Boolean) as string[]);
+          // Quem AINDA tem dono no banco fica. A consulta é por storage: a
+          // mesma chave pode existir em dois buckets após uma migração, e só o
+          // par (chave, storage) identifica o objeto sem ambiguidade.
+          const comDono = await this.prisma.recording.findMany({
+            where: { cloudKey: { in: chaves }, cloudStorageId: storage.id },
+            select: { cloudKey: true },
+          });
+          const protegidas = new Set(comDono.map((r) => r.cloudKey).filter(Boolean) as string[]);
+          if (protegidas.size) formatoProvado = true;
 
-        for (const chave of chaves) {
-          if (removidos >= TETO) break;
-          if (protegidas.has(chave)) continue;   // tem dono ⇒ a retenção ainda não liberou
-          try {
-            await client.deleteObject(chave);
-            removidos += 1;
-          } catch (error) {
-            this.logger.warn(`Órfão na nuvem não pôde ser removido: ${chave} — ${(error as Error).message}`);
+          // ── TRAVA DE SEGURANÇA ────────────────────────────────────────────
+          // Nenhuma chave reconhecida ATÉ AGORA, num storage que o banco diz
+          // ter gravações: não é lixo, é sinal de descompasso de chave (bug de
+          // prefixo, bucket compartilhado com outra instalação, bucket com
+          // dados de terceiros). Varredura de lixo que "não reconhece nada"
+          // não apaga nada — ela PARA e grita, porque o modo de falha
+          // alternativo é destruir um acervo probatório inteiro.
+          if (!formatoProvado) {
+            const donosNoBanco = await this.prisma.recording.count({
+              where: { cloudStorageId: storage.id, cloudKey: { not: null } },
+            });
+            if (donosNoBanco > 0) {
+              this.logger.error(
+                `Varredura de órfãos ABORTADA no storage "${storage.name}": página inteira de objetos sem `
+                + `NENHUM dono no banco, que registra ${donosNoBanco} gravação(ões) neste storage. Isto indica `
+                + 'descompasso de chave/prefixo ou bucket compartilhado — apagar aqui destruiria acervo que não é lixo.',
+              );
+              break;
+            }
           }
-        }
+
+          for (const chave of chaves) {
+            if (removidos >= TETO) break;
+            if (protegidas.has(chave)) continue;   // tem dono ⇒ a retenção ainda não liberou
+            try {
+              await client.deleteObject(chave);
+              removidos += 1;
+            } catch (error) {
+              this.logger.warn(`Órfão na nuvem não pôde ser removido: ${chave} — ${(error as Error).message}`);
+            }
+          }
+        } while (token && removidos < TETO);
       } catch (error) {
         // Um storage fora do ar não pode impedir a varredura dos outros nem
         // derrubar a retenção local, que é a que libera disco.
@@ -1005,6 +1044,50 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     return total > 0 ? Math.round(((total - free) / total) * 100) : 0;
   }
 
+  /** Bytes livres no filesystem da raiz — a unidade em que progresso É visível. */
+  private async diskFreeBytes(root: string) {
+    const disk = await statfs(root);
+    return Number(disk.bavail) * Number(disk.bsize);
+  }
+
+  /**
+   * Libera o ESPAÇO LOCAL de uma gravação com cópia confirmada na nuvem,
+   * preservando a linha e o objeto remoto — o playback continua funcionando,
+   * servido do bucket. É a única operação que o guardião de disco tem o
+   * direito de fazer numa gravação já arquivada: o papel dele é liberar disco,
+   * não decidir retenção. (`deleteRecording` apaga linha, arquivo E objeto
+   * remoto — usado aqui, destruía a única cópia existente de gravações cujo
+   * arquivo local a poda já tinha removido, liberando zero byte.)
+   */
+  private async liberarEspacoLocal(recording: { id: string; cameraId: string; filePath: string }): Promise<boolean> {
+    const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const fullPath = ensureFileUnderRoot(root, recording.filePath);
+    let liberou = false;
+    const alvos = [
+      fullPath,
+      this.derivedThumbnailPath(fullPath),
+      buildTimelinePreviewPath(fullPath),
+      join(root, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`),
+    ];
+    for (const alvo of alvos) {
+      try {
+        if (existsSync(alvo)) {
+          rmSync(alvo, { force: true });
+          liberou = true;
+        }
+      } catch {
+        // Um derivado teimoso não pode impedir a liberação dos demais.
+      }
+    }
+    // Mesmo sem arquivo nenhum (corrida com a poda), o carimbo precisa ficar
+    // verdadeiro — é ele que tira a gravação da fila do guardião.
+    await this.prisma.recording.update({
+      where: { id: recording.id },
+      data: { localDeletedAt: new Date() },
+    }).catch(() => undefined);
+    return liberou;
+  }
+
   private async checkDiskUsage(existingProtection?: ProtectionSets) {
     const root = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
     try {
@@ -1087,6 +1170,14 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       const semHold = protection.recordingIds.size ? { id: { notIn: [...protection.recordingIds] } } : {};
       let avisouPerdaUnica = false;
 
+      // O PROGRESSO é medido em BYTES LIVRES, não no percentual arredondado.
+      // Um lote de 20 gravações (~240 MB) não move 1 ponto percentual num disco
+      // de verdade (1 ponto em 4 TB são 40 GB), então o freio de "apagou sem
+      // adiantar" disparava SEMPRE em disco grande: o guardião apagava 60
+      // gravações legítimas, registrava um erro falso de "volume não montado" e
+      // desistia — e o disco subia até os 92% que param todas as câmeras.
+      let freeAntes = await this.diskFreeBytes(root);
+
       for (let iteration = 0; iteration < 100 && current > target; iteration += 1) {
         const selecionar = (where: Record<string, unknown>) => this.prisma.recording.findMany({
           where,
@@ -1095,22 +1186,32 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           select: { id: true, cameraId: true, filePath: true, cloudKey: true, cloudStorageId: true, cloudUploadedAt: true },
         });
 
+        // 1ª escolha: gravações com cópia CONFIRMADA na nuvem que AINDA ocupam
+        // disco. `localDeletedAt: null` é o que garante isso — sem esse filtro,
+        // as "mais antigas com cópia" eram justamente as que a poda já tinha
+        // tirado do disco: apagava-se o OBJETO REMOTO (a única cópia existente)
+        // liberando zero byte. O guardião liberta espaço LOCAL; ele nunca tem o
+        // direito de tocar no acervo remoto.
         let oldest = nuvemAtiva
-          ? await selecionar({ ...semHold, cloudUploadedAt: { not: null } })
-          : await selecionar(semHold);
+          ? await selecionar({ ...semHold, cloudUploadedAt: { not: null }, localDeletedAt: null })
+          : [];
+        let modo: 'liberar' | 'apagar' = 'liberar';
 
-        if (nuvemAtiva && !oldest.length) {
-          // Acabaram as que têm cópia na nuvem. O disco continua crítico, então
-          // não há escolha: ou se apaga material único, ou a gravação PARA na
-          // guarda de 92% e a câmera fica sem registrar nada. Apagar o mais
-          // antigo é o menor dos danos — mas isto precisa estar berrando no log.
-          oldest = await selecionar(semHold);
-          if (oldest.length && !avisouPerdaUnica) {
+        if (!oldest.length) {
+          // Acabaram as que têm cópia na nuvem ocupando disco. O disco continua
+          // crítico, então não há escolha: ou se apaga material único, ou a
+          // gravação PARA na guarda de 92% e a câmera fica sem registrar nada.
+          // Apagar o mais antigo é o menor dos danos — berrando no log.
+          // Com nuvem ativa, o filtro `cloudUploadedAt: null` evita reprocessar
+          // as já-podadas (apagá-las não libera nada e destruiria o remoto).
+          modo = 'apagar';
+          oldest = await selecionar(nuvemAtiva ? { ...semHold, cloudUploadedAt: null } : semHold);
+          if (nuvemAtiva && oldest.length && !avisouPerdaUnica) {
             avisouPerdaUnica = true;
             this.logger.error(
               'Guardião de disco vai apagar gravação que NUNCA subiu para a nuvem: não sobrou nenhuma com cópia remota '
-              + 'e o disco segue crítico. Isto é perda DEFINITIVA de imagem. Verifique o envio para a nuvem (bucket/credencial) — '
-              + 'enquanto ele estiver falhando, cada hora de disco cheio destrói material sem cópia.',
+              + 'ocupando disco e o uso segue crítico. Isto é perda DEFINITIVA de imagem. Verifique o envio para a nuvem '
+              + '(bucket/credencial) — enquanto ele estiver falhando, cada hora de disco cheio destrói material sem cópia.',
             );
           }
         }
@@ -1118,7 +1219,10 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
         let batchDeleted = 0;
         for (const recording of oldest) {
           try {
-            if (await this.deleteRecording(recording, protection)) {
+            const feito = modo === 'liberar'
+              ? await this.liberarEspacoLocal(recording)
+              : await this.deleteRecording(recording, protection);
+            if (feito) {
               totalDeleted += 1;
               batchDeleted += 1;
             }
@@ -1127,18 +1231,21 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
           }
         }
         if (!batchDeleted) break;
-        const before = current;
         current = await this.diskUsagePercent(root);
-        if (current < before) {
+        const freeDepois = await this.diskFreeBytes(root);
+        if (freeDepois > freeAntes) {
           noProgressBatches = 0;
+          freeAntes = freeDepois;
           continue;
         }
-        // Apagou de verdade e o disco não cedeu: o espaço não é das gravações.
+        freeAntes = freeDepois;
+        // Apagou de verdade e nem UM byte foi liberado: o espaço não é das
+        // gravações (volume não montado, outra coisa encheu o disco).
         noProgressBatches += 1;
         if (noProgressBatches >= maxNoProgressBatches) {
           this.logger.error(
-            `Guardião de disco ABORTADO: ${noProgressBatches} lote(s) seguidos apagaram gravação sem reduzir o uso do disco `
-            + `(${before}% → ${current}%, alvo ${target}%). O espaço NÃO está sendo ocupado pelas gravações — `
+            `Guardião de disco ABORTADO: ${noProgressBatches} lote(s) seguidos apagaram gravação sem liberar um byte `
+            + `(uso ${current}%, alvo ${target}%). O espaço NÃO está sendo ocupado pelas gravações — `
             + `verifique se o volume de "${root}" está montado e se outra coisa encheu o disco. `
             + `${totalDeleted} gravação(ões) já foram removidas nesta passagem; o laço parou para não destruir o acervo à toa.`,
           );
