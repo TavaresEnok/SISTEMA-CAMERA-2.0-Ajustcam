@@ -262,7 +262,18 @@ export class CloudOffloadService {
                     return buf;
                   },
                   tamanho,
-                  { contentType: 'video/mp4' },
+                  {
+                    contentType: 'video/mp4',
+                    // Partes em paralelo dentro do arquivo grande. A Eveo fecha a
+                    // conexão a cada requisição (~143ms para reabrir); serial, uma
+                    // gravação de 500 MB pagava esse custo ~30 vezes em sequência.
+                    // Teto por arquivo × arquivos em voo = memória — mantido baixo.
+                    partConcurrency: envNumber('CLOUD_OFFLOAD_PART_CONCURRENCY', 4, {
+                      min: 1,
+                      max: 16,
+                      integer: true,
+                    }),
+                  },
                 );
               } finally {
                 await handle.close();

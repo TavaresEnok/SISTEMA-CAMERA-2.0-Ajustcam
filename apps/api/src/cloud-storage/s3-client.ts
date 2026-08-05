@@ -42,6 +42,12 @@ export type S3ObjectSummary = {
 const MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
 // 16 MiB equilibra número de requisições (cada uma custa) e memória por parte.
 const DEFAULT_PART_BYTES = 16 * 1024 * 1024;
+// Partes em voo por arquivo grande. Conservador de propósito: o offload já sobe
+// gravações DIFERENTES em paralelo, então o custo de memória se MULTIPLICA
+// (arquivos em voo × partes em voo × tamanho da parte). 4 × 16 MB = 64 MB por
+// arquivo grande, folgado num servidor de RAM finita. Ajustável por env.
+const DEFAULT_PART_CONCURRENCY = 4;
+const MAX_PART_CONCURRENCY = 16;
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -404,7 +410,7 @@ export class S3Client {
     key: string,
     read: (offset: number, length: number) => Promise<Buffer>,
     totalBytes: number,
-    options?: { partSizeBytes?: number; contentType?: string },
+    options?: { partSizeBytes?: number; contentType?: string; partConcurrency?: number },
   ): Promise<void> {
     const fullKey = this.fullKey(key);
     const partSize = Math.max(MIN_MULTIPART_PART_BYTES, options?.partSizeBytes ?? DEFAULT_PART_BYTES);
@@ -420,24 +426,60 @@ export class S3Client {
     if (!uploadId) throw new S3Error(0, 'MultipartInitFailed', 'O storage não devolveu UploadId.');
 
     try {
-      const etags: string[] = [];
-      let offset = 0;
-      let partNumber = 1;
-      while (offset < totalBytes) {
+      // Plano das partes ANTES de subir: o pool paralelo puxa desta lista. A
+      // leitura é por OFFSET (acesso aleatório), então N leituras simultâneas em
+      // posições distintas são seguras — não há cursor compartilhado.
+      const parts: Array<{ partNumber: number; offset: number; length: number }> = [];
+      for (let offset = 0, partNumber = 1; offset < totalBytes; partNumber += 1) {
         const length = Math.min(partSize, totalBytes - offset);
-        const chunk = await read(offset, length);
-        const parte = await this.request({
-          method: 'PUT',
-          key: fullKey,
-          query: { partNumber: String(partNumber), uploadId },
-          payload: chunk,
-          extraHeaders: { 'content-length': String(chunk.length) },
-        });
-        const etag = parte.etag;
-        if (!etag) throw new S3Error(0, 'MultipartPartNoETag', `Parte ${partNumber} sem ETag.`);
-        etags.push(etag);
+        parts.push({ partNumber, offset, length });
         offset += length;
-        partNumber += 1;
+      }
+
+      // ETag indexado pela POSIÇÃO da parte (não pela ordem de término): as
+      // partes terminam fora de ordem no paralelo, mas o CompleteMultipartUpload
+      // EXIGE ordem crescente de PartNumber, senão o objeto sai corrompido.
+      const etags = new Array<string>(parts.length);
+      const concurrency = Math.max(1, Math.min(
+        options?.partConcurrency ?? DEFAULT_PART_CONCURRENCY,
+        MAX_PART_CONCURRENCY,
+      ));
+
+      // Pool com teto: workers puxam de um índice compartilhado (fila puxada, não
+      // blocos fixos — trabalhador rápido não fica ocioso esperando o lento). O
+      // teto limita as partes EM VOO, e portanto a memória (teto × tamanho da
+      // parte). `next++` é atômico entre awaits no laço de evento single-thread.
+      let next = 0;
+      let abortada = false;
+      const worker = async () => {
+        while (!abortada) {
+          const i = next;
+          next += 1;
+          if (i >= parts.length) return;
+          const { partNumber, offset, length } = parts[i];
+          const chunk = await read(offset, length);
+          if (abortada) return;
+          const parte = await this.request({
+            method: 'PUT',
+            key: fullKey,
+            query: { partNumber: String(partNumber), uploadId },
+            payload: chunk,
+            extraHeaders: { 'content-length': String(chunk.length) },
+          });
+          if (!parte.etag) throw new S3Error(0, 'MultipartPartNoETag', `Parte ${partNumber} sem ETag.`);
+          etags[i] = parte.etag;
+        }
+      };
+
+      try {
+        await Promise.all(
+          Array.from({ length: Math.min(concurrency, parts.length) }, () => worker()),
+        );
+      } catch (error) {
+        // Marca para os demais workers pararem de puxar novas partes (não gasta
+        // banda subindo pedaço de um objeto que já vai ser abortado).
+        abortada = true;
+        throw error;
       }
 
       const corpo = Buffer.from(
