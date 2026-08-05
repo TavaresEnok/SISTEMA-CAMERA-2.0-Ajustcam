@@ -116,8 +116,20 @@ async function call(config, params, timeoutMs) {
       body: params.payload && params.payload.length ? params.payload : undefined,
       signal: controller.signal,
     });
-    const text = await res.text();
-    return { ok: res.ok, status: res.status, code: res.ok ? null : errorCode(text),
+    // O corpo é lido como BYTES, não como texto.
+    //
+    // `res.text()` decodifica tudo como UTF-8, e o teste de desempenho baixa
+    // uma amostra de megabytes de bytes ALEATÓRIOS: quase nenhuma sequência é
+    // UTF-8 válida, então o decodificador troca byte a byte por U+FFFD e
+    // constrói um texto gigante — que é descartado na linha seguinte. Esse
+    // trabalho entrava na conta da "descida" e fazia o teste medir o
+    // decodificador em vez do link.
+    //
+    // O corpo continua sendo consumido até o fim (é o que mede a transferência
+    // de verdade). Só o de ERRO vira texto, e erro de S3 é um XML de linhas.
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return { ok: res.ok, status: res.status, bytes: bytes.length,
+      code: res.ok ? null : errorCode(bytes.toString('utf-8')),
       conexao: String(res.headers.get('connection') || '').toLowerCase() };
   } catch (error) {
     // Timeout/DNS/conexão recusada: não vaza credencial, só a natureza da falha.
@@ -239,10 +251,51 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
       }
     }
 
-    const t1 = Date.now();
-    const get = await call(config, { method: 'GET', key: chave }, timeoutMs);
-    const msDescida = Date.now() - t1;
-    if (!get.ok) return { ok: false, error: `Leitura falhou: ${explain(get.status, get.code)}` };
+    // ── DESCIDA: A AMOSTRA SE AJUSTA AO LINK ────────────────────────────────
+    //
+    // Baixar a amostra inteira parece o teste mais fiel — e é, num link rápido.
+    // Num link lento vira um teste que não termina. Medido aqui: os mesmos 8 MB
+    // que SOBEM em 3,4s DESCEM em 65s, porque este link tem 19 Mbps de subida e
+    // 4,4 Mbps de descida. O teste inteiro passava de 70s e o nginx na frente
+    // corta em 60 — ou seja, o operador via um erro de um teste que estava
+    // funcionando.
+    //
+    // Então a descida começa por um pedaço pequeno e só cresce se houver tempo,
+    // exatamente como a subida já fazia. Link rápido continua sendo medido com
+    // amostra grande; link lento responde em segundos em vez de minutos.
+    const totalBytes = carga.length;
+    const baixarFatia = async (bytes) => {
+      const t = Date.now();
+      const r = await call(
+        config,
+        { method: 'GET', key: chave, extraHeaders: { range: `bytes=0-${bytes - 1}` } },
+        timeoutMs,
+      );
+      // `r.bytes` é o que REALMENTE chegou: um gateway que ignore o Range
+      // devolve o objeto todo, e a conta tem de usar o tamanho recebido, não o
+      // pedido — senão o teste reporta uma banda que não existe.
+      return { r, ms: Date.now() - t, bytes: r.bytes ?? bytes };
+    };
+
+    // 256 KB de sonda: é o pior caso que se aceita esperar às cegas. Num link
+    // rápido ela volta em milissegundos e a segunda fatia faz a medida de
+    // verdade; num link ruim, ela sozinha já não estoura o tempo do navegador.
+    let descida = await baixarFatia(Math.min(totalBytes, 256 * 1024));
+    if (!descida.r.ok) return { ok: false, error: `Leitura falhou: ${explain(descida.r.status, descida.r.code)}` };
+    if (descida.ms < DURACAO_ALVO_MS && descida.bytes < totalBytes) {
+      const alvo = Math.min(totalBytes, Math.ceil(descida.bytes * (DURACAO_ALVO_MS / Math.max(1, descida.ms))));
+      if (alvo > descida.bytes) {
+        const nova = await baixarFatia(alvo);
+        if (nova.r.ok) descida = nova;
+      }
+    }
+    const msDescida = descida.ms;
+    const bytesDescida = descida.bytes;
+    if (bytesDescida < totalBytes) {
+      notas.push(
+        `Descida medida com ${(bytesDescida / 1024 / 1024).toFixed(1)} MB dos ${mb} MB enviados: neste link a amostra inteira levaria ${Math.round((totalBytes / Math.max(1, bytesDescida)) * (msDescida / 1000))}s.`,
+      );
+    }
 
     const amostras = [];
     // Keep-alive medido nas requisições REAIS, assinadas. Um GET anônimo na raiz
@@ -274,8 +327,9 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
         maxMs: amostras.length ? Math.max(...amostras) : 0,
         amostras: amostras.length,
       },
+      amostraDescidaMb: Number((bytesDescida / 1024 / 1024).toFixed(1)),
       subida: { mbps: mbps(carga.length, msSubida), segundos: Number((msSubida / 1000).toFixed(2)) },
-      descida: { mbps: mbps(carga.length, msDescida), segundos: Number((msDescida / 1000).toFixed(2)) },
+      descida: { mbps: mbps(bytesDescida, msDescida), segundos: Number((msDescida / 1000).toFixed(2)) },
       falhas,
       fechaConexao,
       notas,

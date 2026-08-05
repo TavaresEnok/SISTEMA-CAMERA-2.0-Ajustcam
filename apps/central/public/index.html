@@ -2870,7 +2870,7 @@
                 <div class="perf-metric">
                   <label>Descida</label>
                   <b>${d.descida.mbps}<i>Mb/s</i></b>
-                  <small>${d.descida.segundos}s</small>
+                  <small>${d.amostraDescidaMb != null ? `${d.amostraDescidaMb} MB em ` : ''}${d.descida.segundos}s</small>
                 </div>
               </div>
               ${inst ? '<div class="perf-flag">A cauda está longe da mediana: parte das requisições trava, e é ela que segura o lote quando há muitas câmeras.</div>' : ''}
