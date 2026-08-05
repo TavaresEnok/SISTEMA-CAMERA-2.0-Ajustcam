@@ -49,7 +49,16 @@ function extrairFuncao(nome) {
  */
 function bancada() {
   const escritas = [];
-  class Element {}
+  const textos = [];
+  // `textContent` mora no Node e `innerHTML` no Element, como no DOM de
+  // verdade: a guarda precisa achar cada um no protótipo certo.
+  class Node {}
+  Object.defineProperty(Node.prototype, 'textContent', {
+    configurable: true,
+    get() { return this._texto || ''; },
+    set(v) { this._texto = v; textos.push(v); },
+  });
+  class Element extends Node {}
   Object.defineProperty(Element.prototype, 'innerHTML', {
     configurable: true,
     get() { return this._html || ''; },
@@ -57,19 +66,20 @@ function bancada() {
   });
   const el = new Element();
   el.dataset = {};
-  return { Element, el, escritas };
+  return { Node, Element, el, escritas, textos, novo: () => Object.assign(new Element(), { dataset: {} }) };
 }
 
-function carregarGuarda(Element) {
-  const contexto = { Element, Object };
+function carregarGuarda(b) {
+  const contexto = { Element: b.Element, Node: b.Node, Object };
   vm.createContext(contexto);
   vm.runInContext(`${extrairFuncao('ignorarRepinturaIgual')}; this.fn = ignorarRepinturaIgual;`, contexto);
   return contexto.fn;
 }
 
 test('escrever o MESMO html duas vezes só mexe no DOM uma vez', () => {
-  const { Element, el, escritas } = bancada();
-  carregarGuarda(Element)(el);
+  const b = bancada();
+  const { el, escritas } = b;
+  carregarGuarda(b)(el);
 
   el.innerHTML = '<b>igual</b>';
   el.innerHTML = '<b>igual</b>';
@@ -81,8 +91,9 @@ test('escrever o MESMO html duas vezes só mexe no DOM uma vez', () => {
 });
 
 test('html diferente PRECISA chegar ao DOM', () => {
-  const { Element, el, escritas } = bancada();
-  carregarGuarda(Element)(el);
+  const b = bancada();
+  const { el, escritas } = b;
+  carregarGuarda(b)(el);
 
   el.innerHTML = '<b>antes</b>';
   el.innerHTML = '<b>depois</b>';
@@ -93,15 +104,17 @@ test('html diferente PRECISA chegar ao DOM', () => {
 });
 
 test('ler de volta devolve o que foi escrito', () => {
-  const { Element, el } = bancada();
-  carregarGuarda(Element)(el);
+  const b = bancada();
+  const { el } = b;
+  carregarGuarda(b)(el);
   el.innerHTML = '<i>x</i>';
   assert.equal(el.innerHTML, '<i>x</i>', 'o getter não pode se perder no caminho');
 });
 
 test('proteger duas vezes não empilha guardas', () => {
-  const { Element, el, escritas } = bancada();
-  const guarda = carregarGuarda(Element);
+  const b = bancada();
+  const { el, escritas } = b;
+  const guarda = carregarGuarda(b);
   guarda(el);
   guarda(el);
   el.innerHTML = 'a';
@@ -110,10 +123,10 @@ test('proteger duas vezes não empilha guardas', () => {
 });
 
 test('a guarda NÃO é instalada no protótipo — só nos elementos nomeados', () => {
-  const { Element, el, escritas } = bancada();
-  carregarGuarda(Element)(el);
-  const outro = new Element();
-  outro.dataset = {};
+  const b = bancada();
+  const { el, escritas } = b;
+  carregarGuarda(b)(el);
+  const outro = b.novo();
   outro.innerHTML = 'z';
   outro.innerHTML = 'z';
   // Mexer no Element.prototype mudaria o comportamento da página inteira,
@@ -122,9 +135,33 @@ test('a guarda NÃO é instalada no protótipo — só nos elementos nomeados', 
   assert.equal(escritas.filter((v) => v === 'z').length, 2);
 });
 
+test('escrever o MESMO texto duas vezes não troca o nó', () => {
+  const b = bancada();
+  const { el, textos } = b;
+  carregarGuarda(b)(el);
+
+  el.textContent = 'Atualizado 17:56:00';
+  el.textContent = 'Atualizado 17:56:00';
+  el.textContent = 'Atualizado 17:56:30';
+
+  // Atribuir `textContent` SEMPRE descarta o nó de texto e cria outro, mesmo
+  // com a frase idêntica. Medido: com só o innerHTML protegido ainda morriam
+  // 18 nós por ciclo, todos assim.
+  assert.deepEqual(textos, ['Atualizado 17:56:00', 'Atualizado 17:56:30']);
+});
+
+test('a guarda de texto não engole uma mudança de verdade', () => {
+  const b = bancada();
+  const { el, textos } = b;
+  carregarGuarda(b)(el);
+  el.textContent = 'há 10s';
+  el.textContent = 'há 40s';
+  assert.deepEqual(textos, ['há 10s', 'há 40s'], 'o contador precisa continuar contando');
+});
+
 test('elemento inexistente não derruba a inicialização', () => {
-  const { Element } = bancada();
-  const guarda = carregarGuarda(Element);
+  const b = bancada();
+  const guarda = carregarGuarda(b);
   assert.doesNotThrow(() => guarda(null));
   assert.doesNotThrow(() => guarda(undefined));
 });

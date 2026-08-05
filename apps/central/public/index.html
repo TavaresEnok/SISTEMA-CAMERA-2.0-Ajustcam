@@ -1697,15 +1697,42 @@
             original.set.call(this, novo);
           },
         });
+        // `textContent` tem o mesmo defeito, e é menos óbvio: atribuir SEMPRE
+        // descarta o nó de texto atual e cria outro, mesmo quando a frase é
+        // idêntica. Medido: com só o `innerHTML` protegido ainda morriam 18 nós
+        // por ciclo, todos assim. Um nó de texto trocado não pisca à vista, mas
+        // desfaz seleção de texto e reinicia transição de CSS no elemento.
+        const textoOriginal = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+        if (textoOriginal?.set) {
+          Object.defineProperty(el, 'textContent', {
+            configurable: true,
+            get() { return textoOriginal.get.call(this); },
+            set(valor) {
+              const novo = String(valor);
+              if (textoOriginal.get.call(this) === novo) return;
+              textoOriginal.set.call(this, novo);
+            },
+          });
+        }
         el.__guardaRepintura = true;
         return el;
       }
+      // Medido com um MutationObserver durante um ciclo de refresh: com a lista
+      // curta ainda morriam 41 nós por ciclo. Estes são os que sobraram — o
+      // gráfico da frota (8 nós), as tendências (4) e os rótulos do topo, que
+      // eram reescritos mesmo com texto idêntico.
       [
         els.kpis, els.chips, els.queue, els.rows, els.inventoryRows,
         els.contractBoard, els.alertsBoard, els.auditRows,
-        document.querySelector('#detalhe-status'),
-        document.querySelector('#detalhe-rail'),
-      ].forEach(ignorarRepinturaIgual);
+        '#detalhe-status', '#detalhe-rail', '#detalhe-titulo', '#detalhe-subtitulo',
+        '#fleet-chart', '#fleet-trends', '#fleet-health',
+        '#user-chip', '#user-avatar', '#build-stamp', '#crumb-view',
+        '#nav-count-clientes', '#pulse-label',
+        '#list-summary', '#table-foot-left', '#attention-count',
+        '#install-local-url', '#install-central-url',
+      ].forEach((alvo) => ignorarRepinturaIgual(
+        typeof alvo === 'string' ? document.querySelector(alvo) : alvo,
+      ));
 
       els.email.value = localStorage.getItem('drac-central-email') || 'admin@drac.local';
 
@@ -2587,6 +2614,11 @@
       function renderAiSection(item) {
         const body = document.getElementById('ai-body');
         if (!body) return;
+        // Protegido AQUI, e não na lista de partida: este bloco nasce dentro do
+        // HTML do detalhe, então some e volta como elemento NOVO sempre que o
+        // detalhe é repintado — a guarda instalada no elemento antigo vai embora
+        // junto com ele. Reaplicar é barato e não empilha.
+        ignorarRepinturaIgual(body);
         const pol = item.aiPolicy || { motion: true, object: false, face: false };
         const avancadaBloqueada = item.restrictions && item.restrictions.aiAdvanced === false;
         body.innerHTML = `
@@ -2857,8 +2889,12 @@
             // Exceção: se alguém está DIGITANDO, recarregar apagaria o que foi
             // escrito. Aí só avisa, e recarrega no ciclo seguinte em que o campo
             // estiver livre.
+            // Digitando OU medindo: recarregar apagaria trabalho em curso. A
+            // medição do S3 leva ~10s e o operador está parado esperando o
+            // número; recarregar no meio devolve a tela em branco — e a amostra
+            // já foi enviada ao bucket do cliente à toa.
             const digitando = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-            if (digitando) {
+            if (digitando || state.cloudMedindo) {
               el.textContent = 'versão nova — recarregar';
               return;
             }
@@ -3165,6 +3201,8 @@
       async function renderScaleSection(installationId) {
         const body = document.getElementById('scale-body');
         if (!body) return;
+        // Mesma razão de `renderAiSection`: nasce dentro do HTML do detalhe.
+        ignorarRepinturaIgual(body);
         let view = null;
         try {
           const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/scheduler`), { credentials: 'include' });
