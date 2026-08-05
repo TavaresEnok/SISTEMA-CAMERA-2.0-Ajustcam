@@ -2824,6 +2824,8 @@
           const destino = body.querySelector(sel);
           if (destino) destino.innerHTML = conteudo;
         }
+        // E o que atravessou uma recarga de versão volta pela mesma porta.
+        devolverPerfRestaurado(body, item.id);
 
         body.querySelector('#cloud-add')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
         body.querySelector('#cloud-edit')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
@@ -2850,6 +2852,98 @@
           modeSel.addEventListener('change', pintar);
         }
       }
+
+      // ── Recarga sem perda ──────────────────────────────────────────────────
+      // A recarga automática de versão (logo abaixo) continua existindo — mas
+      // o que o operador acabou de produzir tem de ATRAVESSÁ-LA, não morrer
+      // nela. O que não é derivável dos dados do servidor (resultado do teste
+      // de desempenho, aba do detalhe, busca e filtros) vai para o
+      // sessionStorage antes do reload e é devolvido no boot. sessionStorage
+      // de propósito: é por aba e morre quando a aba fecha — o escopo exato de
+      // "esta tela".
+      const CHAVE_RECARGA = 'drac-central-recarga';
+      // Além disso o número já é história: reidratar uma medição velha como se
+      // fosse fresca engana quem está comparando fornecedor.
+      const RECARGA_PERF_VALIDADE_MS = 15 * 60 * 1000;
+      // Preenchido no boot a partir do que a aba anterior salvou; consumido
+      // uma única vez por devolverPerfRestaurado().
+      let perfRestaurado = null;
+      let ultimaDigitacao = 0;
+      document.addEventListener('input', () => { ultimaDigitacao = Date.now(); }, true);
+
+      // Decide se recarregar AGORA destruiria algo. Pura de propósito: os
+      // testes a executam com um activeElement de mentira.
+      //
+      // O adiamento NÃO é indefinido: cursor apenas esquecido num campo
+      // intocado deixa de segurar depois de 90s sem teclar — senão o operador
+      // fica rodando código velho sem saber, que é o defeito que a recarga
+      // automática existe para impedir. Só edição NÃO SALVA segura sem prazo
+      // (value≠defaultValue é exatamente "tem coisa digitada que o HTML não
+      // trouxe"): perder o que foi escrito é pior que rodar código velho, e o
+      // carimbo clicável continua à vista para quem quiser atualizar já.
+      function recargaSeguraAgora(ativo, medindo, msDesdeDigitacao) {
+        if (medindo) return false;
+        const tag = ativo?.tagName;
+        if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return true;
+        if (tag !== 'SELECT' && typeof ativo.value === 'string' && ativo.value !== ativo.defaultValue) return false;
+        return msDesdeDigitacao >= 90000;
+      }
+
+      function capturarTela() {
+        const perfEl = document.querySelector('#cloud-perf-result');
+        return {
+          detailTab: state.detailTab,
+          busca: els.search?.value || '',
+          filtros: {
+            communication: els.communication?.value || 'all',
+            contract: els.contract?.value || 'all',
+            sort: els.sort?.value || '',
+          },
+          perf: perfEl && perfEl.innerHTML
+            ? { instalacao: state.selectedId, html: perfEl.innerHTML, em: Date.now() }
+            : null,
+        };
+      }
+      function salvarTelaParaRecarga() {
+        // Falhou (cota, modo privado)? Recarrega sem restaurar — pior seria
+        // não recarregar e ficar em código velho.
+        try { sessionStorage.setItem(CHAVE_RECARGA, JSON.stringify(capturarTela())); } catch { /* segue */ }
+      }
+      // Lê e APAGA: o estado salvo vale para UMA recarga. Se ficasse, um F5 de
+      // amanhã reidrataria o resultado de ontem.
+      function lerTelaSalva(armazem) {
+        try {
+          const bruto = armazem.getItem(CHAVE_RECARGA);
+          if (!bruto) return null;
+          armazem.removeItem(CHAVE_RECARGA);
+          return JSON.parse(bruto);
+        } catch { return null; }
+      }
+      // Roda no boot, ANTES do primeiro load()/render(): devolve o operador à
+      // aba onde estava (em vez da padrão) com a busca e os filtros que tinha.
+      function aplicarTelaSalva(tela) {
+        if (!tela) return;
+        if (tela.detailTab) state.detailTab = tela.detailTab;
+        if (els.search && tela.busca) els.search.value = tela.busca;
+        if (tela.filtros) {
+          if (els.communication && tela.filtros.communication) els.communication.value = tela.filtros.communication;
+          if (els.contract && tela.filtros.contract) els.contract.value = tela.filtros.contract;
+          if (els.sort && tela.filtros.sort) els.sort.value = tela.filtros.sort;
+        }
+        if (tela.perf && tela.perf.html && Date.now() - tela.perf.em <= RECARGA_PERF_VALIDADE_MS) {
+          perfRestaurado = tela.perf;
+        }
+      }
+      // Devolve ao DOM o resultado de desempenho que atravessou a recarga.
+      // Uma única vez, e só na instalação onde foi medido — reidratar na
+      // instalação errada atribuiria o link de um fornecedor ao outro.
+      function devolverPerfRestaurado(body, installationId) {
+        if (!perfRestaurado || perfRestaurado.instalacao !== installationId) return;
+        const destino = body.querySelector('#cloud-perf-result');
+        if (destino && !destino.innerHTML) destino.innerHTML = perfRestaurado.html;
+        perfRestaurado = null;
+      }
+
       // ── Versão carregada nesta aba ─────────────────────────────────────────
       // Compara o que o NAVEGADOR tem com o que o SERVIDOR serve. Diferentes =
       // a aba está velha, e o clique recarrega. Sem isto, "não apareceu" e "já
@@ -2868,7 +2962,7 @@
         if (!el) return;
         if (!el.dataset.ligado) {
           el.dataset.ligado = '1';
-          el.addEventListener('click', () => location.reload());
+          el.addEventListener('click', () => { salvarTelaParaRecarga(); location.reload(); });
         }
         try {
           const res = await fetch(centralUrl('/api/health'));
@@ -2886,18 +2980,19 @@
             // razão em dizer que "não apareceu". Um painel de operação não pode
             // exigir que se saiba disso.
             //
-            // Exceção: se alguém está DIGITANDO, recarregar apagaria o que foi
-            // escrito. Aí só avisa, e recarrega no ciclo seguinte em que o campo
-            // estiver livre.
-            // Digitando OU medindo: recarregar apagaria trabalho em curso. A
-            // medição do S3 leva ~10s e o operador está parado esperando o
-            // número; recarregar no meio devolve a tela em branco — e a amostra
-            // já foi enviada ao bucket do cliente à toa.
-            const digitando = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-            if (digitando || state.cloudMedindo) {
+            // Exceção: recarregar não pode destruir trabalho em curso —
+            // digitação recente, edição não salva no campo focado, ou a
+            // medição de S3 no ar (leva ~10s, o operador está parado esperando
+            // o número, e a amostra já subiu ao bucket do cliente). Aí só
+            // avisa — o carimbo é clicável — e tenta de novo no próximo ciclo.
+            // As regras, incluindo por que nenhuma segura para sempre, estão
+            // em recargaSeguraAgora().
+            if (!recargaSeguraAgora(document.activeElement, state.cloudMedindo, Date.now() - ultimaDigitacao)) {
               el.textContent = 'versão nova — recarregar';
               return;
             }
+            // A tela atravessa a recarga: salva antes, o boot devolve depois.
+            salvarTelaParaRecarga();
             setTimeout(() => location.reload(), 400);
           } else {
             el.textContent = `v ${build}`;
@@ -4967,6 +5062,9 @@
         else if (event.key.toLowerCase() === 'k' && state.view === 'detalhe') stepInstallation(-1);
       });
 
+      // Se a aba anterior salvou a tela antes de recarregar por versão nova,
+      // devolve o operador exatamente onde estava — antes do primeiro render.
+      aplicarTelaSalva(lerTelaSalva(sessionStorage));
       setView(state.view);
       renderInstallCommand();
       paintPulse();
