@@ -167,3 +167,76 @@ test('varre e apaga sobras de execuções anteriores', async (t) => {
   assert.ok(apagadas.some((k) => k.includes('antiga-2')));
   assert.ok(!apagadas.some((k) => k.includes('gravacoes/')), 'a varredura nunca sai do prefixo da medição');
 });
+
+// ── TAMANHO ESCOLHIDO À MÃO VALE NOS DOIS SENTIDOS ──────────────────────────
+//
+// Reclamação do operador, com razão: "se eu escolher 64MB deveria ser 64MB de
+// subida e 64 de descida". A sonda adaptativa da descida (256 KB crescendo até
+// a transferência durar ~2,5s) existe para o modo Automático não demorar
+// minutos num link lento — mas ela estava se aplicando TAMBÉM quando alguém
+// escolhia o tamanho, e o painel mostrava "descida medida com 1,5 MB" depois de
+// pedirem 64. Isso não é adaptar: é ignorar a ordem.
+
+test('escolha explícita baixa o objeto INTEIRO, sem fatiar', async (t) => {
+  const MB = 4;
+  const gets = [];
+  const srv = await servidorFalso((req, res) => {
+    if (req.method === 'GET') {
+      // A varredura de limpeza também usa GET (list-type=2). Ela não é uma
+      // fatia de download e não pode contar como tal.
+      if (!/list-type/.test(req.url)) gets.push(req.headers.range || '(sem range)');
+      res.writeHead(200);
+      res.end(Buffer.alloc(MB * 1024 * 1024));
+      return;
+    }
+    res.writeHead(200); res.end('');
+  });
+  t.after(() => srv.stop());
+
+  const r = await measureS3Performance(config(srv.endpoint), { sizeMb: MB, latencySamples: 1 });
+  assert.equal(r.ok, true);
+  assert.equal(r.amostraDescidaMb, MB, `pediram ${MB} MB e a descida mediu ${r.amostraDescidaMb} MB`);
+  // Um único GET pedindo o arquivo todo — não uma sonda seguida de refino.
+  assert.equal(gets.length, 1, `esperado 1 GET, houve ${gets.length}: ${gets.join(' | ')}`);
+  assert.equal(gets[0], `bytes=0-${MB * 1024 * 1024 - 1}`, 'o range tem de cobrir o objeto inteiro');
+});
+
+test('modo Automático CONTINUA sondando — senão link lento volta a demorar minutos', async (t) => {
+  const MB = 8;
+  const gets = [];
+  const srv = await servidorFalso((req, res) => {
+    if (req.method === 'GET') {
+      if (/list-type/.test(req.url)) { res.writeHead(200); res.end(''); return; }
+      gets.push(req.headers.range || '');
+      // Devolve só o que foi pedido, como um gateway de verdade faz com Range.
+      const m = /bytes=0-(\d+)/.exec(req.headers.range || '');
+      const n = m ? Number(m[1]) + 1 : MB * 1024 * 1024;
+      res.writeHead(206);
+      res.end(Buffer.alloc(n));
+      return;
+    }
+    res.writeHead(200); res.end('');
+  });
+  t.after(() => srv.stop());
+
+  const r = await measureS3Performance(config(srv.endpoint), { latencySamples: 1 });
+  assert.equal(r.ok, true);
+  // Sem tamanho pedido, a primeira leitura é a sonda pequena — não o objeto todo.
+  assert.match(gets[0], /^bytes=0-(\d+)$/);
+  const primeiro = Number(/bytes=0-(\d+)/.exec(gets[0])[1]) + 1;
+  assert.ok(primeiro <= 256 * 1024, `a sonda deveria ser pequena, veio com ${primeiro} bytes`);
+});
+
+test('a conta usa os bytes que CHEGARAM, não os que foram pedidos', async (t) => {
+  // Gateway que ignora Range e manda o objeto inteiro: se a conta usasse o
+  // tamanho pedido, o painel anunciaria uma banda que não existe.
+  const MB = 2;
+  const srv = await servidorFalso((req, res) => {
+    if (req.method === 'GET') { res.writeHead(200); res.end(Buffer.alloc(MB * 1024 * 1024)); return; }
+    res.writeHead(200); res.end('');
+  });
+  t.after(() => srv.stop());
+
+  const r = await measureS3Performance(config(srv.endpoint), { sizeMb: MB, latencySamples: 1 });
+  assert.equal(r.amostraDescidaMb, MB);
+});

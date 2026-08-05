@@ -2147,7 +2147,19 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
     accessKeyId: config.accessKeyId,
     secretAccessKey: secret,
     forcePathStyle: config.forcePathStyle,
-  }, pedido > 0 ? { sizeMb: pedido } : {});
+  }, pedido > 0
+    // PRAZO PROPORCIONAL AO QUE FOI PEDIDO.
+    //
+    // O prazo fixo de 5 min servia para o modo Automático, que se ajusta ao
+    // link. Quando o operador ESCOLHE 64 MB, a descida leva o tempo que tiver
+    // de levar: neste link, 64 MB a ~1 Mb/s são 8,5 minutos — abortar aos 5 e
+    // dizer "falhou" seria mentir sobre um teste que estava indo bem.
+    //
+    // 25s por MB equivale a suportar um link de ~0,32 Mb/s, bem abaixo do pior
+    // caso plausível. Teto de 30 min: acima disso o número já não ajuda ninguém
+    // a decidir nada, e uma requisição pendurada por mais tempo é problema.
+    ? { sizeMb: pedido, timeoutMs: Math.min(1_800_000, Math.max(300_000, pedido * 25_000)) }
+    : {});
 
   // Contexto que transforma o número em resposta: 143ms parece distância e não
   // é. Decompor mostra que a REDE são ~35ms e o resto é abrir a conexão — e o

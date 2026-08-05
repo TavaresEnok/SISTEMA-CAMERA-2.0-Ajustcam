@@ -2929,7 +2929,14 @@
         // bucket do cliente e briga com a primeira pela mesma banda.
         state.cloudMedindo = installationId;
         if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
-        alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Medindo — a amostra cresce até a transferência durar o suficiente. O que subir é apagado no fim.</div>';
+        const tamanhoEscolhido = Number(body.querySelector('#cloud-perf-size')?.value || 0);
+        alvo.innerHTML = `<div class="subtext" style="margin-top:9px">${tamanhoEscolhido > 0
+          // Escolha explícita: sobe E desce o tamanho pedido, inteiro. Avisar do
+          // tempo é obrigação — 64 MB num link de 1 Mb/s são 8,5 minutos, e sem
+          // aviso o operador acha que travou e recarrega a página no meio.
+          ? `Medindo com ${tamanhoEscolhido} MB de subida e ${tamanhoEscolhido} MB de descida. Em link lento a descida pode levar vários minutos — não recarregue a página. O que subir é apagado no fim.`
+          : 'Medindo — a amostra cresce até a transferência durar o suficiente. O que subir é apagado no fim.'
+        }</div>`;
         try {
           const escolha = body.querySelector('#cloud-perf-size')?.value || '';
           const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(installationId)}/cloud-storage/performance`), {

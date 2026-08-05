@@ -277,12 +277,20 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
       return { r, ms: Date.now() - t, bytes: r.bytes ?? bytes };
     };
 
-    // 256 KB de sonda: é o pior caso que se aceita esperar às cegas. Num link
-    // rápido ela volta em milissegundos e a segunda fatia faz a medida de
-    // verdade; num link ruim, ela sozinha já não estoura o tempo do navegador.
-    let descida = await baixarFatia(Math.min(totalBytes, 256 * 1024));
+    // QUEM ESCOLHEU O TAMANHO MANDA — NOS DOIS SENTIDOS.
+    //
+    // Isto aqui estava errado e o operador reclamou com razão: pedir 64 MB e
+    // ver a descida medida com 1,5 MB não é "adaptativo", é o programa
+    // ignorando a ordem. Se alguém escolheu o tamanho, é porque quer AQUELE
+    // tamanho — provavelmente para comparar com outro provedor, ou porque
+    // desconfia que a amostra pequena não representa o arquivo real.
+    //
+    // A sonda pequena só faz sentido no modo Automático, onde ninguém pediu
+    // tamanho nenhum e o compromisso é responder rápido.
+    const primeiraFatia = explicito ? totalBytes : Math.min(totalBytes, 256 * 1024);
+    let descida = await baixarFatia(primeiraFatia);
     if (!descida.r.ok) return { ok: false, error: `Leitura falhou: ${explain(descida.r.status, descida.r.code)}` };
-    if (descida.ms < DURACAO_ALVO_MS && descida.bytes < totalBytes) {
+    if (!explicito && descida.ms < DURACAO_ALVO_MS && descida.bytes < totalBytes) {
       const alvo = Math.min(totalBytes, Math.ceil(descida.bytes * (DURACAO_ALVO_MS / Math.max(1, descida.ms))));
       if (alvo > descida.bytes) {
         const nova = await baixarFatia(alvo);
