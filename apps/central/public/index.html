@@ -2527,6 +2527,13 @@
         if (configPending(item)) out.push(['warn', 'config. não aplicada']);
         const rec = number(metric(item, 'recordingAttentionCameras', 0));
         if (rec) out.push(['warn', `${rec} gravação(ões) em atenção`]);
+        // Detector de movimento CEGO com gravação de emergência ligada. É "bad"
+        // de propósito: a instalação está se defendendo sozinha (gravando
+        // contínuo), mas a causa — detector sem frames — segue de pé e já ficou
+        // invisível uma vez: 9 câmeras cegas por horas com a Central mostrando
+        // tudo normal, porque nenhuma métrica carregava isso.
+        const cego = number(metric(item, 'motionFailsafeCameras', 0));
+        if (cego) out.push(['bad', `${cego} detector(es) cego(s) — gravando por fail-safe`]);
         return out;
       }
       function renderAttentionQueue() {

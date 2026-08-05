@@ -441,6 +441,10 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         streamOptimizationSafeActions: streamPerformance?.optimizationPlan?.safeActionCount ?? 0,
         recordingGapSecondsLast24h: streamPerformance?.summary?.recordingGapSecondsLast24h ?? 0,
         recordingAttentionCameras: streamPerformance?.summary?.camerasWithRecordingAttention ?? 0,
+        // Detector de movimento cego com gravação de emergência ligada. Zero é
+        // o normal; qualquer valor > 0 é a instalação se defendendo de um
+        // detector que parou — e o operador da Central PRECISA ver isso.
+        motionFailsafeCameras: this.getMotionFailsafeCount(),
         activeUsers,
         diskUsagePercent: disk?.usagePercent ?? null,
         infraHealth: infraHealth
@@ -560,6 +564,24 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       return typeof manager.getRuntimeSummary === 'function' ? manager.getRuntimeSummary() : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Quantas câmeras estão gravando por FAIL-SAFE agora (detector de movimento
+   * cego). Este número precisa viajar no heartbeat: o episódio real ficou
+   * invisível — 9 câmeras cegas por horas e a Central mostrando tudo normal,
+   * porque nenhuma métrica carregava essa informação. O dono só fica sabendo
+   * de um defeito que a Central consegue enxergar.
+   */
+  private getMotionFailsafeCount(): number {
+    try {
+      const manager = this.moduleRef.get(RecordingProcessManagerService, { strict: false }) as RecordingProcessManagerService & {
+        camerasEmFailsafeCego?: () => string[];
+      };
+      return typeof manager.camerasEmFailsafeCego === 'function' ? manager.camerasEmFailsafeCego().length : 0;
+    } catch {
+      return 0;
     }
   }
 

@@ -169,6 +169,39 @@ export class AiManagerService implements OnModuleInit {
     if (!this.fontesForcadasInternasInterno) this.fontesForcadasInternasInterno = new Set();
     return this.fontesForcadasInternasInterno;
   }
+
+  // ── A CURA SOBREVIVE AO RESTART ─────────────────────────────────────────────
+  // A decisão "esta câmera só funciona pela entrega interna" custa caro para
+  // descobrir: 2 reinícios + cooldowns = minutos de detector cego (cobertos
+  // pelo fail-safe de gravação, mas ainda assim degradação). Guardá-la só em
+  // memória faria CADA restart da API repetir a descoberta inteira, câmera por
+  // câmera. Persistida, a análise já nasce na fonte que funciona.
+  private static readonly CHAVE_FONTES_FORCADAS = 'ai.forcedInternalSources';
+  private fontesForcadasCarregadas = false;
+
+  /** Carrega do banco UMA vez. Falha vira lista vazia — nunca bloqueia a IA. */
+  private async carregarFontesForcadas(): Promise<void> {
+    if (this.fontesForcadasCarregadas) return;
+    this.fontesForcadasCarregadas = true;
+    try {
+      const row = await this.prisma.systemSetting.findUnique({
+        where: { key: AiManagerService.CHAVE_FONTES_FORCADAS },
+      });
+      const ids = row?.value ? JSON.parse(row.value) : [];
+      if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') this.fontesForcadasInternas.add(id);
+    } catch { /* sem persistência não é sem funcionamento */ }
+  }
+
+  private async persistirFontesForcadas(): Promise<void> {
+    try {
+      const value = JSON.stringify([...this.fontesForcadasInternas]);
+      await this.prisma.systemSetting.upsert({
+        where: { key: AiManagerService.CHAVE_FONTES_FORCADAS },
+        update: { value },
+        create: { key: AiManagerService.CHAVE_FONTES_FORCADAS, value },
+      });
+    } catch { /* idem: persistir é reforço, não requisito */ }
+  }
   // Contagem de ticks em que um processador apareceu ÓRFÃO (ativo para câmera
   // não armada). Só paramos no 2º tick seguido: um teste manual rápido de IA
   // não pode morrer no meio por azar de timing do watchdog.
@@ -349,6 +382,9 @@ export class AiManagerService implements OnModuleInit {
         const limiteParaForcar = envNumber('AI_FORCE_INTERNAL_SOURCE_AFTER_RESTARTS', 2, { min: 1, max: 10 });
         if (reinicios >= limiteParaForcar && !this.fontesForcadasInternas.has(cameraId)) {
           this.fontesForcadasInternas.add(cameraId);
+          // Persistida: um restart da API não pode custar redescobrir, câmera a
+          // câmera, que a captura direta não decodifica.
+          void this.persistirFontesForcadas();
           this.logger.warn(
             `Câmera ${cameraId} continua cega após ${reinicios} reinícios — forçando a entrega interna `
             + 'H.264 do MediaMTX para a análise (a captura direta não está sendo decodificada).',
@@ -1051,6 +1087,7 @@ export class AiManagerService implements OnModuleInit {
     // interna, mesmo que a sonda tenha dito h264 (ou tenha falhado e devolvido
     // nada, que é o caso que mais engana — `null` não é HEVC, então o fallback
     // nunca entrava e a câmera ficava presa na fonte que não se decodifica).
+    await this.carregarFontesForcadas();
     const forcarInterno = this.fontesForcadasInternas.has(cam.id);
     if ((analyticsIsHevc || forcarInterno) && hevcFallbackEnabled) {
       const fallback = await this.mediamtxProxy.ensurePathForCamera(cam.id, 'grid');
