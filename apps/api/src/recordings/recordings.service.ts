@@ -52,6 +52,15 @@ import {
 import { planVodPlaylist, renderVodPlaylist, type VodSourceSegment } from './helpers/vod-playlist.helper';
 import { CacheDeDiagnostico } from './helpers/diagnostics-cache.helper';
 import {
+  planejarVarredura,
+  emLotes,
+  contagemZerada,
+  somarGravacao,
+  avaliarAtencao,
+  type ContagemDeCamera,
+  type EntradaDeCache,
+} from './helpers/health-summary-scan.helper';
+import {
   isMissingCommandError,
   markNiceUnavailable,
   planLowPriorityCommand,
@@ -1412,33 +1421,42 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
-    const fileExists = existsSync(filePath);
-    if (!fileExists) {
-      const result = {
+    const result = await this.diagnosticarArquivo(recordingId, recording.cameraId, filePath);
+    const cache = this.readDiagnosticsCache();
+    cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
+    this.writeDiagnosticsCache(cache);
+    return result;
+  }
+
+  /**
+   * Inspeciona o ARQUIVO e devolve o diagnóstico. Não toca no banco nem no
+   * cache: é o miolo compartilhado entre a tela de detalhe (que chega pelo id)
+   * e o resumo de saúde (que já tem o registro em mãos).
+   *
+   * Barato primeiro: arquivo ausente ou vazio se resolve com uma chamada de
+   * sistema, e é o caso comum quando a gravação já subiu para a nuvem. O
+   * `ffprobe` — um subprocesso — só roda quando há mesmo o que examinar.
+   */
+  private async diagnosticarArquivo(recordingId: string, cameraId: string, filePath: string): Promise<any> {
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    if (!existsSync(filePath)) {
+      return {
         recordingId,
         fileExists: false,
         playableLikely: false,
         reason: 'file_missing',
       };
-      const cache = this.readDiagnosticsCache();
-      cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
-      this.writeDiagnosticsCache(cache);
-      return result;
     }
 
     const fileSize = statSync(filePath).size;
     if (fileSize <= 0) {
-      const result = {
+      return {
         recordingId,
         fileExists: true,
         fileSizeBytes: fileSize,
         playableLikely: false,
         reason: 'empty_file',
       };
-      const cache = this.readDiagnosticsCache();
-      cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
-      this.writeDiagnosticsCache(cache);
-      return result;
     }
 
     try {
@@ -1470,7 +1488,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       const hasAudioStream = Boolean(audio);
       const audioPlayableLikely = !audio || compatibleAudio;
 
-      const result = {
+      return {
         recordingId,
         fileExists: true,
         fileSizeBytes: fileSize,
@@ -1478,7 +1496,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         compatibleRecommended,
         hasAudioStream,
         audioPlayableLikely,
-        compatibleCached: existsSync(join(recordingsRoot, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`)),
+        compatibleCached: existsSync(join(recordingsRoot, '.playback-compatible', cameraId, `${recordingId}.mp4`)),
         fragmentedLikely,
         reason: playableLikely ? null : (!video ? 'missing_video_stream' : !compatibleVideo ? `video_codec_${vcodec || 'unknown'}_may_fail` : `audio_codec_${acodec || 'unknown'}_may_fail`),
         format: formatName || null,
@@ -1500,22 +1518,14 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
             }
           : null,
       };
-      const cache = this.readDiagnosticsCache();
-      cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
-      this.writeDiagnosticsCache(cache);
-      return result;
     } catch (error) {
-      const result = {
+      return {
         recordingId,
         fileExists: true,
         fileSizeBytes: fileSize,
         playableLikely: false,
         reason: error instanceof Error ? error.message : 'ffprobe_failed',
       };
-      const cache = this.readDiagnosticsCache();
-      cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
-      this.writeDiagnosticsCache(cache);
-      return result;
     }
   }
 
@@ -1644,91 +1654,147 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       startedAt: { gte: from, lte: to },
     };
 
-    const records = await this.prisma.recording.findMany({
-      where,
-      select: { id: true, cameraId: true, startedAt: true },
-      orderBy: { startedAt: 'asc' },
-      take: 1200,
+    // O TETO DEIXOU DE SER MUDO. Cortar em 1.200 num dia de 8.500 gravações
+    // resumia 14% do dia e apresentava o número como se fosse o dia inteiro —
+    // "nenhuma câmera em atenção" podia significar "não olhei as outras 86%".
+    // Agora conta-se quantas existem, corta-se com limite configurável, e a
+    // resposta DIZ que cortou.
+    const limiteVarredura = envNumber('RECORDING_HEALTH_SUMMARY_MAX_RECORDS', 1200, {
+      min: 50,
+      max: 20_000,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    });
+    // Orçamento de medições CARAS (banco + ffprobe) por requisição. O resumo é
+    // chamado a cada troca de aba; sem teto, um cache frio dispara um ffprobe
+    // por gravação e o endpoint volta a custar minutos de CPU.
+    const orcamentoProbes = envNumber('RECORDING_HEALTH_SUMMARY_PROBE_BUDGET', 24, {
+      min: 0,
+      max: 500,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
+    });
+    const probesEmParalelo = envNumber('RECORDING_HEALTH_SUMMARY_PROBE_CONCURRENCY', 4, {
+      min: 1,
+      max: 16,
+      integer: true,
+      onInvalid: (m) => this.logger.warn(m),
     });
 
-    const byCamera = new Map<string, {
-      cameraId: string;
-      total: number;
-      broken: number;
-      tooSmall: number;
-      compatibleRecommended: number;
-      directLikely: number;
-      withAudio: number;
-      lastRecordingAt: string | null;
-      lastRecordingAgeSeconds: number | null;
-    }>();
+    const [totalMatching, records] = await Promise.all([
+      this.prisma.recording.count({ where }),
+      this.prisma.recording.findMany({
+        where,
+        // `filePath` entra aqui de propósito: sem ele, cada gravação sem cache
+        // fazia a sua PRÓPRIA consulta ao banco (via ensureRecordingExists) —
+        // 1.200 idas e voltas em série para dados que esta consulta já podia
+        // ter trazido de uma vez.
+        select: { id: true, cameraId: true, startedAt: true, filePath: true },
+        orderBy: { startedAt: 'asc' },
+        take: limiteVarredura,
+      }),
+    ]);
+
     const minExpectedBytes = envNumber('RECORDING_MIN_EXPECTED_FILE_BYTES', 128 * 1024, {
       min: 32 * 1024,
       integer: true,
       onInvalid: (m) => this.logger.warn(m),
     });
 
+    // O cache é lido UMA vez para a varredura inteira. Ler por gravação era o
+    // defeito que parava a API por 11 segundos; mesmo com o memo em RAM, seria
+    // um statSync por volta do laço à toa.
+    const cache = this.readDiagnosticsCache();
+    const plano = planejarVarredura(
+      records,
+      cache as Record<string, EntradaDeCache>,
+      (registro) => registro.id,
+      this.getCacheTtlMs(),
+      Date.now(),
+      orcamentoProbes,
+    );
+
+    const diagnosticoPorId = new Map<string, any>();
+    for (const { registro, diagnostico } of plano.cacheados) diagnosticoPorId.set(registro.id, diagnostico);
+
+    // As medições caras, com paralelismo limitado: em série somam segundos de
+    // espera; todas juntas roubam CPU da GRAVAÇÃO, que é o que não pode furar.
+    // `medirDiagnosticoDeGravacao` recebe o registro que a consulta já trouxe,
+    // então não há uma segunda ida ao banco por gravação.
+    const medidos = await emLotes(plano.aMedir, probesEmParalelo, (registro) =>
+      this.medirDiagnosticoDeGravacao(registro).catch(() => null),
+    );
+    plano.aMedir.forEach((registro, indice) => {
+      const resultado = medidos[indice];
+      if (resultado) diagnosticoPorId.set(registro.id, resultado);
+    });
+
+    const byCamera = new Map<string, ContagemDeCamera>();
     for (const record of records) {
-      const diagnostics = await this.getRecordingDiagnostics(record.id, false) as any;
-      const current = byCamera.get(record.cameraId) ?? {
-        cameraId: record.cameraId,
-        total: 0,
-        broken: 0,
-        tooSmall: 0,
-        compatibleRecommended: 0,
-        directLikely: 0,
-        withAudio: 0,
-        lastRecordingAt: null,
-        lastRecordingAgeSeconds: null,
-      };
-      current.total += 1;
+      const current = byCamera.get(record.cameraId) ?? contagemZerada(record.cameraId);
       current.lastRecordingAt = record.startedAt.toISOString();
       current.lastRecordingAgeSeconds = Math.max(0, Math.floor((Date.now() - record.startedAt.getTime()) / 1000));
-      const fileSize = Number(diagnostics.fileSizeBytes ?? 0);
-      if (fileSize > 0 && fileSize < minExpectedBytes) current.tooSmall += 1;
-      if (!diagnostics.fileExists || diagnostics.reason === 'file_missing' || diagnostics.reason === 'empty_file') {
-        current.broken += 1;
-      } else if (diagnostics.compatibleRecommended) {
-        current.compatibleRecommended += 1;
-      } else {
-        current.directLikely += 1;
-      }
-      if (diagnostics.hasAudioStream) current.withAudio += 1;
+      // `?? null` = indeterminado: ficou fora do orçamento ou a medição falhou.
+      somarGravacao(current, diagnosticoPorId.get(record.id) ?? null, minExpectedBytes);
       byCamera.set(record.cameraId, current);
     }
 
     const threshold = Math.max(1, Math.floor(params.brokenAlertThreshold ?? 3));
-    const items = Array.from(byCamera.values()).map((item) => {
-      const degradedRatio = item.total > 0 ? (item.broken + item.compatibleRecommended) / item.total : 0;
-      const needsAttention =
-        item.broken >= threshold ||
-        degradedRatio >= 0.5 ||
-        item.tooSmall >= threshold ||
-        (item.lastRecordingAgeSeconds != null && item.lastRecordingAgeSeconds > 30 * 60);
-      let alertReason: string | null = null;
-      if (item.broken >= threshold) alertReason = `falhas=${item.broken} (limiar=${threshold})`;
-      else if (item.tooSmall >= threshold) alertReason = `arquivos pequenos=${item.tooSmall} (mín ${Math.round(minExpectedBytes / 1024)}KB)`;
-      else if (item.lastRecordingAgeSeconds != null && item.lastRecordingAgeSeconds > 30 * 60) alertReason = `último segmento atrasado (${Math.floor(item.lastRecordingAgeSeconds / 60)} min)`;
-      else if (degradedRatio >= 0.5) alertReason = 'alta taxa de segmentos degradados';
-      return {
-        ...item,
-        needsAttention,
-        alertReason,
-      };
-    }).sort((a, b) => {
+    const items = Array.from(byCamera.values()).map((item) => ({
+      ...item,
+      ...avaliarAtencao(item, threshold, minExpectedBytes),
+    })).sort((a, b) => {
       const riskA = a.broken * 4 + a.compatibleRecommended;
       const riskB = b.broken * 4 + b.compatibleRecommended;
       return riskB - riskA;
     });
 
+    const pendentes = items.reduce((soma, item) => soma + item.pending, 0);
+    if (plano.adiados.length) {
+      this.logger.warn(
+        `Resumo de saúde: ${plano.adiados.length} gravação(ões) sem diagnóstico nesta chamada ` +
+          `(orçamento de ${orcamentoProbes} medições). Elas contam como "pendentes", nunca como defeito; ` +
+          'as próximas chamadas vão completando conforme o cache esquenta.',
+      );
+    }
     return {
       date: from.toISOString(),
       totalRecordings: records.length,
       brokenAlertThreshold: threshold,
       minExpectedFileBytes: minExpectedBytes,
       camerasNeedingAttention: items.filter((item) => item.needsAttention).length,
+      // ── O QUE ESTE RESUMO NÃO VIU ──────────────────────────────────────
+      // Sem estes campos, 1.200 de 8.500 gravações eram apresentadas como o
+      // dia inteiro. Quem lê precisa saber a diferença entre "está tudo bem"
+      // e "a parte que eu olhei está bem".
+      totalMatchingRecordings: totalMatching,
+      scannedRecordings: records.length,
+      truncated: totalMatching > records.length,
+      scanLimit: limiteVarredura,
+      pendingDiagnostics: pendentes,
       cameras: items,
     };
+  }
+
+  /**
+   * Diagnóstico de UMA gravação a partir do registro JÁ CARREGADO.
+   *
+   * Existe para o resumo de saúde: `getRecordingDiagnostics` recebe só o id e
+   * por isso consulta o banco para achar o `filePath` — inofensivo numa tela,
+   * mas dentro de um laço de centenas vira uma consulta por volta. Aqui o
+   * chamador já tem o registro, então o custo restante é só o disco.
+   *
+   * O resultado alimenta o MESMO cache do caminho unitário: o que for medido
+   * aqui poupa o ffprobe da próxima tela de detalhe, e vice-versa.
+   */
+  private async medirDiagnosticoDeGravacao(registro: { id: string; cameraId: string; filePath: string }) {
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const filePath = ensureFileUnderRoot(recordingsRoot, registro.filePath);
+    const diagnostico = await this.diagnosticarArquivo(registro.id, registro.cameraId, filePath);
+    const cache = this.readDiagnosticsCache();
+    cache[registro.id] = { ...(cache[registro.id] ?? {}), checkedAt: new Date().toISOString(), diagnostics: diagnostico };
+    this.writeDiagnosticsCache(cache);
+    return diagnostico;
   }
 
   async getRecordingGapsReport(params: { date?: string; cameraId: string; accessibleCameraIds?: string[] }) {
