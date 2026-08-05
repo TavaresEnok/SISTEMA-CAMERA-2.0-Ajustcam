@@ -1670,6 +1670,43 @@
         chips: document.querySelector('#quick-chips'),
         queue: document.querySelector('#attention-queue'),
       };
+
+      /* ── NÃO REDESENHE O QUE NÃO MUDOU ─────────────────────────────────────
+         O painel se recarrega a cada 30s e quase todo bloco fazia
+         `innerHTML = ...` sem conferir nada. Escrever `innerHTML` DESTRÓI e
+         RECRIA todos os nós filhos, mesmo quando o texto é idêntico — é isso
+         que fazia a tela piscar duas vezes por minuto e apagar o que tivesse
+         sido escrito ali depois (o resultado do teste de S3, por exemplo).
+
+         Em vez de reescrever dezenas de blocos de template, a guarda entra no
+         próprio elemento: só estes, nomeados um a um, passam a ignorar uma
+         escrita idêntica à anterior. Não se mexe no `Element.prototype` — isso
+         mudaria o comportamento de TODA a página, inclusive de código que
+         depende de recriar os nós. */
+      function ignorarRepinturaIgual(el) {
+        if (!el || el.__guardaRepintura) return el;
+        const original = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+        if (!original?.set) return el;
+        Object.defineProperty(el, 'innerHTML', {
+          configurable: true,
+          get() { return original.get.call(this); },
+          set(valor) {
+            const novo = String(valor);
+            if (this.dataset.assinatura === novo) return;
+            this.dataset.assinatura = novo;
+            original.set.call(this, novo);
+          },
+        });
+        el.__guardaRepintura = true;
+        return el;
+      }
+      [
+        els.kpis, els.chips, els.queue, els.rows, els.inventoryRows,
+        els.contractBoard, els.alertsBoard, els.auditRows,
+        document.querySelector('#detalhe-status'),
+        document.querySelector('#detalhe-rail'),
+      ].forEach(ignorarRepinturaIgual);
+
       els.email.value = localStorage.getItem('drac-central-email') || 'admin@drac.local';
 
       const fmt = new Intl.NumberFormat('pt-BR');
@@ -2442,7 +2479,7 @@
       function reasonsFor(item) {
         const out = [];
         if (item.status === 'PENDING_INSTALL') out.push(['neutral', 'aguardando instalação']);
-        else if (item.status !== 'ONLINE') out.push(['bad', `sem sinal há ${timeAgo(item.ageSeconds)}`]);
+        else if (item.status !== 'ONLINE') out.push(['bad', `sem sinal <span data-idade="${escapeHtml(item.id)}"></span>`]);
         if (infraCritical(item)) out.push(['bad', 'infra crítica']);
         if (readinessStatus(item) === 'blocked') out.push(['bad', 'produção bloqueada']);
         const ci = camIssues(item);
@@ -2522,7 +2559,7 @@
           return `
             <tr data-id="${escapeHtml(item.id)}" class="${item.id === state.selectedId ? 'selected' : ''}">
               <td data-label="Cliente"><div class="cell-id">${monogram(item)}<div class="cell-stack"><div class="client-name">${escapeHtml(displayName(item))}</div><div class="subtext" style="margin:0">${escapeHtml(item.id)}</div></div></div></td>
-              <td data-label="Comunicação"><div class="cell-stack"><div style="display:flex;gap:5px;flex-wrap:wrap"><span class="badge ${communicationTone(item)}${liveClass(item)}">${communicationLabel(item)}</span>${infraChip(item)}</div><div class="subtext" style="margin:0">${item.status === 'PENDING_INSTALL' ? 'sem heartbeat ainda' : `há ${timeAgo(item.ageSeconds)}`}</div></div></td>
+              <td data-label="Comunicação"><div class="cell-stack"><div style="display:flex;gap:5px;flex-wrap:wrap"><span class="badge ${communicationTone(item)}${liveClass(item)}">${communicationLabel(item)}</span>${infraChip(item)}</div><div class="subtext" style="margin:0">${item.status === 'PENDING_INSTALL' ? 'sem heartbeat ainda' : `<span data-idade="${escapeHtml(item.id)}"></span>`}</div></div></td>
               <td data-label="Contrato"><span class="badge ${contractClasses[item.licenseStatus] || 'ok'}">${contractLabels[item.licenseStatus] || 'Regular'}</span></td>
               <td data-label="Câmeras"><div class="cell-stack"><span class="num">${camOnline}/${camTotal}</span><div class="subtext" style="margin:0">${camIssue ? `${camIssue} em atenção` : 'sem falhas'}</div></div></td>
               <td data-label="Disco">${disk == null ? '—' : progress(disk)}</td>
@@ -2618,6 +2655,8 @@
       function renderCloudSection(item) {
         const body = document.getElementById('cloud-body');
         if (!body) return;
+        // Medição em curso: nada de mexer nesta seção até ela terminar.
+        if (state.cloudMedindo === item.id) return;
         const c = item.cloudStorage || {};
         const configurado = Boolean(c.bucket && c.hasSecret);
         const editando = state.cloudEditing === item.id;
@@ -2733,7 +2772,26 @@
         // desempenho já na tela e faria a aba piscar duas vezes por minuto sem
         // nenhum dado ter mudado. Sair antes também evita empilhar listeners
         // repetidos nos MESMOS nós, que dispararia cada clique várias vezes.
+        /* ── O RESULTADO DO TESTE NÃO PODE MORRER NO REFRESH ──────────────
+           Medir o desempenho do S3 GRAVA `lastTestAt`/`lastTestOk` no servidor.
+           Ou seja: o próprio teste muda os dados da instalação, o refresh de
+           30s traz o valor novo, a assinatura desta seção muda de verdade e o
+           bloco é repintado — apagando o resultado que o operador acabou de
+           mandar medir. Ele espera 10 segundos por um número que some sozinho.
+
+           Repintar está certo (o dado mudou mesmo). O que não pode é levar
+           junto o que foi escrito aqui depois. Então o conteúdo transitório é
+           guardado antes e devolvido depois. */
+        const transitorios = ['#cloud-perf-result', '#cloud-feedback', '#cloud-delete-confirm']
+          .map((sel) => [sel, body.querySelector(sel)?.innerHTML || ''])
+          .filter(([, conteudo]) => conteudo);
+
         if (!pintarSeMudou(body, html)) return;
+
+        for (const [sel, conteudo] of transitorios) {
+          const destino = body.querySelector(sel);
+          if (destino) destino.innerHTML = conteudo;
+        }
 
         body.querySelector('#cloud-add')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
         body.querySelector('#cloud-edit')?.addEventListener('click', () => { state.cloudEditing = item.id; renderCloudSection(item); });
@@ -2829,6 +2887,11 @@
         const alvo = body.querySelector('#cloud-perf-result');
         const feedback = body.querySelector('#cloud-feedback');
         if (!alvo) return;
+        // Segura a repintura da seção enquanto mede. Sem isto, o refresh de 30s
+        // que cai no meio do teste recria o botão "Testar" habilitado, e um
+        // segundo clique dispara OUTRA medição — que sobe mais uma amostra ao
+        // bucket do cliente e briga com a primeira pela mesma banda.
+        state.cloudMedindo = installationId;
         if (botao) { botao.disabled = true; botao.textContent = 'Medindo…'; }
         alvo.innerHTML = '<div class="subtext" style="margin-top:9px">Medindo — a amostra cresce até a transferência durar o suficiente. O que subir é apagado no fim.</div>';
         try {
@@ -2904,6 +2967,7 @@
           alvo.innerHTML = '';
           if (feedback) feedback.innerHTML = '<span class="badge warn">Falha ao medir</span>';
         } finally {
+          state.cloudMedindo = null;
           if (botao) { botao.disabled = false; botao.textContent = 'Desempenho'; }
         }
       }
@@ -3231,7 +3295,7 @@
           <div><label>Memória</label><strong>${mem == null ? '—' : `${mem}%`}</strong><small>${escapeHtml(item.server?.cpuCount ?? '—')} núcleos</small></div>
           <div><label>Gravando</label><strong>${fmt.format(number(metric(item, 'activeRecordingCount', 0)))}</strong><small>${fmt.format(number(metric(item, 'recordingCount', 0)))} segmentos</small></div>
           <div><label>Alarmes</label><strong>${fmt.format(number(metric(item, 'openAlarms', 0)))}</strong><small>${fmt.format(number(metric(item, 'streamHighCpuRiskCameras', 0)))} risco de CPU</small></div>
-          <div><label>Último sinal</label><strong style="font-size:14px">${item.lastHeartbeatAt ? escapeHtml(dtf.format(new Date(item.lastHeartbeatAt))) : '—'}</strong><small>há ${escapeHtml(timeAgo(item.ageSeconds))}</small></div>`;
+          <div><label>Último sinal</label><strong style="font-size:14px">${item.lastHeartbeatAt ? escapeHtml(dtf.format(new Date(item.lastHeartbeatAt))) : '—'}</strong><small><span data-idade="${escapeHtml(item.id)}"></span></small></div>`;
       }
       function renderDetail() {
         // NÃO redesenhe por cima de quem está DIGITANDO.
@@ -4007,12 +4071,36 @@
        * grande: painel estático deixa de piscar por completo.
        */
       function pintarSeMudou(elemento, html) {
-        if (!elemento) return false;
-        if (elemento.dataset.assinatura === html) return false;
-        elemento.dataset.assinatura = html;
-        elemento.innerHTML = html;
-        return true;
-      }
+          if (!elemento) return false;
+          if (elemento.dataset.assinatura === html) return false;
+          elemento.dataset.assinatura = html;
+          elemento.innerHTML = html;
+          return true;
+        }
+
+        /* ── O CONTADOR QUE FAZIA A TELA INTEIRA PISCAR ────────────────────
+           `pintarSeMudou` compara o HTML gerado com o que está na tela e só
+           troca o DOM quando muda. Bom — mas UM valor estragava tudo: a idade
+           do último sinal ("há 40s"), que por definição muda a cada leitura.
+           Medido: de um ciclo para o outro, o único campo diferente na resposta
+           da API é `ageSeconds`. Esse único número mudava a assinatura de cada
+           bloco, e o painel inteiro era destruído e recriado duas vezes por
+           minuto — levando junto qualquer coisa escrita ali depois, como o
+           resultado do teste de desempenho do S3.
+
+           A saída é tirar o valor volátil de dentro da assinatura: o HTML traz
+           um `<span data-idade>` VAZIO (portanto estável), e o texto é escrito
+           aqui por `textContent`. Trocar texto de um nó não destrói nada em
+           volta — não pisca, não perde estado, não perde foco. */
+        function atualizarIdades() {
+          const porId = new Map(state.installations.map((i) => [i.id, i]));
+          document.querySelectorAll('[data-idade]').forEach((el) => {
+            const item = porId.get(el.dataset.idade);
+            if (!item) return;
+            const texto = `há ${timeAgo(item.ageSeconds)}`;
+            if (el.textContent !== texto) el.textContent = texto;
+          });
+        }
 
       async function atualizarSemPular(fn) {
         const y = window.scrollY;
@@ -4203,6 +4291,9 @@
         renderAudit();
         renderInstallCommand();
         renderWall();
+        // Depois de todos os blocos: eles emitem o `<span data-idade>` VAZIO
+        // (para a assinatura ficar estável) e é aqui que ele ganha texto.
+        atualizarIdades();
       }
 
       /* ── Sessão e carga ──────────────────────────────────────────────── */
