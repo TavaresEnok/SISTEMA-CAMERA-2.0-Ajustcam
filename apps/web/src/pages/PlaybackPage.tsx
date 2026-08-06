@@ -54,6 +54,7 @@ import {
   type VodPlaylist,
   type VodPlaylistSegment,
 } from '../lib/vod-continuous';
+import { janelaDaGravacao, selecionarGravacaoNoInstante } from '../lib/playback-selection';
 import {
   TIMELINE_MAX_ZOOM,
   TIMELINE_TOTAL_MINUTES,
@@ -247,7 +248,7 @@ function detectHevcPlayback(): boolean {
 const BROWSER_PLAYS_HEVC = detectHevcPlayback();
 const TOTAL_MINS = TIMELINE_TOTAL_MINUTES;
 const API_TIMEOUT_MS = 20000;
-const PLAYBACK_TIMEOUT_DIRECT_MS = 8000;
+const PLAYBACK_TIMEOUT_DIRECT_MS = 15000;
 const PLAYBACK_TIMEOUT_COMPAT_MS = 150000; // 150s: FFmpeg HEVC→H264 pode levar até 120s na primeira execução
 // Teto da espera pela playlist VOD antes de o playback seguir pelo caminho antigo.
 const VOD_PROBE_GRACE_MS = 2500;
@@ -256,14 +257,29 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function buildTimelineSegments(recordings: RecordingItem[], events: Array<{ timestamp: string; severity: string }>) {
+function buildTimelineSegments(
+  recordings: RecordingItem[],
+  events: Array<{ timestamp: string; severity: string }>,
+  dayStartMs: number,
+) {
+  // Tempo ABSOLUTO recortado pelo dia, nunca hora-do-relógio: `minuteOfDay`
+  // fazia a gravação que cruza a meia-noite virar end < start (sumia da
+  // régua), e `endedAt ?? startedAt` fazia gravação sem fim conhecido virar
+  // largura zero mesmo com durationSeconds ao lado.
+  const dayEndMs = dayStartMs + TOTAL_MINS * 60_000;
+  const agoraMs = Date.now();
   const recorded: TimelineSegment[] = recordings
-    .map((recording) => ({
-      recordingId: recording.id,
-      start: clamp(minuteOfDay(recording.startedAt), 0, TOTAL_MINS),
-      end: clamp(minuteOfDay(recording.endedAt ?? recording.startedAt), 0, TOTAL_MINS),
-      type: (recording.fileUsable ?? recording.fileExists) ? 'recorded' as const : 'recorded_broken' as const,
-    }))
+    .map((recording) => {
+      const janela = janelaDaGravacao(recording, agoraMs);
+      const startMs = Math.max(janela.startMs, dayStartMs);
+      const endMs = Math.min(janela.endMs, dayEndMs);
+      return {
+        recordingId: recording.id,
+        start: clamp((startMs - dayStartMs) / 60_000, 0, TOTAL_MINS),
+        end: clamp((endMs - dayStartMs) / 60_000, 0, TOTAL_MINS),
+        type: (recording.fileUsable ?? recording.fileExists) ? 'recorded' as const : 'recorded_broken' as const,
+      };
+    })
     .filter((segment) => segment.end > segment.start)
     .sort((a, b) => a.start - b.start);
 
@@ -285,6 +301,27 @@ function buildTimelineSegments(recordings: RecordingItem[], events: Array<{ time
   });
 
   return [...gaps, ...recorded, ...eventMarkers].sort((a, b) => a.start - b.start);
+}
+
+/**
+ * O <video> só entrega "onError", sem status nem corpo — e o backend passou a
+ * responder 404/503 EXPLICADOS ("arquivada na nuvem, mas o bucket não a
+ * devolveu (NoSuchKey)"). Uma sonda de 2 bytes recupera essa explicação; sem
+ * ela o operador via "Request failed" genérico e a página "curava" erro de
+ * servidor com transcodificação, que não cura nada.
+ */
+async function explicarFalhaDoVideo(url: string | null): Promise<string | null> {
+  if (!url) return null;
+  try {
+    const resposta = await fetch(url, { headers: { Range: 'bytes=0-1' } });
+    if (resposta.ok) return null;
+    const corpo = await resposta.json().catch(() => null) as { message?: string } | null;
+    return corpo?.message
+      ? `O servidor recusou o vídeo: ${corpo.message}`
+      : `O servidor recusou o vídeo (HTTP ${resposta.status}).`;
+  } catch {
+    return null;
+  }
 }
 
 function authHeaders(accessToken: string | null) {
@@ -442,6 +479,14 @@ export default function PlaybackPage() {
   // `loadedRanges` são as faixas cujo DETALHE já está em memória. O esqueleto só
   // aparece onde ainda não há detalhe. `windowedFallback` liga o caminho antigo.
   const [dayCoverage, setDayCoverage] = useState<TimeRange[]>([]);
+  // Incrementado a cada navegação explícita do usuário (clique/atalho): força a
+  // re-seleção de gravação mesmo quando o minuto não mudou.
+  const [navNonce, setNavNonce] = useState(0);
+  // Vigias de rede: uma retentativa por fonte no timeout (rede lenta) e uma no
+  // stall do meio do vídeo (token vencido num buffer longo, Wi-Fi caindo) —
+  // antes, as duas situações deixavam o spinner girando para sempre.
+  const slowRetryRef = useRef<string | null>(null);
+  const stallRetryRef = useRef<string | null>(null);
   const [loadedRanges, setLoadedRanges] = useState<TimeRange[]>([]);
   const [windowedFallback, setWindowedFallback] = useState(!WINDOWED_TIMELINE);
   const loadKeyRef = useRef('');
@@ -807,7 +852,11 @@ export default function PlaybackPage() {
           gaps?: Array<{ startAt: string; endAt: string }>;
           totalGaps?: number;
         }>('/recordings/gaps-report', {
-          params: { cameraId: selectedCamId, date: selectedDate },
+          // from/to ISO do dia LOCAL do navegador. Só `date` deixava o servidor
+          // montar o dia no fuso DELE (UTC nos containers): a janela escorregava
+          // 3h, os últimos minutos do dia viravam "coberto" fantasma e o clique
+          // ali caía no vídeo errado.
+          params: { cameraId: selectedCamId, date: selectedDate, from: dayStart.toISOString(), to: addMinutes(dayStart, TOTAL_MINS).toISOString() },
           timeout: API_TIMEOUT_MS,
         });
         if (cancelled || loadKeyRef.current !== key) return;
@@ -1019,26 +1068,10 @@ export default function PlaybackPage() {
     setPreviewMetaByRecordingId({});
   }, [selectedCamId, selectedDate]);
 
-  useEffect(() => {
-    if (!accessToken || !selectedCamId || !selectedDate) {
-      setHealthSummary(null);
-      return;
-    }
-    let cancelled = false;
-    void client.get<RecordingHealthSummary>(
-      `/recordings/health-summary?cameraId=${encodeURIComponent(selectedCamId)}&date=${encodeURIComponent(selectedDate)}`,
-      { timeout: API_TIMEOUT_MS },
-    )
-      .then(({ data }) => {
-        if (!cancelled) setHealthSummary(data);
-      })
-      .catch(() => {
-        if (!cancelled) setHealthSummary(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, client, selectedCamId, selectedDate]);
+  // O resumo de saúde era buscado a cada troca de câmera/data (até 24 ffprobe
+  // no servidor por chamada) e renderizado num bloco `hidden` — custo real,
+  // informação invisível. A busca sai; quando o cartão de saúde ganhar UI
+  // visível, volta com ela.
 
   // Busca a playlist do dia. Falhar aqui é NORMAL e SILENCIOSO (404 = dia sem
   // gravação reproduzível, erro de rede, endpoint antigo): o playback segue no
@@ -1167,7 +1200,7 @@ export default function PlaybackPage() {
   const selectedDay = useMemo(() => new Date(`${selectedDate}T00:00:00`), [selectedDate]);
   const dayStart = useMemo(() => startOfDay(selectedDay), [selectedDay]);
 
-  const timelineSegments = useMemo(() => buildTimelineSegments(recordings, playbackEvents), [recordings, playbackEvents]);
+  const timelineSegments = useMemo(() => buildTimelineSegments(recordings, playbackEvents, dayStart.getTime()), [recordings, playbackEvents, dayStart]);
   const compareCameraItems = useMemo(() => (
     Array.from(new Set([selectedCamId, ...compareCameraIds].filter(Boolean)))
       .slice(0, 4)
@@ -1219,7 +1252,7 @@ export default function PlaybackPage() {
   const compareRows = useMemo(() => compareCameraItems.map((camera) => {
     const items = compareRecordingsByCamera[camera.id] ?? (camera.id === selectedCamId ? recordings : []);
     const eventsForCamera = camera.id === selectedCamId ? playbackEvents : [];
-    const segments = buildTimelineSegments(items, eventsForCamera);
+    const segments = buildTimelineSegments(items, eventsForCamera, dayStart.getTime());
     const current = items.find((recording) => {
       const start = minuteOfDay(recording.startedAt);
       const end = minuteOfDay(recording.endedAt ?? recording.startedAt);
@@ -1260,16 +1293,21 @@ export default function PlaybackPage() {
         return;
       }
     }
-    const containing = playableRecordings.find((recording) => {
-      const start = minuteOfDay(recording.startedAt);
-      const end = minuteOfDay(recording.endedAt ?? recording.startedAt);
-      return minuteTarget >= start && minuteTarget <= end;
+    // Seleção em tempo ABSOLUTO (../lib/playback-selection, pura e testada).
+    // O fallback antigo caía em playableRecordings[0]: clique depois do fim da
+    // última gravação — ou numa faixa cujo detalhe ainda não carregou — tocava
+    // a PRIMEIRA gravação do dia. E sobreposição/emenda escolhia o segmento
+    // antigo, com seek no último frame e `ended` imediato.
+    const alvoMs = dayStart.getTime() + minuteTarget * 60_000;
+    const selecao = selecionarGravacaoNoInstante(playableRecordings, alvoMs, {
+      coberturaMinutos: dayCoverage,
+      dayStartMs: dayStart.getTime(),
     });
-    const next = containing ?? playableRecordings.find((recording) => minuteOfDay(recording.startedAt) >= minuteTarget) ?? playableRecordings[0];
-    setSelectedRecordingId((current) => (current === next.id ? current : next.id));
-    const offsetMinutes = Math.max(0, minuteTarget - minuteOfDay(next.startedAt));
-    setPendingSeekSeconds(offsetMinutes * 60);
-  }, [dayStart, recordings, playhead, vodActive]);
+    if (selecao.tipo === 'aguardar') return; // detalhe a caminho; este efeito re-roda quando `recordings` crescer
+    if (selecao.tipo === 'nada') return;
+    setSelectedRecordingId((current) => (current === selecao.id ? current : selecao.id));
+    setPendingSeekSeconds(selecao.offsetSeconds);
+  }, [dayStart, dayCoverage, recordings, playhead, vodActive, navNonce]);
 
   const selectedRecording = useMemo(() => recordings.find((recording) => recording.id === selectedRecordingId) ?? null, [recordings, selectedRecordingId]);
   const selectedThumbnailUrl = selectedRecordingId ? thumbnailUrls[selectedRecordingId] ?? null : null;
@@ -1298,9 +1336,17 @@ export default function PlaybackPage() {
       setLoadingPlayback(true);
       return;
     }
-    if (!selectedRecording?.fileExists) {
+    if (!selectedRecording) {
+      // Selecionada pela playlist/auto-avanço mas ainda fora da janela
+      // carregada da lista: é carregamento, não perda — o erro de "arquivo não
+      // existe" aqui condenava gravação perfeitamente boa.
       setPlaybackUrl(null);
-      setVideoError('O arquivo desta gravação não existe mais no disco.');
+      setLoadingPlayback(true);
+      return;
+    }
+    if (!selectedRecording.fileExists) {
+      setPlaybackUrl(null);
+      setVideoError('O arquivo desta gravação não existe mais no disco nem na nuvem.');
       return;
     }
     if (selectedRecording.fileUsable === false) {
@@ -1506,8 +1552,20 @@ export default function PlaybackPage() {
         return;
       }
       if (!playbackMayUseCompatible) {
-        setVideoError('A reprodução direta demorou além do esperado. Preparando versão compatível...');
-        setCompatMode(true);
+        // Estourar o prazo é sintoma de REDE, não de codec: transcodificar um
+        // arquivo bom multiplicava o custo (CPU do servidor + download novo) e
+        // o operador esperava minutos. Rede lenta ganha UMA retentativa da
+        // mesma fonte; codec incompatível continua indo para o compatível
+        // pela via certa (diagnóstico/erro de decodificação).
+        if (slowRetryRef.current !== activeSourceUrl) {
+          slowRetryRef.current = activeSourceUrl;
+          setVideoError('A conexão está lenta — tentando carregar de novo…');
+          lastVideoPlayheadRef.current = null;
+          autoResumeRef.current = true;
+          setReloadNonce((current) => current + 1);
+          return;
+        }
+        setVideoError('A conexão continua lenta demais para este vídeo. Ele segue tentando carregar; verifique a rede.');
         return;
       }
       setVideoError('A transcodificação para modo compatível demorou mais que o esperado. Isso ocorre na primeira reprodução de vídeos HEVC (H.265). Aguarde e tente novamente — o arquivo já pode estar sendo processado.');
@@ -1522,6 +1580,36 @@ export default function PlaybackPage() {
     const rate = Number(speed.replace('x', ''));
     video.playbackRate = Number.isFinite(rate) ? rate : 1;
   }, [speed, activeSourceUrl]);
+
+  // Vigia de STALL: reprodução em curso cujo relógio parou de andar por 20s é
+  // rede/token morto, não pausa. Uma retentativa automática por fonte, pelo
+  // mesmo caminho do botão "Tentar novamente" (token novo, elemento remontado,
+  // posição preservada pelo playhead); persiste o problema, o botão continua lá.
+  useEffect(() => {
+    let ultimo = { tempo: -1, em: Date.now() };
+    const timer = window.setInterval(() => {
+      const video = videoRef.current;
+      if (!video || !activeSourceUrl) return;
+      if (video.paused || video.ended || video.seeking) {
+        ultimo = { tempo: video.currentTime, em: Date.now() };
+        return;
+      }
+      if (video.currentTime !== ultimo.tempo) {
+        ultimo = { tempo: video.currentTime, em: Date.now() };
+        return;
+      }
+      if (Date.now() - ultimo.em < 20_000) return;
+      if (stallRetryRef.current === activeSourceUrl) return;
+      stallRetryRef.current = activeSourceUrl;
+      ultimo = { tempo: video.currentTime, em: Date.now() };
+      setVideoError('O vídeo parou de receber dados — reconectando…');
+      lastVideoPlayheadRef.current = null;
+      autoResumeRef.current = true;
+      setVodFallback(true);
+      setReloadNonce((current) => current + 1);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [activeSourceUrl]);
 
   const syncVideoToPlayhead = useCallback(() => {
     if (!videoRef.current || pendingSeekSeconds == null) return;
@@ -1696,6 +1784,10 @@ export default function PlaybackPage() {
     // reprodução assim que o vídeo estiver pronto (comportamento padrão de VMS).
     lastVideoPlayheadRef.current = null;
     autoResumeRef.current = true;
+    // O nonce garante a re-seleção mesmo quando o minuto clicado É o atual:
+    // setPlayhead(mesmo valor) não re-renderiza e o efeito de seleção nunca
+    // rodava — clique "no lugar onde estou" não fazia nada.
+    setNavNonce((n) => n + 1);
     setPlayhead(clamp(minute, 0, TOTAL_MINS));
   }, []);
 
@@ -2443,7 +2535,7 @@ export default function PlaybackPage() {
             const position = playlist.segments[index].offsetSeconds + video.currentTime;
             const absoluteMs = vodPositionToAbsoluteMs(playlist, position);
             if (absoluteMs !== null) {
-              const minute = clamp(Math.round(minuteOfDay(new Date(absoluteMs))), 0, TOTAL_MINS);
+              const minute = clamp(minuteOfDay(new Date(absoluteMs)), 0, TOTAL_MINS);
               lastVideoPlayheadRef.current = minute;
               setPlayhead(minute);
             }
@@ -2461,7 +2553,7 @@ export default function PlaybackPage() {
           }
           if (!selectedRecording) return;
           const base = minuteOfDay(selectedRecording.startedAt);
-          const minute = clamp(Math.round(base + video.currentTime / 60), 0, TOTAL_MINS);
+          const minute = clamp(base + video.currentTime / 60, 0, TOTAL_MINS);
           lastVideoPlayheadRef.current = minute;
           setPlayhead(minute);
         }}
@@ -2476,20 +2568,37 @@ export default function PlaybackPage() {
             setVodFallback(true);
             return;
           }
-          if (!playbackMayUseCompatible) {
-            setVideoError('Falha na reprodução direta. Preparando versão compatível...');
-            setCompatMode(true);
-            return;
-          }
-          if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
-            autoSkipTriedRef.current.add(selectedRecordingId);
-            const switched = selectNextUsableRecording(selectedRecordingId);
-            if (switched) {
-              setVideoError('Segmento atual falhou. Avançando automaticamente para o próximo trecho válido.');
+          void (async () => {
+            // Erro do SERVIDOR (404 da nuvem, 401 de token) tem explicação no
+            // corpo — e transcodificar não cura nenhum deles.
+            const detalhe = await explicarFalhaDoVideo(activeSourceUrl);
+            const falhou = selectedRecordingId ? recordingById.get(selectedRecordingId) : null;
+            const quando = falhou ? format(new Date(falhou.startedAt), 'HH:mm:ss') : null;
+            if (detalhe) {
+              if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
+                autoSkipTriedRef.current.add(selectedRecordingId);
+                if (selectNextUsableRecording(selectedRecordingId)) {
+                  setVideoError(`${detalhe} Avançando para o próximo trecho válido${quando ? ` (falhou o segmento das ${quando})` : ''}.`);
+                  return;
+                }
+              }
+              setVideoError(detalhe);
               return;
             }
-          }
-          setVideoError('Falha ao carregar a gravação selecionada, mesmo em modo compatível.');
+            if (!playbackMayUseCompatible) {
+              setVideoError('Falha na decodificação do vídeo. Preparando versão compatível...');
+              setCompatMode(true);
+              return;
+            }
+            if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
+              autoSkipTriedRef.current.add(selectedRecordingId);
+              if (selectNextUsableRecording(selectedRecordingId)) {
+                setVideoError(`Segmento${quando ? ` das ${quando}` : ' atual'} falhou. Avançando automaticamente para o próximo trecho válido.`);
+                return;
+              }
+            }
+            setVideoError('Falha ao carregar a gravação selecionada, mesmo em modo compatível.');
+          })();
         }}
       />
     );
@@ -2840,6 +2949,10 @@ export default function PlaybackPage() {
                     className={`absolute top-0 ${isEventMarker ? 'h-[35%] rounded-b-sm' : 'h-full'}`}
                     title={segmentTitle}
                     onClick={(event) => {
+                      // ANTES de qualquer return: deixar o clique borbulhar até a
+                      // trilha movia o playhead para dentro de um trecho quebrado
+                      // e disparava a seleção errada por tabela.
+                      event.stopPropagation();
                       if (timelineDraggedRef.current) return; // fim de arraste (pan), não é seek
                       if ((segment.type !== 'recorded' && segment.type !== 'recorded_broken') || !segment.recordingId) return;
                       const rec = recordingById.get(segment.recordingId);
@@ -2855,10 +2968,16 @@ export default function PlaybackPage() {
                       if (recDiag?.compatibleRecommended && !BROWSER_PLAYS_HEVC) {
                         setCompatMode(true);
                       }
-                      event.stopPropagation();
+                      // O PONTO clicado dentro do bloco vale: pular sempre para o
+                      // início custava até uma hora de arrasto em segmento longo.
+                      const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+                      const windowSizeMin = viewEnd - viewStart;
+                      const minuteFromClick = rect && rect.width > 0
+                        ? clamp(viewStart + ((event.clientX - rect.left) / rect.width) * windowSizeMin, segment.start, Math.max(segment.start, segment.end - 1 / 60))
+                        : segment.start;
                       setSelectedRecordingId(segment.recordingId);
-                      setPendingSeekSeconds(0);
-                      setPlayheadFromMinute(segment.start);
+                      setPendingSeekSeconds(Math.max(0, (minuteFromClick - segment.start) * 60));
+                      setPlayheadFromMinute(minuteFromClick);
                     }}
                     style={{
                       left: `${((segStart - viewStart) / windowSize) * 100}%`,

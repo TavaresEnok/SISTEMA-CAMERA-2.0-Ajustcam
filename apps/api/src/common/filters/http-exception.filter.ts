@@ -48,6 +48,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
       this.logger.warn(`${request.method} ${safePath} ${status} requestId=${errorResponse.requestId ?? '-'}`);
     }
 
+    // Resposta já em curso (streaming de vídeo/ZIP que falhou no meio):
+    // escrever status/JSON agora lança ERR_HTTP_HEADERS_SENT dentro do próprio
+    // filtro e mascara o erro real. Encerra a conexão — o cliente percebe o
+    // corpo truncado, que é a verdade.
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
     response.status(status).json(errorResponse);
   }
 }

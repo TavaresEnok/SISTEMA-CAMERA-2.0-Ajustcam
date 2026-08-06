@@ -1,3 +1,4 @@
+import { SkipThrottle } from '@nestjs/throttler';
 import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Query, Req, Res, UnauthorizedException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { type Request, type Response } from 'express';
@@ -312,6 +313,8 @@ export class RecordingsController {
     @CurrentUser() user: AuthUser,
     @Query('cameraId') cameraId?: string,
     @Query('date') date?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     if (!cameraId) {
       throw new BadRequestException('cameraId é obrigatório.');
@@ -320,6 +323,8 @@ export class RecordingsController {
     const accessibleCameraIds = await this.accessControlService.getPlaybackCameraIds(user);
     return this.recordingsService.getRecordingGapsReport({
       cameraId,
+      from,
+      to,
       date,
       accessibleCameraIds,
     });
@@ -523,6 +528,7 @@ export class RecordingsController {
   }
 
   @Public()
+  @SkipThrottle()
   @Get('recordings/:id/play')
   async playRecording(
     @Param('id') id: string,
@@ -549,12 +555,19 @@ export class RecordingsController {
     const forceDirectFlag = ['1', 'true', 'yes'].includes(String(forceDirect ?? '').toLowerCase());
     const autoPreferCompatible = forceDirectFlag ? false : await this.recordingsService.shouldPreferCompatiblePlayback(id);
     const useCompatible = compatibleFlag || autoPreferCompatible;
-    await this.auditService.log(tokenUser.id, 'recording.play', 'Recording', id, {
-      compatible: useCompatible,
-      requestedCompatible: compatibleFlag,
-      autoPreferCompatible,
-      forceDirect: forceDirectFlag,
-    }, req);
+    // UMA linha de auditoria por ABERTURA, não por Range: o navegador emite
+    // dezenas de Ranges por sessão de vídeo (cada seek é um), e cada um virava
+    // um INSERT na AuditLog — milhares de linhas idênticas por meia hora de
+    // playback, atrasando o primeiro byte de todas.
+    const rangeHeader = String(req.headers.range ?? '');
+    if (!rangeHeader || rangeHeader.startsWith('bytes=0-')) {
+      await this.auditService.log(tokenUser.id, 'recording.play', 'Recording', id, {
+        compatible: useCompatible,
+        requestedCompatible: compatibleFlag,
+        autoPreferCompatible,
+        forceDirect: forceDirectFlag,
+      }, req);
+    }
     if (useCompatible) {
       return this.recordingsService.streamRecordingCompatible(id, res);
     }
@@ -569,6 +582,7 @@ export class RecordingsController {
   // "URL ... is not in allowed_segment_extensions". Sem este alias a playlist VOD
   // só tocaria no hls.js do navegador; com ele toca também em VLC/mpv/ffmpeg.
   @Public()
+  @SkipThrottle()
   @Get('recordings/:id/play.mp4')
   async playRecordingAsMp4(
     @Param('id') id: string,
@@ -583,6 +597,7 @@ export class RecordingsController {
 
   @Roles(UserRole.OPERATOR)
   @RequirePermission('exportEvidence')
+  @SkipThrottle()
   @Get('recordings/:id/download')
   async downloadRecording(
     @CurrentUser() user: AuthUser,
@@ -622,6 +637,7 @@ export class RecordingsController {
   }
 
   @Public()
+  @SkipThrottle()
   @Get('recordings/download-zip')
   async downloadRecordingsZip(
     @Query('token') token: string | undefined,
@@ -765,6 +781,7 @@ export class RecordingsController {
   }
 
   @Public()
+  @SkipThrottle()
   @Get('recordings/:id/thumbnail')
   async getThumbnail(
     @Param('id') id: string,
@@ -811,6 +828,7 @@ export class RecordingsController {
   // thumbnail: token de playback da própria gravação + assertCanPlaybackCamera, de
   // modo que derivados de câmera privada NUNCA vazam (invariante LGPD 1.2.i).
   @Public()
+  @SkipThrottle()
   @Get('recordings/:id/preview-sprite')
   async getTimelinePreviewSprite(
     @Param('id') id: string,

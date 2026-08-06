@@ -257,3 +257,21 @@ test('shouldAbortStalledSwap desiste da troca travada e devolve o playback ao ca
   // Troca não iniciada: nada a abortar.
   assert.equal(shouldAbortStalledSwap({ ...state, swapStartedAtMs: null }, T0 + 99_000), false);
 });
+
+test('playUrl RELATIVA do backend novo é normalizada para /recordings/... (contrato reparado)', () => {
+  // O backend passou a emitir "rec-1/play.mp4?token=..." (pelo M3U8 do VLC);
+  // o front concatenava API_URL e produzia "/apirec-1/..." — 404 em todo
+  // segmento, modo contínuo morto, renovação de token no-op, multi-câmera sem
+  // tocar. A normalização aceita as DUAS formas.
+  const playlist = normalizeVodPlaylist({
+    segments: [{
+      recordingId: 'rec-9',
+      playUrl: 'rec-9/play.mp4?token=abc',
+      startedAt: '2026-08-06T10:00:00.000Z',
+      durationSeconds: 60,
+    }],
+  }, Date.now());
+  assert.ok(playlist);
+  assert.equal(playlist!.segments[0].playUrl, '/recordings/rec-9/play.mp4?token=abc');
+  assert.equal(refreshSegmentUrl(playlist!.segments[0].playUrl, { 'rec-9': 'NOVO' }), '/recordings/rec-9/play.mp4?token=NOVO');
+});

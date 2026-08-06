@@ -141,6 +141,15 @@ export function somarGravacao(
   }
   const fileSize = Number(diagnostico.fileSizeBytes ?? 0);
   if (fileSize > 0 && fileSize < minExpectedBytes) atual.tooSmall += 1;
+  // Offloadada (local podado, nuvem confirmada) é saúde NORMAL do modelo de
+  // camada — contá-la como quebrada fazia o resumo condenar o acervo inteiro
+  // de qualquer instalação com offload maduro.
+  if (diagnostico.cloudAvailable && !diagnostico.fileExists) {
+    if (diagnostico.compatibleRecommended) atual.compatibleRecommended += 1;
+    else atual.directLikely += 1;
+    if (diagnostico.hasAudioStream) atual.withAudio += 1;
+    return atual;
+  }
   if (!diagnostico.fileExists || diagnostico.reason === 'file_missing' || diagnostico.reason === 'empty_file') {
     atual.broken += 1;
   } else if (diagnostico.compatibleRecommended) {
@@ -179,4 +188,27 @@ export function avaliarAtencao(
   else if (atrasado) alertReason = `último segmento atrasado (${Math.floor((item.lastRecordingAgeSeconds ?? 0) / 60)} min)`;
   else if (degradedRatio >= 0.5) alertReason = 'alta taxa de segmentos degradados';
   return { needsAttention, alertReason };
+}
+
+/**
+ * A cópia local se foi (poda pós-offload), mas a da NUVEM existe: o
+ * diagnóstico "file_missing" seco não pode apagar o que já se sabia do vídeo.
+ * Mescla os campos de mídia medidos quando o arquivo era local e registra
+ * `cloudAvailable` — é isso que mantém o transcode de compatibilidade e o
+ * resumo de saúde funcionando para acervo offloadado.
+ */
+export function mesclarDiagnosticoComNuvem(
+  atual: Record<string, unknown>,
+  anterior: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const rico = anterior && typeof anterior === 'object' ? anterior : {};
+  return {
+    ...atual,
+    cloudAvailable: true,
+    compatibleRecommended: rico.compatibleRecommended ?? atual.compatibleRecommended ?? false,
+    hasAudioStream: rico.hasAudioStream ?? atual.hasAudioStream,
+    format: rico.format ?? null,
+    video: rico.video ?? null,
+    audio: rico.audio ?? null,
+  };
 }

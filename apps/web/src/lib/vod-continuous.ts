@@ -163,8 +163,16 @@ export function normalizeVodPlaylist(raw: unknown, fetchedAtMs: number): VodPlay
   for (const item of source.segments as RawVodSegment[]) {
     if (!item || typeof item !== 'object') continue;
     const recordingId = typeof item.recordingId === 'string' ? item.recordingId.trim() : '';
-    const playUrl = typeof item.playUrl === 'string' ? item.playUrl.trim() : '';
+    let playUrl = typeof item.playUrl === 'string' ? item.playUrl.trim() : '';
     if (!recordingId || !playUrl) continue;
+    // CONTRATO REPARADO AQUI, para backend novo E antigo: a playlist passou a
+    // emitir a URL RELATIVA ("rec-1/play.mp4?...") para o M3U8 do VLC, mas o
+    // front concatenava `${API_URL}${path}` e produzia "/apirec-1/..." — 404
+    // em TODO segmento: o modo contínuo nunca ligava, cada play pagava uma
+    // requisição perdida + piscada, a renovação de token virava no-op e o
+    // multi-câmera não tocava. URL de segmento aqui dentro é SEMPRE absoluta
+    // no formato `/recordings/:id/play...`.
+    if (!playUrl.startsWith('/')) playUrl = `/recordings/${playUrl}`;
     const startedAtMs = toMs(item.startedAt);
     if (startedAtMs === null) continue;
     const endedAtMs = toMs(item.endedAt);

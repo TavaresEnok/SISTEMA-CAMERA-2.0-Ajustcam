@@ -230,7 +230,17 @@ export class AuthService {
   }
 
   async verifyStreamToken(token: string): Promise<StreamTokenPayload> {
-    const payload = await this.jwtService.verifyAsync<StreamTokenPayload>(token);
+    // Token expirado/adulterado lança TokenExpiredError/JsonWebTokenError — que
+    // NÃO é HttpException, então o filtro global o transformava em 500
+    // "Internal server error". Para o player, 401 é "renove o token e siga";
+    // 500 é "a API quebrou". Um token de 5 min expira em QUALQUER pausa mais
+    // longa — cada retomada de vídeo virava um falso alarme de servidor.
+    let payload: StreamTokenPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<StreamTokenPayload>(token);
+    } catch {
+      throw new UnauthorizedException('Token de stream expirado ou inválido.');
+    }
     if (payload.type !== 'stream') {
       throw new UnauthorizedException('Token de stream inválido.');
     }
@@ -238,7 +248,17 @@ export class AuthService {
   }
 
   async verifyPlaybackToken(token: string): Promise<PlayTokenPayload> {
-    const payload = await this.jwtService.verifyAsync<PlayTokenPayload>(token);
+    // Token expirado/adulterado lança TokenExpiredError/JsonWebTokenError — que
+    // NÃO é HttpException, então o filtro global o transformava em 500
+    // "Internal server error". Para o player, 401 é "renove o token e siga";
+    // 500 é "a API quebrou". Um token de 5 min expira em QUALQUER pausa mais
+    // longa — cada retomada de vídeo virava um falso alarme de servidor.
+    let payload: PlayTokenPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<PlayTokenPayload>(token);
+    } catch {
+      throw new UnauthorizedException('Token de playback expirado ou inválido.');
+    }
     if (payload.type !== 'play') {
       throw new UnauthorizedException('Token de playback inválido.');
     }
@@ -264,7 +284,17 @@ export class AuthService {
   }
 
   async verifyDownloadZipToken(token: string): Promise<DownloadZipTokenPayload> {
-    const payload = await this.jwtService.verifyAsync<DownloadZipTokenPayload>(token);
+    // Token expirado/adulterado lança TokenExpiredError/JsonWebTokenError — que
+    // NÃO é HttpException, então o filtro global o transformava em 500
+    // "Internal server error". Para o player, 401 é "renove o token e siga";
+    // 500 é "a API quebrou". Um token de 5 min expira em QUALQUER pausa mais
+    // longa — cada retomada de vídeo virava um falso alarme de servidor.
+    let payload: DownloadZipTokenPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<DownloadZipTokenPayload>(token);
+    } catch {
+      throw new UnauthorizedException('Token de download expirado ou inválido.');
+    }
     if (payload.type !== 'download-zip' || !Array.isArray(payload.recordingIds)) {
       throw new UnauthorizedException('Token de download inválido.');
     }

@@ -1,6 +1,8 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, Logger, OnModuleInit, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
-import { createReadStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { mkdirSync } from 'node:fs';
 import { rename, rm, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
@@ -15,6 +17,7 @@ import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper'
 import { AccessControlService } from '../access-control/access-control.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
 import { S3Client, S3Error } from '../cloud-storage/s3-client';
+import { resolverRange, validadoresDeCache } from './helpers/http-range.helper';
 import { CloudStorageResolverService } from '../cloud-storage/cloud-storage-resolver.service';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
@@ -57,6 +60,7 @@ import {
   contagemZerada,
   somarGravacao,
   avaliarAtencao,
+  mesclarDiagnosticoComNuvem,
   type ContagemDeCamera,
   type EntradaDeCache,
 } from './helpers/health-summary-scan.helper';
@@ -339,12 +343,16 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         : {};
     const where = {
       ...cameraFilter,
-      ...(from || to
+      // Janela por SOBREPOSIÇÃO, não só por início: o segmento que começou
+      // 23:57 e termina 00:02 pertence às duas janelas. Filtrar só por
+      // startedAt abria um buraco falso nos primeiros minutos de cada janela.
+      ...(to ? { startedAt: { lte: to } } : {}),
+      ...(from
         ? {
-            startedAt: {
-              ...(from ? { gte: from } : {}),
-              ...(to ? { lte: to } : {}),
-            },
+            OR: [
+              { startedAt: { gte: from } },
+              { startedAt: { gte: new Date(from.getTime() - 2 * 3600_000) }, endedAt: { gte: from } },
+            ],
           }
         : {}),
     };
@@ -359,8 +367,19 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       this.prisma.recording.count({ where }),
     ]);
 
+    // Um filePath fora da raiz (linha corrompida) derrubava a LISTA INTEIRA
+    // com 500 — timeline vazia por causa de uma linha. A ruim sai com aviso.
+    const seguras = items.filter((item: any) => {
+      try {
+        ensureFileUnderRoot(recordingsRoot, item.filePath);
+        return true;
+      } catch {
+        this.logger.warn(`Gravação ${item.id} com caminho inválido — omitida da lista.`);
+        return false;
+      }
+    });
     return {
-      items: items.map((item: any) => {
+      items: seguras.map((item: any) => {
         const absolutePath = ensureFileUnderRoot(recordingsRoot, item.filePath);
         const extension = extname(absolutePath);
         const thumbnailBase = extension ? absolutePath.slice(0, -extension.length) : absolutePath;
@@ -374,7 +393,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         // perdido e a tela se recusava a reproduzi-la. O endpoint individual
         // sempre soube buscar do bucket; a interface nunca chegava a chamá-lo.
         // Efeito prático: ligar a nuvem fazia o acervo "sumir" do playback.
-        const cloudAvailable = Boolean(item.cloudKey && item.cloudUploadedAt);
+        const cloudAvailable = this.nuvemDisponivel(item);
         const fileExists = localExists || cloudAvailable;
         const thumbnailExists = existsSync(thumbnailPath) && statSync(thumbnailPath).size > 0;
         const actualSizeBytes = localExists ? statSync(absolutePath).size : 0;
@@ -461,11 +480,14 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     mkdirSync(cacheDir, { recursive: true });
     const parcial = `${destino}.partial`;
     try {
-      const conteudo = await client.getObject(semPrefixo);
-      // Escreve em arquivo temporário e renomeia: um processo que morra no meio
-      // do download não pode deixar um arquivo truncado que a próxima chamada
-      // trataria como cache válido — e que o ffmpeg leria como vídeo corrompido.
-      writeFileSync(parcial, conteudo);
+      // STREAM até o disco, nunca Buffer: um MP4 de 400 MB materializado na
+      // RAM (e gravado com writeFileSync SÍNCRONO) congelava a API inteira —
+      // a mesma classe do congelamento de 11s já documentado no cache de
+      // diagnósticos. Temporário + rename: processo morto no meio não deixa
+      // cache truncado que o ffmpeg leria como vídeo corrompido.
+      const objeto = await client.getObjectStream(semPrefixo);
+      if (!objeto.body) throw new Error('bucket devolveu corpo vazio');
+      await pipeline(Readable.fromWeb(objeto.body as import('node:stream/web').ReadableStream), createWriteStream(parcial));
       renameSync(parcial, destino);
     } catch (error) {
       try { rmSync(parcial, { force: true }); } catch { /* já não existe */ }
@@ -577,6 +599,11 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
           + 'Verifique o armazenamento em nuvem desta instalação.',
         );
       }
+      if (error instanceof S3Error && error.status === 416) {
+        // Range insatisfazível é resposta do protocolo, não indisponibilidade.
+        res.status(416).setHeader('Content-Range', 'bytes */*').end();
+        return true;
+      }
       if (error instanceof S3Error) {
         throw new ServiceUnavailableException(
           `O armazenamento em nuvem respondeu ${error.status} (${error.code}) ao buscar esta gravação.`,
@@ -647,6 +674,51 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     stream.pipe(res);
   }
 
+  /**
+   * Entrega um arquivo IMUTÁVEL (gravação fechada nunca muda) com Range
+   * correto e validadores de cache. Toda a semântica de Range/ETag mora em
+   * `http-range.helper.ts` — sufixo, multi-range e malformado eram tratados
+   * errado em TRÊS cópias deste bloco, cada uma mentindo um 206.
+   * Com ETag + If-None-Match o navegador reaproveita o que já baixou: em
+   * link lento, é a diferença entre "seek instantâneo" e re-baixar o vídeo.
+   */
+  private entregarArquivo(res: Response, filePath: string, stats: { size: number; mtimeMs: number }) {
+    const fileSize = stats.size;
+    const { etag, lastModified } = validadoresDeCache(stats);
+    res.setHeader('ETag', etag);
+    res.setHeader('Last-Modified', lastModified);
+    res.setHeader('Cache-Control', 'private, max-age=3600, immutable');
+    if (res.req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+    const alcance = resolverRange(res.req.headers.range, fileSize);
+    if (alcance.tipo === 'insatisfazivel') {
+      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
+      return;
+    }
+    if (alcance.tipo === 'completo') {
+      res.setHeader('Content-Length', fileSize);
+      this.pipeArquivo(res, filePath);
+      return;
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${alcance.start}-${alcance.end}/${fileSize}`);
+    res.setHeader('Content-Length', alcance.end - alcance.start + 1);
+    this.pipeArquivo(res, filePath, { start: alcance.start, end: alcance.end });
+  }
+
+  /**
+   * A cópia da NUVEM conta como existente? Uma única resposta para lista,
+   * régua (gaps), prontidão e playlist VOD — as quatro discordavam: a lista
+   * dizia "existe", a régua pintava buraco e a playlist pulava o segmento,
+   * então o modo contínuo escolhia o vídeo ERRADO em cima de acervo íntegro.
+   * `cloudMissingSince` exclui: objeto apagado por fora não é cópia.
+   */
+  private nuvemDisponivel(r: { cloudKey?: string | null; cloudUploadedAt?: Date | null; cloudMissingSince?: Date | null }) {
+    return Boolean(r.cloudKey && r.cloudUploadedAt && !r.cloudMissingSince);
+  }
+
   async streamRecording(recordingId: string, res: Response, options?: { allowAutoCompat?: boolean }) {
     const recording = await this.ensureRecordingExists(recordingId);
 
@@ -673,8 +745,6 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const stats = statSync(filePath);
-    const fileSize = stats.size;
-    const range = res.req.headers.range;
 
     const extension = extname(filePath).toLowerCase();
     const contentType =
@@ -688,27 +758,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.setHeader('Content-Type', contentType);
     res.setHeader('Accept-Ranges', 'bytes');
 
-    if (!range) {
-      res.setHeader('Content-Length', fileSize);
-      this.pipeArquivo(res, filePath);
-      return;
-    }
-
-    const [startText, endText] = range.replace(/bytes=/, '').split('-');
-    const start = Number(startText);
-    const end = endText ? Number(endText) : fileSize - 1;
-    const validStart = Number.isNaN(start) ? 0 : Math.max(0, start);
-    const validEnd = Number.isNaN(end) ? fileSize - 1 : Math.min(end, fileSize - 1);
-
-    if (validStart >= fileSize || validStart > validEnd) {
-      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
-      return;
-    }
-
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
-    res.setHeader('Content-Length', validEnd - validStart + 1);
-    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
+    this.entregarArquivo(res, filePath, stats);
   }
 
   private async ensureCompatibleFile(recordingId: string): Promise<string> {
@@ -872,33 +922,11 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   async streamRecordingCompatible(recordingId: string, res: Response) {
     const filePath = await this.ensureCompatibleFile(recordingId);
     const stats = statSync(filePath);
-    const fileSize = stats.size;
-    const range = res.req.headers.range;
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
 
-    if (!range) {
-      res.setHeader('Content-Length', fileSize);
-      this.pipeArquivo(res, filePath);
-      return;
-    }
-
-    const [startText, endText] = range.replace(/bytes=/, '').split('-');
-    const start = Number(startText);
-    const end = endText ? Number(endText) : fileSize - 1;
-    const validStart = Number.isNaN(start) ? 0 : Math.max(0, start);
-    const validEnd = Number.isNaN(end) ? fileSize - 1 : Math.min(end, fileSize - 1);
-
-    if (validStart >= fileSize || validStart > validEnd) {
-      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
-      return;
-    }
-
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
-    res.setHeader('Content-Length', validEnd - validStart + 1);
-    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
+    this.entregarArquivo(res, filePath, stats);
   }
 
   async prepareCompatiblePlayback(recordingId: string) {
@@ -931,33 +959,11 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const stats = statSync(filePath);
-    const fileSize = stats.size;
-    const range = res.req.headers.range;
     res.setHeader('Content-Disposition', `attachment; filename="recording-${recording.id}.mp4"`);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
 
-    if (!range) {
-      res.setHeader('Content-Length', fileSize);
-      this.pipeArquivo(res, filePath);
-      return;
-    }
-
-    const [startText, endText] = range.replace(/bytes=/, '').split('-');
-    const start = Number(startText);
-    const end = endText ? Number(endText) : fileSize - 1;
-    const validStart = Number.isNaN(start) ? 0 : Math.max(0, start);
-    const validEnd = Number.isNaN(end) ? fileSize - 1 : Math.min(end, fileSize - 1);
-
-    if (validStart >= fileSize || validStart > validEnd) {
-      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
-      return;
-    }
-
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${validStart}-${validEnd}/${fileSize}`);
-    res.setHeader('Content-Length', validEnd - validStart + 1);
-    this.pipeArquivo(res, filePath, { start: validStart, end: validEnd });
+    this.entregarArquivo(res, filePath, stats);
   }
 
   // Streama um ZIP com várias gravações sem materializar nada em disco/memória.
@@ -1472,8 +1478,15 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const recording = await this.ensureRecordingExists(recordingId);
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
-    const result = await this.diagnosticarArquivo(recordingId, recording.cameraId, filePath);
+    let result = await this.diagnosticarArquivo(recordingId, recording.cameraId, filePath) as Record<string, unknown>;
     const cache = this.readDiagnosticsCache();
+    if (result.reason === 'file_missing' && this.nuvemDisponivel(recording)) {
+      // A poda apagou a cópia local, mas o diagnóstico RICO (codec, se precisa
+      // de transcode) foi medido quando ela existia. Sobrescrever com
+      // "file_missing" seco cegava a decisão de compatibilidade: HEVC
+      // só-na-nuvem ia CRU para navegador sem decoder — tela preta com 200.
+      result = mesclarDiagnosticoComNuvem(result, cache[recordingId]?.diagnostics as Record<string, unknown> | undefined);
+    }
     cache[recordingId] = { ...(cache[recordingId] ?? {}), checkedAt: new Date().toISOString(), diagnostics: result };
     this.writeDiagnosticsCache(cache);
     return result;
@@ -1699,9 +1712,18 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const from = new Date(selected);
     const to = new Date(selected);
     to.setHours(23, 59, 59, 999);
+    // MESMO defeito já corrigido em list(): as duas chaves `cameraId` num
+    // spread — a segunda (acessíveis) SOBRESCREVIA a primeira (câmera pedida)
+    // e a "saúde da câmera 15" somava a frota inteira.
+    const cameraFilter = params.cameraId
+      ? params.accessibleCameraIds && !params.accessibleCameraIds.includes(params.cameraId)
+        ? { cameraId: { in: [] as string[] } }
+        : { cameraId: params.cameraId }
+      : params.accessibleCameraIds
+        ? { cameraId: { in: params.accessibleCameraIds } }
+        : {};
     const where = {
-      ...(params.cameraId ? { cameraId: params.cameraId } : {}),
-      ...(params.accessibleCameraIds ? { cameraId: { in: params.accessibleCameraIds } } : {}),
+      ...cameraFilter,
       startedAt: { gte: from, lte: to },
     };
 
@@ -1740,7 +1762,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         // fazia a sua PRÓPRIA consulta ao banco (via ensureRecordingExists) —
         // 1.200 idas e voltas em série para dados que esta consulta já podia
         // ter trazido de uma vez.
-        select: { id: true, cameraId: true, startedAt: true, filePath: true },
+        select: { id: true, cameraId: true, startedAt: true, filePath: true, cloudKey: true, cloudUploadedAt: true, cloudMissingSince: true },
         orderBy: { startedAt: 'asc' },
         take: limiteVarredura,
       }),
@@ -1838,22 +1860,35 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
    * O resultado alimenta o MESMO cache do caminho unitário: o que for medido
    * aqui poupa o ffprobe da próxima tela de detalhe, e vice-versa.
    */
-  private async medirDiagnosticoDeGravacao(registro: { id: string; cameraId: string; filePath: string }) {
+  private async medirDiagnosticoDeGravacao(registro: { id: string; cameraId: string; filePath: string; cloudKey?: string | null; cloudUploadedAt?: Date | null; cloudMissingSince?: Date | null }) {
     const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
     const filePath = ensureFileUnderRoot(recordingsRoot, registro.filePath);
-    const diagnostico = await this.diagnosticarArquivo(registro.id, registro.cameraId, filePath);
+    let diagnostico = await this.diagnosticarArquivo(registro.id, registro.cameraId, filePath) as Record<string, unknown>;
     const cache = this.readDiagnosticsCache();
+    if (diagnostico.reason === 'file_missing' && this.nuvemDisponivel(registro)) {
+      diagnostico = mesclarDiagnosticoComNuvem(diagnostico, cache[registro.id]?.diagnostics as Record<string, unknown> | undefined);
+    }
     cache[registro.id] = { ...(cache[registro.id] ?? {}), checkedAt: new Date().toISOString(), diagnostics: diagnostico };
     this.writeDiagnosticsCache(cache);
     return diagnostico;
   }
 
-  async getRecordingGapsReport(params: { date?: string; cameraId: string; accessibleCameraIds?: string[] }) {
+  async getRecordingGapsReport(params: { date?: string; from?: string; to?: string; cameraId: string; accessibleCameraIds?: string[] }) {
+    // `from`/`to` ISO vindos do NAVEGADOR mandam: o dia é do operador, não do
+    // servidor. Só com `date`, o servidor montava a janela no fuso DELE (UTC
+    // nos containers) e ela escorregava 3h — os últimos minutos do dia local
+    // viravam cobertura fantasma na régua, e o clique ali caía no vídeo errado.
+    const fromParam = params.from ? new Date(params.from) : null;
+    const toParam = params.to ? new Date(params.to) : null;
+    const janelaValida = fromParam && toParam
+      && !Number.isNaN(fromParam.getTime()) && !Number.isNaN(toParam.getTime())
+      && toParam.getTime() > fromParam.getTime()
+      && toParam.getTime() - fromParam.getTime() <= 48 * 3600_000;
     const selected = params.date ? new Date(params.date) : new Date();
     selected.setHours(0, 0, 0, 0);
-    const dayStart = new Date(selected);
-    const dayEnd = new Date(selected);
-    dayEnd.setHours(23, 59, 59, 999);
+    const dayStart = janelaValida ? fromParam! : new Date(selected);
+    const dayEnd = janelaValida ? toParam! : new Date(selected);
+    if (!janelaValida) dayEnd.setHours(23, 59, 59, 999);
 
     if (params.accessibleCameraIds && !params.accessibleCameraIds.includes(params.cameraId)) {
       throw new NotFoundException('Câmera não encontrada para este usuário.');
@@ -1871,6 +1906,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         startedAt: true,
         endedAt: true,
         durationSeconds: true,
+        cloudKey: true,
+        cloudUploadedAt: true,
+        cloudMissingSince: true,
       },
       orderBy: { startedAt: 'asc' },
       take: 2000,
@@ -1878,7 +1916,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
 
     const usableSegments = records
       .map((record) => {
-        const fileExists = existsSync(ensureFileUnderRoot(recordingsRoot, record.filePath));
+        // Nuvem conta: a régua é desenhada a partir daqui, e "buraco" em cima
+        // de acervo offloadado mandava o clique para o vídeo errado.
+        const fileExists = existsSync(ensureFileUnderRoot(recordingsRoot, record.filePath)) || this.nuvemDisponivel(record);
         if (!fileExists) return null;
         const startMs = record.startedAt.getTime();
         const endMs = record.endedAt?.getTime()
@@ -1958,6 +1998,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         id: true,
         source: true,
         filePath: true,
+        cloudKey: true,
+        cloudUploadedAt: true,
+        cloudMissingSince: true,
       },
       orderBy: { startedAt: 'asc' },
       take: 2000,
@@ -1974,7 +2017,15 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       const absolutePath = ensureFileUnderRoot(recordingsRoot, record.filePath);
       const fileExists = existsSync(absolutePath);
       if (!fileExists) {
-        missingFiles += 1;
+        // Offloadada com upload confirmado NÃO é arquivo perdido: o /play a
+        // serve do bucket. Contá-la como perdida fazia o relatório declarar
+        // "dia inteiro sem prova" sobre acervo íntegro.
+        if (this.nuvemDisponivel(record)) {
+          existingFiles += 1;
+          usableFiles += 1;
+        } else {
+          missingFiles += 1;
+        }
         continue;
       }
       existingFiles += 1;
@@ -2076,7 +2127,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         // fechada terminando depois do início pedido OU ainda aberta (gravando)
         OR: [{ endedAt: { gte: fromDate } }, { endedAt: null }],
       },
-      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true },
+      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true, cloudKey: true, cloudUploadedAt: true, cloudMissingSince: true },
       orderBy: { startedAt: 'asc' },
       take: 5_000,
     });
@@ -2085,15 +2136,19 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const diagnosticsCache = this.readDiagnosticsCache();
     const sources: VodSourceSegment[] = [];
     for (const record of records) {
-      let sizeBytes = 0;
       try {
         const absolutePath = ensureFileUnderRoot(recordingsRoot, record.filePath);
-        if (!existsSync(absolutePath)) continue;
-        sizeBytes = statSync(absolutePath).size;
+        if (existsSync(absolutePath)) {
+          if (statSync(absolutePath).size <= 1024) continue;
+        } else if (!this.nuvemDisponivel(record)) {
+          // Só-na-nuvem entra: /play serve do bucket com Range. Pulá-la fazia
+          // o modo contínuo classificar o instante como "gap" e SELECIONAR O
+          // PRÓXIMO segmento — vídeo errado por causa do offload.
+          continue;
+        }
       } catch {
         continue;
       }
-      if (sizeBytes <= 1024) continue;
       const cached = diagnosticsCache[record.id]?.diagnostics as { video?: { codec?: string | null } } | undefined;
       sources.push({
         id: record.id,
@@ -2105,9 +2160,9 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const plan = planVodPlaylist({ segments: sources, from: fromDate, to: toDate, maxSegments });
-    if (!plan.segments.length) {
-      throw new NotFoundException('Nenhuma gravação reproduzível neste intervalo.');
-    }
+    // Playlist vazia é RESPOSTA, não erro: "não há vídeo neste intervalo" e
+    // "a API falhou" precisam ser distinguíveis pelo front — o 404 daqui era
+    // engolido em silêncio e o modo contínuo simplesmente nunca ligava.
 
     // Token de playback JÁ EXISTENTE, um por segmento — o mesmo que /play,
     // /thumbnail e /preview-sprite verificam. Nada de autenticação nova.
@@ -2663,7 +2718,7 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
         // fechada terminando depois do início pedido OU ainda aberta (gravando)
         OR: [{ endedAt: { gte: fromDate } }, { endedAt: null }],
       },
-      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true },
+      select: { id: true, startedAt: true, endedAt: true, durationSeconds: true, filePath: true, cloudKey: true, cloudUploadedAt: true, cloudMissingSince: true },
       orderBy: { startedAt: 'asc' },
       take: 5_000,
     });

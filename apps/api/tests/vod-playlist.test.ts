@@ -463,17 +463,19 @@ test('vod service: intervalo invertido ou data inválida é rejeitado', async (t
   );
 });
 
-test('vod service: intervalo sem gravação utilizável responde 404 (e não emite token)', async (t) => {
+test('vod service: intervalo sem gravação utilizável responde playlist VAZIA, não 404', async (t) => {
+  // Playlist vazia é RESPOSTA ("não há vídeo aqui"), não erro. O 404 antigo
+  // era indistinguível de falha da API: o front o engolia em silêncio e o
+  // modo contínuo nunca ligava — inclusive para dias 100% offloadados, que a
+  // playlist descartava por só olhar o disco.
   const fx = makeServiceFixture(BASE_RECORDS, ['cam-1/10-00-00.mp4']);
   t.after(fx.cleanup);
-  await assert.rejects(
-    () => (fx.svc as any).buildVodPlaylist(viewer, {
-      cameraId: 'cam-1',
-      from: '2026-07-27T20:00:00.000Z',
-      to: '2026-07-27T21:00:00.000Z',
-    }),
-    NotFoundException,
-  );
+  const result: any = await (fx.svc as any).buildVodPlaylist(viewer, {
+    cameraId: 'cam-1',
+    from: '2026-07-27T20:00:00.000Z',
+    to: '2026-07-27T21:00:00.000Z',
+  });
+  assert.deepEqual(result.segments ?? [], [], 'vazio de verdade, sem inventar segmento');
   assert.deepEqual(fx.tokenCalls, [], 'sem segmento não há token de conteúdo emitido');
 });
 
