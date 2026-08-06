@@ -2549,6 +2549,11 @@
         } else if (nuvemPend >= 300) {
           out.push(['warn', `nuvem: ${fmt.format(nuvemPend)} envio(s) na fila`]);
         }
+        // Gravações APAGADAS POR FORA do sistema: a vigilância conferiu o
+        // bucket (saudável) e o objeto não estava lá. Não é indisponibilidade
+        // — é perda, e o dono precisa saber ANTES de precisar do vídeo.
+        const sumidas = number(metric(item, 'cloudCopiesMissing', 0));
+        if (sumidas) out.push(['bad', `${fmt.format(sumidas)} gravação(ões) apagada(s) do bucket por fora`]);
         return out;
       }
       function renderAttentionQueue() {

@@ -138,3 +138,16 @@ test('fila pequena e sem erro: nenhuma linha de nuvem', () => {
   });
   assert.ok(!razoes.some(([, texto]) => texto.includes('nuvem')));
 });
+
+test('gravações apagadas POR FORA do bucket viram linha VERMELHA própria', () => {
+  // Não é indisponibilidade: a vigilância conferiu o bucket saudável e o
+  // objeto não estava lá. O dono precisa saber ANTES de precisar do vídeo.
+  const razoes = rodarReasonsFor({
+    ...saudavel,
+    metrics: { ...saudavel.metrics, cloudCopiesMissing: 37 },
+  });
+  const linha = razoes.find(([, texto]) => texto.includes('apagada'));
+  assert.ok(linha, 'perda externa invisível é como o incidente começou');
+  assert.equal(linha[0], 'bad');
+  assert.ok(linha[1].includes('37'));
+});

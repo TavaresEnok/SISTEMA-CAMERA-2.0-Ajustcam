@@ -253,6 +253,14 @@ model Recording {
   cloudStorageId  String?
   cloudStorage    CloudStorage? @relation(fields: [cloudStorageId], references: [id], onDelete: SetNull)
   localDeletedAt  DateTime?
+  // Vigilância do acervo REMOTO. `cloudVerifiedAt` = última vez que o objeto
+  // foi conferido no bucket (HEAD). `cloudMissingSince` = o bucket respondeu
+  // SAUDÁVEL e o objeto NÃO estava lá — apagado por fora do sistema. A linha
+  // NÃO é removida: ela é o registro de que a gravação existiu e foi destruída
+  // externamente, e o mapa (cloudKey) para reencontrá-la se o objeto voltar.
+  // Bucket inteiro fora do ar NUNCA marca isto — indisponível não é apagado.
+  cloudVerifiedAt   DateTime?
+  cloudMissingSince DateTime?
   createdAt       DateTime        @default(now())
 
   @@unique([filePath])

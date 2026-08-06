@@ -118,6 +118,7 @@ export class CloudOffloadService {
     ultimoEnvioOkHaSegundos: number | null;
     ultimaFalhaCodigo: string | null;
     ultimaFalhaHaSegundos: number | null;
+    sumidasDaNuvem: number;
   } | null> {
     try {
       const policy = await this.getPolicy();
@@ -130,12 +131,14 @@ export class CloudOffloadService {
           ultimoEnvioOkHaSegundos: null,
           ultimaFalhaCodigo: null,
           ultimaFalhaHaSegundos: null,
+          sumidasDaNuvem: 0,
         };
       }
       const filtro = { cloudKey: null, triggerMode: { in: tipos } };
-      const [pendentes, maisAntiga] = await Promise.all([
+      const [pendentes, maisAntiga, sumidasDaNuvem] = await Promise.all([
         this.prisma.recording.count({ where: filtro }),
         this.prisma.recording.findFirst({ where: filtro, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
+        this.prisma.recording.count({ where: { cloudMissingSince: { not: null } } }),
       ]);
       const idade = (data?: Date | null) => (data ? Math.max(0, Math.floor((Date.now() - data.getTime()) / 1000)) : null);
       return {
@@ -145,6 +148,7 @@ export class CloudOffloadService {
         ultimoEnvioOkHaSegundos: idade(this.ultimoEnvioOkEm ?? null),
         ultimaFalhaCodigo: this.ultimaFalhaCodigo ?? null,
         ultimaFalhaHaSegundos: idade(this.ultimaFalhaEm ?? null),
+        sumidasDaNuvem,
       };
     } catch {
       return null;
@@ -235,9 +239,120 @@ export class CloudOffloadService {
       const client = this.resolver.clienteDe(destino);
       const resultado = await this.uploadPending(client, cfg, storageId);
       const apagadas = await this.pruneUploaded(cfg);
+      // Vigilância do acervo já enviado: barata (HEADs em lote, com portão de
+      // tempo) e best-effort — falha aqui não pode atrapalhar o envio.
+      await this.verificarAcervoNaNuvem().catch(() => undefined);
       return { ...resultado, skipped: false, deletedLocal: apagadas };
     } finally {
       this.running = false;
+    }
+  }
+
+  private ultimaVerificacaoAcervoEm?: number;
+
+  /**
+   * Confere, em lotes, se o que o banco diz estar na nuvem AINDA ESTÁ lá.
+   *
+   * Sem isto, um objeto apagado por fora (painel do fornecedor, lifecycle,
+   * outra ferramenta) só era descoberto quando alguém tentava assistir — e um
+   * bucket inteiro apagado ficava invisível até o disco encher. O banco
+   * continuava afirmando "12.503 gravações arquivadas" sobre um bucket vazio.
+   *
+   * O DISCRIMINADOR é a alma disto: antes de acreditar em qualquer 404 de
+   * objeto, o BUCKET precisa provar que está saudável (um LIST barato).
+   *   · bucket com erro (NoSuchBucket, rede, 403) → pula o ciclo INTEIRO do
+   *     storage: indisponível NÃO é apagado — marcar aqui condenaria um
+   *     acervo que pode voltar amanhã (o caso Eveo real);
+   *   · bucket saudável + objeto 404 → apagado por fora: marca
+   *     `cloudMissingSince` (e NUNCA remove a linha — ela é o registro da
+   *     perda e o mapa para reencontrar o objeto se for restaurado);
+   *   · objeto voltou (restauração do fornecedor) → desmarca, com log.
+   *
+   * A fila é ordenada por `cloudVerifiedAt` (nunca conferidas primeiro), então
+   * o inventário inteiro é coberto em passadas sucessivas e re-conferido em
+   * rodízio. As cloud-only (sem cópia local) são a prioridade natural: são as
+   * de maior risco.
+   */
+  async verificarAcervoNaNuvem(): Promise<{ conferidas: number; sumidas: number; recuperadas: number } | null> {
+    const intervaloMs = envNumber('CLOUD_VERIFY_INTERVAL_MINUTES', 60, { min: 5, max: 24 * 60, integer: true }) * 60_000;
+    const agora = Date.now();
+    if (this.ultimaVerificacaoAcervoEm && agora - this.ultimaVerificacaoAcervoEm < intervaloMs) return null;
+    this.ultimaVerificacaoAcervoEm = agora;
+
+    const loteTotal = envNumber('CLOUD_VERIFY_BATCH', 200, { min: 10, max: 2_000, integer: true });
+    try {
+      const candidatas = await this.prisma.recording.findMany({
+        where: { cloudKey: { not: null }, cloudUploadedAt: { not: null } },
+        orderBy: [{ cloudVerifiedAt: { sort: 'asc', nulls: 'first' } }, { startedAt: 'asc' }],
+        take: loteTotal,
+        select: { id: true, cloudKey: true, cloudStorageId: true, cloudMissingSince: true },
+      });
+      if (!candidatas.length) return { conferidas: 0, sumidas: 0, recuperadas: 0 };
+
+      const porStorage = new Map<string | null, typeof candidatas>();
+      for (const rec of candidatas) {
+        const chave = rec.cloudStorageId ?? null;
+        const grupo = porStorage.get(chave) ?? [];
+        grupo.push(rec);
+        porStorage.set(chave, grupo);
+      }
+
+      let conferidas = 0;
+      let sumidas = 0;
+      let recuperadas = 0;
+
+      for (const [storageId, grupo] of porStorage) {
+        const storage = await this.resolver.storageDaGravacao(storageId).catch(() => null);
+        if (!storage) continue;
+        const client = this.resolver.clienteDe(storage);
+
+        // O PORTÃO: o bucket precisa provar saúde antes de qualquer veredito
+        // sobre objetos. Um LIST de 1 chave distingue "bucket vivo" de
+        // "storage fora" — e storage fora encerra a conversa sem marcar nada.
+        try {
+          await client.listObjectsPage('', null, 1);
+        } catch (error) {
+          this.logger.warn(
+            `Vigilância do acervo: storage "${storage.name}" indisponível (${error instanceof S3Error ? error.code : 'erro'}) — `
+            + 'nenhum objeto será marcado como sumido; indisponível não é apagado.',
+          );
+          continue;
+        }
+
+        for (const rec of grupo) {
+          const confirmado = await client.headObject(rec.cloudKey as string).catch(() => null);
+          if (!confirmado || !confirmado.verificavel) continue; // sem prova, sem veredito
+          conferidas += 1;
+          if (confirmado.exists) {
+            if (rec.cloudMissingSince) {
+              recuperadas += 1;
+              this.logger.log(`Gravação ${rec.id} VOLTOU ao bucket "${storage.name}" — objeto restaurado pelo fornecedor.`);
+            }
+            await this.prisma.recording.update({
+              where: { id: rec.id },
+              data: { cloudVerifiedAt: new Date(), cloudMissingSince: null },
+            }).catch(() => undefined);
+            continue;
+          }
+          // Bucket saudável, objeto ausente: apagado por fora do sistema.
+          sumidas += rec.cloudMissingSince ? 0 : 1;
+          await this.prisma.recording.update({
+            where: { id: rec.id },
+            data: { cloudVerifiedAt: new Date(), cloudMissingSince: rec.cloudMissingSince ?? new Date() },
+          }).catch(() => undefined);
+        }
+      }
+
+      if (sumidas > 0) {
+        this.logger.error(
+          `Vigilância do acervo: ${sumidas} gravação(ões) SUMIRAM do bucket com ele saudável — apagadas por fora do `
+          + 'sistema (painel do fornecedor, lifecycle, outra ferramenta). As linhas ficam no banco como registro da '
+          + 'perda; se os objetos forem restaurados, a própria vigilância desmarca.',
+        );
+      }
+      return { conferidas, sumidas, recuperadas };
+    } catch {
+      return null;
     }
   }
 
@@ -479,6 +594,9 @@ export class CloudOffloadService {
         cloudKey: { not: null },
         cloudUploadedAt: { not: null, lt: corte },
         localDeletedAt: null,
+        // Cópia remota SUMIDA (bucket saudável, objeto apagado por fora): o
+        // arquivo local voltou a ser a única cópia — a poda não o toca.
+        cloudMissingSince: null,
       },
       orderBy: { startedAt: 'asc' },
       take: 200,

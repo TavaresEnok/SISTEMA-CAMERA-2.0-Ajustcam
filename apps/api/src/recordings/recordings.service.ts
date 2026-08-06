@@ -563,6 +563,15 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       // Erro do bucket não pode virar "Internal server error" mudo: o operador
       // precisa distinguir "objeto sumiu do bucket" de "API quebrada".
       if (error instanceof S3Error && (error.status === 404 || error.code === 'NoSuchKey' || error.code === 'NoSuchBucket')) {
+        // NoSuchKey (bucket vivo, objeto ausente) = apagado por fora: marca na
+        // hora, sem esperar a vigilância periódica chegar nesta gravação.
+        // NoSuchBucket NÃO marca — indisponível não é apagado.
+        if (error.code === 'NoSuchKey') {
+          await this.prisma.recording.updateMany({
+            where: { id: recording.id, cloudMissingSince: null },
+            data: { cloudMissingSince: new Date(), cloudVerifiedAt: new Date() },
+          }).catch(() => undefined);
+        }
         throw new NotFoundException(
           `Esta gravação foi arquivada na nuvem, mas o bucket não a devolveu (${error.code}). `
           + 'Verifique o armazenamento em nuvem desta instalação.',

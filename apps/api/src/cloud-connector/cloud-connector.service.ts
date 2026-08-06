@@ -600,6 +600,8 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         cloudUploadLastSuccessAgeSeconds: saude.ultimoEnvioOkHaSegundos,
         cloudUploadLastErrorCode: saude.ultimaFalhaCodigo,
         cloudUploadLastErrorAgeSeconds: saude.ultimaFalhaHaSegundos,
+        // Objetos que SUMIRAM do bucket com ele saudável — apagados por fora.
+        cloudCopiesMissing: (saude as { sumidasDaNuvem?: number }).sumidasDaNuvem ?? 0,
       };
     } catch {
       return {};

@@ -1192,8 +1192,11 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
         // tirado do disco: apagava-se o OBJETO REMOTO (a única cópia existente)
         // liberando zero byte. O guardião liberta espaço LOCAL; ele nunca tem o
         // direito de tocar no acervo remoto.
+        // `cloudMissingSince: null`: se a vigilância descobriu que o objeto
+        // sumiu do bucket, o arquivo local voltou a ser a ÚNICA cópia — tratar
+        // como "tem backup" apagaria a última.
         let oldest = nuvemAtiva
-          ? await selecionar({ ...semHold, cloudUploadedAt: { not: null }, localDeletedAt: null })
+          ? await selecionar({ ...semHold, cloudUploadedAt: { not: null }, localDeletedAt: null, cloudMissingSince: null })
           : [];
         let modo: 'liberar' | 'apagar' = 'liberar';
 
