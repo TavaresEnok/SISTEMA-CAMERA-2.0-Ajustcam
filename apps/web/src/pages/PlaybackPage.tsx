@@ -251,7 +251,9 @@ const API_TIMEOUT_MS = 20000;
 const PLAYBACK_TIMEOUT_DIRECT_MS = 15000;
 const PLAYBACK_TIMEOUT_COMPAT_MS = 150000; // 150s: FFmpeg HEVC→H264 pode levar até 120s na primeira execução
 // Teto da espera pela playlist VOD antes de o playback seguir pelo caminho antigo.
-const VOD_PROBE_GRACE_MS = 2500;
+// Com o contrato da playlist reparado ela responde rápido; 2,5s de teto só
+// puniam o primeiro play quando a API estava lenta.
+const VOD_PROBE_GRACE_MS = 1000;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -310,15 +312,18 @@ function buildTimelineSegments(
  * ela o operador via "Request failed" genérico e a página "curava" erro de
  * servidor com transcodificação, que não cura nada.
  */
-async function explicarFalhaDoVideo(url: string | null): Promise<string | null> {
+async function explicarFalhaDoVideo(url: string | null): Promise<{ mensagem: string; preparando: boolean } | null> {
   if (!url) return null;
   try {
     const resposta = await fetch(url, { headers: { Range: 'bytes=0-1' } });
     if (resposta.ok) return null;
-    const corpo = await resposta.json().catch(() => null) as { message?: string } | null;
-    return corpo?.message
-      ? `O servidor recusou o vídeo: ${corpo.message}`
-      : `O servidor recusou o vídeo (HTTP ${resposta.status}).`;
+    const corpo = await resposta.json().catch(() => null) as { message?: string; preparing?: boolean } | null;
+    return {
+      mensagem: corpo?.message
+        ? (corpo.preparing ? corpo.message : `O servidor recusou o vídeo: ${corpo.message}`)
+        : `O servidor recusou o vídeo (HTTP ${resposta.status}).`,
+      preparando: Boolean(corpo?.preparing),
+    };
   } catch {
     return null;
   }
@@ -363,18 +368,22 @@ async function createPlaybackToken(recordingId: string, accessToken: string) {
 }
 
 async function downloadRecording(recordingId: string, cameraCode: string, accessToken: string) {
-  const response = await axios.get(`${API_URL}/recordings/${recordingId}/download`, {
-    headers: authHeaders(accessToken),
-    responseType: 'blob',
-  });
-  const url = window.URL.createObjectURL(response.data);
+  // Token curto + link direto (o MESMO mecanismo do ZIP): o navegador baixa em
+  // streaming nativo, com barra de progresso. O XHR com responseType blob
+  // materializava o MP4 INTEIRO na memória da aba — um segmento grande travava
+  // o navegador do operador — e ainda escondia a mensagem de erro do servidor
+  // dentro de um Blob ilegível.
+  const { data } = await axios.post<{ downloadToken: string }>(
+    `${API_URL}/recordings/download-batch-token`,
+    { recordingIds: [recordingId] },
+    { headers: authHeaders(accessToken), withCredentials: true },
+  );
   const anchor = document.createElement('a');
-  anchor.href = url;
+  anchor.href = `${API_URL}/recordings/${recordingId}/download-file?token=${encodeURIComponent(data.downloadToken)}`;
   anchor.download = `${cameraCode}-${recordingId}.mp4`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  window.URL.revokeObjectURL(url);
 }
 
 async function downloadClip(downloadUrl: string, clipId: string, reason: string, accessToken: string) {
@@ -487,6 +496,8 @@ export default function PlaybackPage() {
   // antes, as duas situações deixavam o spinner girando para sempre.
   const slowRetryRef = useRef<string | null>(null);
   const stallRetryRef = useRef<string | null>(null);
+  /** Tentativas de recarga por gravação enquanto o transcode prepara (503). */
+  const preparandoRetryRef = useRef<Map<string, number>>(new Map());
   const [loadedRanges, setLoadedRanges] = useState<TimeRange[]>([]);
   const [windowedFallback, setWindowedFallback] = useState(!WINDOWED_TIMELINE);
   const loadKeyRef = useRef('');
@@ -1733,9 +1744,18 @@ export default function PlaybackPage() {
     event.preventDefault();
     const factor = event.deltaY < 0 ? 1.35 : 1 / 1.35;
     const nextZoom = clamp(zoom * factor, 1, TIMELINE_MAX_ZOOM);
+    // Âncora no CURSOR: o minuto sob o mouse fica parado enquanto a escala
+    // muda — é o que o title da régua sempre prometeu. Recentrar no playhead
+    // fazia o trecho que o operador estava mirando "fugir" da tela.
+    const rect = el.getBoundingClientRect();
+    const janelaAtual = TOTAL_MINS / zoom;
+    const janelaNova = TOTAL_MINS / nextZoom;
+    const fracao = rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0.5;
+    const cursorMin = viewCenter - janelaAtual / 2 + fracao * janelaAtual;
+    const novoCentro = cursorMin + (0.5 - fracao) * janelaNova;
     setZoom(nextZoom);
-    setViewCenter(playhead);
-  }, [playhead, zoom]);
+    setViewCenter(clamp(novoCentro, janelaNova / 2, TOTAL_MINS - janelaNova / 2));
+  }, [viewCenter, zoom]);
 
   useEffect(() => {
     const el = timelineTrackRef.current;
@@ -2418,6 +2438,7 @@ export default function PlaybackPage() {
       <video
         key={options.elementKey}
         ref={options.bindRef}
+        playsInline
         src={options.src ?? undefined}
         poster={isActive ? selectedThumbnailUrl ?? undefined : undefined}
         crossOrigin="use-credentials"
@@ -2571,10 +2592,24 @@ export default function PlaybackPage() {
           void (async () => {
             // Erro do SERVIDOR (404 da nuvem, 401 de token) tem explicação no
             // corpo — e transcodificar não cura nenhum deles.
-            const detalhe = await explicarFalhaDoVideo(activeSourceUrl);
+            const falha = await explicarFalhaDoVideo(activeSourceUrl);
             const falhou = selectedRecordingId ? recordingById.get(selectedRecordingId) : null;
             const quando = falhou ? format(new Date(falhou.startedAt), 'HH:mm:ss') : null;
-            if (detalhe) {
+            if (falha?.preparando) {
+              // Transcode em preparo no servidor (assíncrono): mostra o aviso e
+              // tenta de novo sozinho — o vídeo começa quando ficar pronto.
+              setVideoError(falha.mensagem);
+              const tentativas = (preparandoRetryRef.current.get(selectedRecordingId ?? '') ?? 0) + 1;
+              preparandoRetryRef.current.set(selectedRecordingId ?? '', tentativas);
+              if (tentativas <= 40) {
+                window.setTimeout(() => setReloadNonce((current) => current + 1), 4000);
+              } else {
+                setVideoError('A preparação da versão compatível está demorando além do normal. Tente novamente mais tarde.');
+              }
+              return;
+            }
+            if (falha) {
+              const detalhe = falha.mensagem;
               if (selectedRecordingId && !autoSkipTriedRef.current.has(selectedRecordingId)) {
                 autoSkipTriedRef.current.add(selectedRecordingId);
                 if (selectNextUsableRecording(selectedRecordingId)) {

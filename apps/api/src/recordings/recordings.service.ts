@@ -18,6 +18,7 @@ import { AccessControlService } from '../access-control/access-control.service';
 import { CloudConnectorService } from '../cloud-connector/cloud-connector.service';
 import { S3Client, S3Error } from '../cloud-storage/s3-client';
 import { resolverRange, validadoresDeCache } from './helpers/http-range.helper';
+import { montarManifestoZip } from './helpers/zip-manifest.helper';
 import { CloudStorageResolverService } from '../cloud-storage/cloud-storage-resolver.service';
 import { AuthService } from '../auth/auth.service';
 import { type AuthUser } from '../common/types/auth-user.type';
@@ -920,13 +921,34 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async streamRecordingCompatible(recordingId: string, res: Response) {
-    const filePath = await this.ensureCompatibleFile(recordingId);
-    const stats = statSync(filePath);
+    // A PRIMEIRA reprodução de um HEVC segurava a requisição HTTP pelos até
+    // 5 minutos do FFmpeg — o operador esperava com a tela travada e, se o
+    // transcode estourasse o prazo, ganhava um 500 depois de tudo isso. Agora:
+    // cache pronto → serve; sem cache → dispara o preparo em SEGUNDO PLANO
+    // (com o dedup de sempre) e responde 503 na hora, com `preparing: true` —
+    // o player mostra "preparando…" e tenta de novo sozinho.
+    const recording = await this.ensureRecordingExists(recordingId);
+    const recordingsRoot = process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    const cachedPath = join(recordingsRoot, '.playback-compatible', recording.cameraId, `${recording.id}.mp4`);
+    if (!existsSync(cachedPath) || statSync(cachedPath).size <= 0) {
+      void this.ensureCompatibleFile(recordingId).catch((error) => {
+        this.logger.warn(`Preparo da versão compatível falhou recording=${recordingId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      res.status(503)
+        .setHeader('Retry-After', '5')
+        .json({
+          statusCode: 503,
+          preparing: true,
+          message: 'A versão compatível (H.265→H.264) está sendo preparada. O vídeo começa sozinho assim que ficar pronta.',
+        });
+      return;
+    }
+    const stats = statSync(cachedPath);
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
 
-    this.entregarArquivo(res, filePath, stats);
+    this.entregarArquivo(res, cachedPath, stats);
   }
 
   async prepareCompatiblePlayback(recordingId: string) {
@@ -973,17 +995,26 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     const uniqueIds = [...new Set(recordingIds)].slice(0, 50);
 
     const entries: Array<{ filePath: string; entryName: string }> = [];
+    const puladas: Array<{ id: string; motivo: string }> = [];
     const usedNames = new Set<string>();
     for (const id of uniqueIds) {
-      const recording = await this.ensureRecordingExists(id);
+      let recording: Awaited<ReturnType<typeof this.ensureRecordingExists>>;
+      try {
+        recording = await this.ensureRecordingExists(id);
+      } catch {
+        puladas.push({ id, motivo: 'gravação não encontrada no banco' });
+        continue;
+      }
       let filePath = ensureFileUnderRoot(recordingsRoot, recording.filePath);
       if (!existsSync(filePath) || statSync(filePath).size === 0) {
         // Gravação já offloadada: baixa do bucket para o cache antes de
-        // empacotar. Sem isto o ZIP pulava o item EM SILÊNCIO — o operador
-        // pedia 20 gravações, recebia 3 e não tinha como saber por quê. O
-        // download individual já tratava a nuvem; o lote não.
+        // empacotar. Se falhar, o item entra no MANIFESTO — pedir 20 e
+        // receber 3 sem explicação é inaceitável num acervo probatório.
         const materializado = await this.materializeFromCloud(recording).catch(() => null);
-        if (!materializado) continue;
+        if (!materializado) {
+          puladas.push({ id, motivo: 'sem arquivo local e o bucket não devolveu a cópia' });
+          continue;
+        }
         filePath = materializado;
       }
       const cameraLabel = (recording.camera?.name || 'camera')
@@ -1012,6 +1043,10 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="gravacoes-${zipDate}.zip"`);
 
+    if (puladas.length) {
+      this.logger.warn(`ZIP em lote: ${puladas.length} de ${uniqueIds.length} gravação(ões) fora do pacote — ver MANIFESTO.txt no próprio ZIP.`);
+    }
+
     const archive = archiver('zip', { store: true });
     archive.on('warning', (warning) => {
       this.logger.warn(`Aviso ao gerar ZIP de gravações: ${warning.message}`);
@@ -1025,11 +1060,14 @@ export class RecordingsService implements OnModuleInit, OnModuleDestroy {
       if (!res.writableEnded) archive.destroy();
     });
     archive.pipe(res);
+    // O MANIFESTO vai SEMPRE: é a diferença entre "recebi 3 de 20 e não sei
+    // por quê" e um pacote que presta contas de cada item pedido.
+    archive.append(montarManifestoZip(uniqueIds.length, entries.map((e) => e.entryName), puladas), { name: 'MANIFESTO.txt' });
     for (const entry of entries) {
       archive.file(entry.filePath, { name: entry.entryName });
     }
     await archive.finalize();
-    return { files: entries.length };
+    return { files: entries.length, skipped: puladas.length };
   }
 
   async registerInternal(dto: RegisterRecordingDto) {

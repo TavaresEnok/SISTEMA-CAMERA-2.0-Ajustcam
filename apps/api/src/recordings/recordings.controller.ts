@@ -491,6 +491,35 @@ export class RecordingsController {
     return result;
   }
 
+  // Download individual por TOKEN curto (mesmo token do lote, com 1 id): o
+  // navegador baixa por link direto — streaming nativo, barra de progresso —
+  // em vez do XHR que materializava o MP4 INTEIRO na memória da aba (um
+  // segmento grande travava o navegador do operador). A autorização mora na
+  // emissão do token (OPERATOR + exportEvidence), como no ZIP.
+  @Public()
+  @SkipThrottle()
+  @Get('recordings/:id/download-file')
+  async downloadRecordingWithToken(
+    @Param('id') id: string,
+    @Query('token') token: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const tokenValue = token?.trim();
+    if (!tokenValue) {
+      throw new UnauthorizedException('Token de download ausente.');
+    }
+    const payload = await this.authService.verifyDownloadZipToken(tokenValue);
+    if (!payload.recordingIds.includes(id)) {
+      throw new UnauthorizedException('Token não autoriza esta gravação.');
+    }
+    const tokenUser = await this.authService.me(payload.sub);
+    const recording = await this.recordingsService.ensureRecordingExists(id);
+    await this.accessControlService.assertCanPlaybackCamera(tokenUser, recording.cameraId);
+    await this.auditService.log(tokenUser.id, 'recording.download', 'Recording', id, { via: 'token' }, req);
+    return this.recordingsService.downloadRecording(id, res);
+  }
+
   @Roles(UserRole.OPERATOR)
   @RequirePermission('exportEvidence')
   @Get('recordings/:id/snapshot')
