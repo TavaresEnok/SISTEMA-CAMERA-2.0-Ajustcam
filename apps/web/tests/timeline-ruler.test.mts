@@ -110,3 +110,19 @@ test('o minimapa é barato: 720 buckets no máximo, seja qual for o acervo', () 
   const buckets = agregarMinimapa(spans, 1440, 720);
   assert.ok(buckets.length <= 720);
 });
+
+test('minimapa de COBERTURA: sem os spans de movimento, gravação volta a aparecer', () => {
+  // Câmera com detecção o dia todo: agregando por severidade, o movimento
+  // pintava TUDO de amarelo e o overview parava de responder "onde há
+  // gravação". O chamador agora filtra movimento antes de agregar — este teste
+  // trava o comportamento da lib nesse uso: só cobertura (e alarme) pintam.
+  const spans = [
+    { start: 0, end: 720, type: 'recorded' },
+    { start: 710, end: 712, type: 'alarm' },
+  ];
+  const buckets = agregarMinimapa(spans, 1440, 144);
+  const tipos = new Set(buckets.map((b) => b.tipo));
+  assert.ok(tipos.has('recorded'), 'a cobertura tem de aparecer');
+  assert.ok(tipos.has('alarm'), 'alarme continua visível no mapa do dia');
+  assert.ok(!tipos.has('motion'), 'movimento não entra no overview de cobertura');
+});

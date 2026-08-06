@@ -2091,8 +2091,20 @@ export default function PlaybackPage() {
   // diz "onde estou" quando a faixa detalhada está com zoom de 7 minutos.
   // Agregado em buckets (não por segmento): 12.000 gravações viram 12.000 nós
   // de DOM e o pan trava.
+  // SÓ COBERTURA DE GRAVAÇÃO — sem eventos. A primeira versão agregava por
+  // severidade (movimento por cima de gravação) e, numa câmera com detecção o
+  // dia todo, o minimapa virava uma barra amarela contínua que não respondia
+  // mais a única pergunta de um overview: ONDE HÁ GRAVAÇÃO, de onde até onde
+  // (feedback do dono, 2026-08-07). É como os grandes VMS desenham o resumo:
+  // a trilha de cobertura é uma; eventos são detalhe da faixa de baixo. A
+  // exceção é ALARME: raro e grave demais para sumir do mapa do dia.
   const minimapaBuckets = useMemo(
-    () => agregarMinimapa(timelineSegments as Array<{ start: number; end: number; type: string }>, TOTAL_MINS, 720),
+    () => agregarMinimapa(
+      (timelineSegments as Array<{ start: number; end: number; type: string }>)
+        .filter((s) => s.type === 'recorded' || s.type === 'recorded_broken' || s.type === 'alarm'),
+      TOTAL_MINS,
+      720,
+    ),
     [timelineSegments],
   );
 
