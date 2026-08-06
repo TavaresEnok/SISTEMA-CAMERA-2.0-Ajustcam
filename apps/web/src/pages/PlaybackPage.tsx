@@ -471,6 +471,24 @@ export default function PlaybackPage() {
   // antes, as duas situações deixavam o spinner girando para sempre.
   const minimapRef = useRef<HTMLDivElement | null>(null);
   const minimapDragRef = useRef(false);
+  // O minimapa tem 20px de altura: arrastando, o mouse escorrega para fora
+  // dele o tempo todo. Com o listener no próprio elemento o arraste morria no
+  // meio — capturar na JANELA é o que todo scrubber sério faz.
+  useEffect(() => {
+    const aoMover = (event: globalThis.MouseEvent) => {
+      if (!minimapDragRef.current || !minimapRef.current) return;
+      const rect = minimapRef.current.getBoundingClientRect();
+      const minuto = ((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS;
+      setViewCenterFromMinimap(minuto);
+    };
+    const aoSoltar = () => { minimapDragRef.current = false; };
+    window.addEventListener('mousemove', aoMover);
+    window.addEventListener('mouseup', aoSoltar);
+    return () => {
+      window.removeEventListener('mousemove', aoMover);
+      window.removeEventListener('mouseup', aoSoltar);
+    };
+  }, []);
   const slowRetryRef = useRef<string | null>(null);
   const stallRetryRef = useRef<string | null>(null);
   /** Tentativas de recarga por gravação enquanto o transcode prepara (503). */
@@ -1788,6 +1806,15 @@ export default function PlaybackPage() {
     };
   }, []);
 
+  const setViewCenterFromMinimap = useCallback((minuto: number) => {
+    setViewCenter((atual) => {
+      const janela = TOTAL_MINS / Math.max(1, zoomRef.current);
+      const limite = janela / 2;
+      const alvo = clamp(minuto, limite, TOTAL_MINS - limite);
+      return Math.abs(alvo - atual) < 0.01 ? atual : alvo;
+    });
+  }, []);
+
   const setPlayheadFromMinute = useCallback((minute: number) => {
     // Navegação explícita do usuário: libera a re-seleção de segmento e retoma a
     // reprodução assim que o vídeo estiver pronto (comportamento padrão de VMS).
@@ -3006,17 +3033,8 @@ export default function PlaybackPage() {
               onMouseDown={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
                 minimapDragRef.current = true;
-                const minuto = ((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS;
-                setViewCenter(clamp(minuto, zoomedWindow / 2, TOTAL_MINS - zoomedWindow / 2));
+                setViewCenterFromMinimap(((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS);
               }}
-              onMouseMove={(event) => {
-                if (!minimapDragRef.current) return;
-                const rect = event.currentTarget.getBoundingClientRect();
-                const minuto = ((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS;
-                setViewCenter(clamp(minuto, zoomedWindow / 2, TOTAL_MINS - zoomedWindow / 2));
-              }}
-              onMouseUp={() => { minimapDragRef.current = false; }}
-              onMouseLeave={() => { minimapDragRef.current = false; }}
             >
               {minimapaBuckets.map((bucket) => (
                 <div
@@ -3063,9 +3081,21 @@ export default function PlaybackPage() {
                   </div>
                 );
               })}
+              {/* Limites EXATOS da janela nas bordas (ideia do Rhombus): os
+                  rótulos internos ficam em horários redondos, mas o operador
+                  também precisa saber "estou vendo de quando até quando" —
+                  sobretudo com zoom, quando nenhuma hora cheia aparece. */}
+              <div className="pointer-events-none absolute top-0 left-0 rounded-sm bg-[hsl(222,14%,12%)] px-1 font-mono text-[9px] tabular-nums text-white/70">
+                {format(addMinutes(dayStart, viewStart), 'HH:mm')}
+              </div>
+              <div className="pointer-events-none absolute top-0 right-0 rounded-sm bg-[hsl(222,14%,12%)] px-1 font-mono text-[9px] tabular-nums text-white/70">
+                {format(addMinutes(dayStart, viewEnd), 'HH:mm')}
+              </div>
               {ticksDaRegua.ticks.filter((t) => t.nivel === 'maior').map((tick) => {
                 const pct = ((tick.minuto - viewStart) / (viewEnd - viewStart)) * 100;
-                if (pct < 0 || pct > 100) return null;
+                // Margem: rótulo interno colado na borda brigaria com o rótulo
+                // de limite da janela e sairia sobreposto.
+                if (pct < 6 || pct > 94) return null;
                 const rotulo = ticksDaRegua.granularidade.formato === 'HH'
                   ? format(addMinutes(dayStart, tick.minuto), 'HH') + 'h'
                   : format(addMinutes(dayStart, tick.minuto), ticksDaRegua.granularidade.formato === 'HH:mm' ? 'HH:mm' : 'HH:mm:ss');
