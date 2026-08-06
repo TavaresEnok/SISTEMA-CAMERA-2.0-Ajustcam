@@ -3034,9 +3034,15 @@ export default function PlaybackPage() {
             {/* ── MINIMAPA DO DIA ────────────────────────────────────────
                 O dia INTEIRO, sempre 00:00→24:00, sem nunca dar zoom. É a
                 âncora que responde "onde eu estou" quando a faixa detalhada
-                está mostrando 7 minutos — sem ele, o operador com zoom se
-                perde no dia. Retângulo = janela visível: clique centra,
-                arraste move. Padrão de Milestone/Frigate. */}
+                está mostrando 7 minutos. Retângulo = janela visível: clique
+                centra, arraste move. Padrão de Milestone/Frigate.
+
+                SÓ APARECE COM ZOOM. Sem zoom, a janela É o dia inteiro — o
+                minimapa vira uma cópia pixel a pixel da faixa logo abaixo, e
+                o operador enxerga "duas timelines" iguais sem saber qual
+                usar (defeito relatado em produção). Overview e detalhe só
+                merecem existir quando mostram coisas DIFERENTES. */}
+            {zoomedWindow < TOTAL_MINS - 0.5 && (
             <div
               ref={minimapRef}
               className="relative mb-1.5 h-5 cursor-pointer select-none overflow-hidden rounded-sm border border-[hsl(var(--border))] bg-[hsl(222,14%,12%)]"
@@ -3074,6 +3080,7 @@ export default function PlaybackPage() {
                 style={{ left: `${(playhead / TOTAL_MINS) * 100}%` }}
               />
             </div>
+            )}
 
             {/* ── RÉGUA DE TICKS ────────────────────────────────────────────
                 Três níveis em horários REDONDOS, com granularidade que
