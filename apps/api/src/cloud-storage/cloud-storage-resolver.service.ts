@@ -83,12 +83,20 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
     const provisionado = await this.legado();
     if (provisionado) {
       const reconciliado = await this.reconciliar(provisionado).catch((error) => {
-        // Reconciliar é conveniência; falhar aqui não pode parar o offload.
-        this.logger.warn(`Não foi possível reconciliar o storage provisionado: ${String(error)}`);
+        // Reconciliar NÃO é conveniência: é ele que dá identidade (`id`) ao
+        // storage. Seguir com `provisionado` (id nulo) fazia o ciclo subir
+        // gravações com `cloudStorageId: null` = "storage legado", que SEGUE O
+        // BUCKET ATIVO para sempre — na próxima troca de fornecedor elas
+        // seriam procuradas no bucket novo e o acervo delas sumiria, sem como
+        // distinguir depois. Uma falha transitória de banco aqui vale um ciclo
+        // de envio adiado (as gravações ficam no disco e o cron de 15 min
+        // tenta de novo); nunca vale ancorar prova no lugar errado.
+        this.logger.error(
+          `Reconciliação do storage falhou — envio ADIADO neste ciclo para não ancorar gravações ao storage errado: ${String(error)}`,
+        );
         return null;
       });
-      if (reconciliado) return reconciliado;
-      return provisionado;
+      return reconciliado;
     }
     return this.semStorageProvisionado();
   }

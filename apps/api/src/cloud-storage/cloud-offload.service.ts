@@ -6,6 +6,7 @@ import { CloudConnectorService, type CloudStorageConfig } from '../cloud-connect
 import { ensureFileUnderRoot } from '../recordings/helpers/safe-file.helper';
 import { S3Client, S3Error } from './s3-client';
 import { CloudStorageResolverService } from './cloud-storage-resolver.service';
+import { avaliarConfirmacao, lerTrechoExato } from './helpers/upload-verification.helper';
 import { envNumber } from '../common/config/env-number.helper';
 import {
   DEFAULT_STORAGE_POLICY,
@@ -93,6 +94,62 @@ export type OffloadResult = {
 export class CloudOffloadService {
   private readonly logger = new Logger(CloudOffloadService.name);
   private running = false;
+  // Estado de saúde do envio, para o heartbeat contar à Central. Opcionais e
+  // atribuídos em método (não inicializador de campo): parte da suíte monta o
+  // serviço com Object.create, onde inicializador não roda.
+  private ultimoEnvioOkEm?: Date | null;
+  private ultimaFalhaEm?: Date | null;
+  private ultimaFalhaCodigo?: string | null;
+  /** Gravações cujo HEAD pós-upload devolve 403 — reenvio não muda nada. */
+  private enviosInverificaveis?: Set<string>;
+
+  /**
+   * Saúde do envio para a nuvem, na forma que o heartbeat consegue carregar.
+   *
+   * Existe porque o episódio real ficou INVISÍVEL: horas de NoSuchBucket, 100%
+   * das subidas falhando, e a Central mostrando tudo normal — nenhuma métrica
+   * carregava a informação. Falha aqui devolve null; diagnóstico não pode
+   * atrapalhar o heartbeat, que é a linha de vida com a Central.
+   */
+  async saudeDoEnvio(): Promise<{
+    configurado: boolean;
+    pendentes: number;
+    maisAntigaPendenteSegundos: number | null;
+    ultimoEnvioOkHaSegundos: number | null;
+    ultimaFalhaCodigo: string | null;
+    ultimaFalhaHaSegundos: number | null;
+  } | null> {
+    try {
+      const policy = await this.getPolicy();
+      const tipos = enabledTriggerModes(policy);
+      if (!policy.enabled || !tipos.length) {
+        return {
+          configurado: false,
+          pendentes: 0,
+          maisAntigaPendenteSegundos: null,
+          ultimoEnvioOkHaSegundos: null,
+          ultimaFalhaCodigo: null,
+          ultimaFalhaHaSegundos: null,
+        };
+      }
+      const filtro = { cloudKey: null, triggerMode: { in: tipos } };
+      const [pendentes, maisAntiga] = await Promise.all([
+        this.prisma.recording.count({ where: filtro }),
+        this.prisma.recording.findFirst({ where: filtro, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
+      ]);
+      const idade = (data?: Date | null) => (data ? Math.max(0, Math.floor((Date.now() - data.getTime()) / 1000)) : null);
+      return {
+        configurado: true,
+        pendentes,
+        maisAntigaPendenteSegundos: idade(maisAntiga?.startedAt ?? null),
+        ultimoEnvioOkHaSegundos: idade(this.ultimoEnvioOkEm ?? null),
+        ultimaFalhaCodigo: this.ultimaFalhaCodigo ?? null,
+        ultimaFalhaHaSegundos: idade(this.ultimaFalhaEm ?? null),
+      };
+    } catch {
+      return null;
+    }
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -288,11 +345,10 @@ export class CloudOffloadService {
               try {
                 await client.putObjectMultipart(
                   key,
-                  async (offset, length) => {
-                    const buf = Buffer.alloc(length);
-                    await handle.read(buf, 0, length, offset);
-                    return buf;
-                  },
+                  // Leitura EXATA por parte: ignorar `bytesRead` deixava a
+                  // cauda do Buffer em zeros — objeto truncado fabricado por
+                  // nós, "confirmado" e com o original apagado pela poda.
+                  (offset, length) => lerTrechoExato(handle, offset, length),
                   tamanho,
                   {
                     contentType: 'video/mp4',
@@ -315,13 +371,29 @@ export class CloudOffloadService {
               await client.putObject(key, conteudo, 'video/mp4');
             }
 
-            // CONFIRMAÇÃO: o PUT ter respondido 200 não basta. Relemos o objeto para
-            // garantir que ele existe de fato antes de considerar a gravação salva —
-            // é essa confirmação que autoriza, mais tarde, apagar o local.
+            // CONFIRMAÇÃO: o PUT ter respondido 200 não basta. Relemos o objeto
+            // (existência E TAMANHO) antes de considerar a gravação salva — é
+            // essa confirmação que autoriza, mais tarde, apagar o local. Objeto
+            // do tamanho errado é prova corrompida esperando a poda.
             const confirmado = await client.headObject(key);
-            if (!confirmado.exists) {
-              this.logger.warn(`Upload de ${rec.id} respondeu OK mas o objeto não está no bucket; não será marcado.`);
-              return { ok: false, bytes: 0 };
+            const veredito = avaliarConfirmacao(confirmado, tamanho);
+            if (!veredito.ok) {
+              if (veredito.motivo === 'inverificavel') {
+                // 403 no HEAD: reenviar não muda nada — o próximo HEAD recusa
+                // igual. Sem este corte, o ciclo pagava o MESMO upload para
+                // sempre. Uma gravação inverificável fica de fora até o
+                // processo reiniciar (ou a credencial ganhar leitura).
+                this.enviosInverificaveis ??= new Set<string>();
+                if (!this.enviosInverificaveis.size) {
+                  this.logger.error(
+                    'Envio à nuvem INVERIFICÁVEL: a credencial não tem permissão de leitura (403 no HEAD). '
+                    + 'O upload até completa, mas sem confirmação nada será marcado como enviado nem podado. '
+                    + 'Conceda GetObject/ListBucket à credencial — até lá, as gravações afetadas ficam fora da fila.',
+                  );
+                }
+                this.enviosInverificaveis.add(rec.id);
+              }
+              this.logger.warn(`Upload de ${rec.id} não confirmado (${veredito.motivo}): ${veredito.detalhe}. Não será marcado.`);
               return { ok: false, bytes: 0 };
             }
 
@@ -333,10 +405,15 @@ export class CloudOffloadService {
               // `null` = storage legado (a configuração única), e segue válido.
               data: { cloudKey: key, cloudUploadedAt: new Date(), cloudStorageId: storageId ?? null },
             });
-        
+
+            this.ultimoEnvioOkEm = new Date();
             return { ok: true, bytes: tamanho };
           } catch (error) {
             const detalhe = error instanceof S3Error ? `${error.code} (${error.status})` : String(error);
+            // Registra a ÚLTIMA falha para o heartbeat: foi a ausência deste
+            // registro que deixou horas de NoSuchBucket invisíveis à Central.
+            this.ultimaFalhaEm = new Date();
+            this.ultimaFalhaCodigo = error instanceof S3Error ? error.code : 'Erro';
             this.logger.warn(`Falha ao subir gravação ${rec.id}: ${detalhe}`);
             return { ok: false, bytes: 0 };
             // Sem marcação no banco, o próximo ciclo tenta de novo. É a
@@ -348,7 +425,11 @@ export class CloudOffloadService {
       // Fila com N trabalhadores: cada um puxa a próxima assim que termina a sua.
       // Dividir em blocos fixos deixaria trabalhador ocioso esperando o vídeo mais
       // lento do bloco.
-      const fila = [...pendentes];
+      // Gravações com confirmação impossível (403 no HEAD) ficam de fora:
+      // reenviar paga o mesmo upload de novo e o HEAD recusa igual.
+      const fila = this.enviosInverificaveis?.size
+        ? pendentes.filter((rec) => !this.enviosInverificaveis!.has(rec.id))
+        : [...pendentes];
       const trabalhadores = Array.from({ length: Math.min(concorrencia, fila.length) }, async () => {
         for (;;) {
           const rec = fila.shift();

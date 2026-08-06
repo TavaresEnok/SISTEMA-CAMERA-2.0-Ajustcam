@@ -1,4 +1,16 @@
 import { createHash, createHmac } from 'node:crypto';
+import { envNumber } from '../common/config/env-number.helper';
+
+/**
+ * Teto de espera de UMA requisição ao storage. Sem ele, um endpoint que aceita
+ * a conexão e nunca responde (firewall em DROP, LB degradado) pendura o upload
+ * e o playback por tempo indefinido — e o ciclo de envio segura `running=true`
+ * atropelando os próximos. É proteção contra TRAVAR, não meta de latência:
+ * generoso o bastante para uma parte de 16 MB num link lento.
+ */
+function s3TimeoutMs(): number {
+  return envNumber('CLOUD_S3_TIMEOUT_MS', 120_000, { min: 5_000, max: 600_000, integer: true });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLIENTE S3 MÍNIMO (AWS Signature V4), SEM SDK.
@@ -245,7 +257,7 @@ export class S3Client {
     extraHeaders?: Record<string, string>;
     // O ETag é devolvido porque o upload multipart precisa dele: a conclusão
     // envia a lista de ETags na ordem das partes, e sem eles o bucket recusa.
-  }): Promise<{ status: number; body: Buffer; etag: string | null }> {
+  }): Promise<{ status: number; body: Buffer; etag: string | null; contentLength: number | null }> {
     const signed = signS3Request(this.config, params);
     let response: Response;
     try {
@@ -253,9 +265,12 @@ export class S3Client {
         method: signed.method,
         headers: signed.headers,
         body: params.payload?.length ? new Uint8Array(params.payload) : undefined,
+        // Cobre a operação INTEIRA (cabeçalhos + corpo): aqui o corpo é sempre
+        // materializado em Buffer, então não há streaming longo a preservar.
+        signal: AbortSignal.timeout(s3TimeoutMs()),
       });
     } catch (error) {
-      // Falha de rede/DNS/TLS: mensagem sem credencial, com a causa original.
+      // Falha de rede/DNS/TLS/timeout: mensagem sem credencial, com a causa.
       const detail = error instanceof Error ? error.message : String(error);
       throw new S3Error(0, 'NetworkError', `Falha de conexão com o storage: ${detail}`);
     }
@@ -265,7 +280,13 @@ export class S3Client {
       const code = parseS3ErrorCode(body.toString('utf8'));
       throw new S3Error(response.status, code, `S3 respondeu ${response.status} (${code}).`);
     }
-    return { status: response.status, body, etag: response.headers.get('etag') };
+    const contentLength = Number(response.headers.get('content-length'));
+    return {
+      status: response.status,
+      body,
+      etag: response.headers.get('etag'),
+      contentLength: Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null,
+    };
   }
 
   private fullKey(key: string): string {
@@ -315,11 +336,19 @@ export class S3Client {
     });
 
     let response: Response;
+    // Timeout SÓ na fase de cabeçalhos: o corpo é um stream que pode durar
+    // minutos legítimos (um segmento de centenas de MB tocando no navegador).
+    // Depois que os cabeçalhos chegam, o timer é desarmado e o corpo flui.
+    const controlador = new AbortController();
+    const timer = setTimeout(() => controlador.abort(new Error('timeout de cabeçalhos do storage')), s3TimeoutMs());
+    if (typeof timer.unref === 'function') timer.unref();
     try {
-      response = await fetch(signed.url, { method: 'GET', headers: signed.headers });
+      response = await fetch(signed.url, { method: 'GET', headers: signed.headers, signal: controlador.signal });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new S3Error(0, 'NetworkError', `Falha de conexão com o storage: ${detail}`);
+    } finally {
+      clearTimeout(timer);
     }
 
     if (!response.ok && response.status !== 206) {
@@ -340,13 +369,25 @@ export class S3Client {
     await this.request({ method: 'DELETE', key: this.fullKey(key) });
   }
 
-  async headObject(key: string): Promise<{ exists: boolean }> {
+  /**
+   * `verificavel: false` = o bucket RECUSOU a consulta (403 — credencial
+   * write-only, sem GetObject/ListBucket). Não é "não existe": tratar 403 como
+   * ausência mandava o ciclo REENVIAR o mesmo arquivo para sempre — PUT
+   * infinito pago, fila que nunca drena. O chamador decide o que fazer com uma
+   * confirmação impossível; este método só não pode mentir sobre ela.
+   * `contentLength` volta para o chamador comparar com o tamanho enviado —
+   * "existe" não basta para autorizar apagar a cópia local.
+   */
+  async headObject(key: string): Promise<{ exists: boolean; contentLength: number | null; verificavel: boolean }> {
     try {
-      await this.request({ method: 'HEAD', key: this.fullKey(key) });
-      return { exists: true };
+      const r = await this.request({ method: 'HEAD', key: this.fullKey(key) });
+      return { exists: true, contentLength: r.contentLength, verificavel: true };
     } catch (error) {
       if (error instanceof S3Error && (error.status === 404 || error.code === 'NoSuchKey')) {
-        return { exists: false };
+        return { exists: false, contentLength: null, verificavel: true };
+      }
+      if (error instanceof S3Error && error.status === 403) {
+        return { exists: false, contentLength: null, verificavel: false };
       }
       throw error;
     }

@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { existsSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
-import { statfs } from 'node:fs/promises';
+import { statfs, readdir, rmdir } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { retencaoEfetiva } from './helpers/retencao-efetiva.helper';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -923,7 +923,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     // agiu, para que instalações sem nuvem continuem com a saída idêntica.
     const orfaosNuvem = await this.cleanupOrphanCloudObjects();
     if (orfaosNuvem > 0) result.orphanCloudObjectsDeleted = orfaosNuvem;
-    this.cleanEmptyDirs(this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings');
+    await this.cleanEmptyDirs(this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings');
     await this.checkDiskUsage(protection);
     this.logger.log(`Retenção concluída: ${JSON.stringify(result)}.`);
     return result;
@@ -1258,14 +1258,40 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private cleanEmptyDirs(dir: string) {
-    if (!existsSync(dir)) return;
-    const stats = statSync(dir);
-    if (!stats.isDirectory()) return;
-    for (const file of readdirSync(dir)) this.cleanEmptyDirs(join(dir, file));
-    if (readdirSync(dir).length === 0 && dir !== (this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings')) {
+  /**
+   * Remove diretórios de data vazios (camera-x/YYYY/MM/DD/HH) que a retenção
+   * deixou para trás. Duas regras duras:
+   *
+   * · PULA todo diretório cujo nome começa com ponto. Eles são infraestrutura
+   *   VIVA — `.pre-buffer` fica vazio entre podas de 3s e removê-lo mata o
+   *   ffmpeg do ring (o pré-evento sumia em silêncio); `.drac-file-deletions`
+   *   pode pertencer a outra instância no meio de uma exclusão transacional.
+   *
+   * · ASSÍNCRONO e com respiro: a versão síncrona percorria ~70 mil diretórios
+   *   (100 câmeras × 30 dias × 24h) travando o laço de eventos — a mesma
+   *   classe do congelamento de 11s do cache de diagnósticos.
+   */
+  private async cleanEmptyDirs(dir: string, processados = { n: 0 }): Promise<void> {
+    const raiz = this.config.get<string>('recordingsRoot') ?? process.env.RECORDINGS_ROOT ?? './storage/recordings';
+    let entradas;
+    try {
+      entradas = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // sumiu no meio (corrida com outra limpeza) — nada a fazer
+    }
+    for (const entrada of entradas) {
+      if (!entrada.isDirectory()) continue;
+      if (entrada.name.startsWith('.')) continue;
+      await this.cleanEmptyDirs(join(dir, entrada.name), processados);
+    }
+    processados.n += 1;
+    // Devolve o laço de eventos a cada lote: a limpeza é arrumação, e arrumação
+    // não pode competir com gravação e playback.
+    if (processados.n % 200 === 0) await new Promise((resolve) => setImmediate(resolve));
+    if (dir !== raiz) {
       try {
-        rmdirSync(dir);
+        const sobrou = await readdir(dir);
+        if (sobrou.length === 0) await rmdir(dir);
       } catch {
         // Outro processo pode ter recriado o diretório.
       }

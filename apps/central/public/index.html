@@ -2534,6 +2534,21 @@
         // tudo normal, porque nenhuma métrica carregava isso.
         const cego = number(metric(item, 'motionFailsafeCameras', 0));
         if (cego) out.push(['bad', `${cego} detector(es) cego(s) — gravando por fail-safe`]);
+        // Envio à nuvem parado ou atrasado. Ficou invisível uma vez: horas de
+        // NoSuchBucket com 100% das subidas falhando e nenhuma linha aqui — o
+        // disco foi enchendo e o problema só apareceu quando já era perda.
+        // "Falhando" = há erro registrado E a última subida boa está mais
+        // velha que a falha (uma falha antiga com envio recente é ruído).
+        const nuvemPend = number(metric(item, 'cloudUploadPending', 0));
+        const nuvemErro = item.metrics?.cloudUploadLastErrorCode || '';
+        const nuvemErroHa = metric(item, 'cloudUploadLastErrorAgeSeconds', null);
+        const nuvemOkHa = metric(item, 'cloudUploadLastSuccessAgeSeconds', null);
+        const falhando = nuvemErro && nuvemErroHa != null && (nuvemOkHa == null || nuvemOkHa > nuvemErroHa);
+        if (falhando && nuvemPend > 0) {
+          out.push(['bad', `nuvem: envio falhando (${escapeHtml(String(nuvemErro))}) — ${fmt.format(nuvemPend)} pendente(s)`]);
+        } else if (nuvemPend >= 300) {
+          out.push(['warn', `nuvem: ${fmt.format(nuvemPend)} envio(s) na fila`]);
+        }
         return out;
       }
       function renderAttentionQueue() {

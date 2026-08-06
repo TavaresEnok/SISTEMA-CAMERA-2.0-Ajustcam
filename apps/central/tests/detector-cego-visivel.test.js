@@ -39,6 +39,7 @@ function rodarReasonsFor(item) {
   const contexto = {
     escapeHtml: String,
     number: Number,
+    fmt: { format: String },
     metric: (it, key, dflt) => (it.metrics && it.metrics[key] != null ? it.metrics[key] : dflt),
     infraCritical: () => false,
     readinessStatus: () => 'ok',
@@ -78,4 +79,62 @@ test('instalação ANTIGA (heartbeat sem a métrica) não quebra nem alarma', ()
   const razoes = rodarReasonsFor(saudavel);
   assert.ok(Array.isArray(razoes));
   assert.ok(!razoes.some(([, texto]) => texto.includes('detector')));
+  assert.ok(!razoes.some(([, texto]) => texto.includes('nuvem')));
+});
+
+// ── O ENVIO À NUVEM PARADO TAMBÉM TEM DE APARECER ───────────────────────────
+//
+// Episódio real: horas de NoSuchBucket, 100% das subidas falhando, e nenhuma
+// linha na Central — o disco encheu e virou perda antes de alguém saber.
+
+test('envio falhando com fila vira linha VERMELHA com o código do erro', () => {
+  const razoes = rodarReasonsFor({
+    ...saudavel,
+    metrics: {
+      ...saudavel.metrics,
+      cloudUploadPending: 812,
+      cloudUploadLastErrorCode: 'NoSuchBucket',
+      cloudUploadLastErrorAgeSeconds: 60,
+      cloudUploadLastSuccessAgeSeconds: 7200,
+    },
+  });
+  const linha = razoes.find(([, texto]) => texto.includes('nuvem'));
+  assert.ok(linha, 'sem esta linha o NoSuchBucket fica invisível DE NOVO');
+  assert.equal(linha[0], 'bad');
+  assert.ok(linha[1].includes('NoSuchBucket'), 'o código é o que aponta a causa');
+  assert.ok(linha[1].includes('812'), 'o tamanho da fila dimensiona o atraso');
+});
+
+test('falha ANTIGA com envio recente é ruído — não alarma', () => {
+  // Uma falha transitória de ontem, com subidas funcionando agora, não pode
+  // pintar a instalação de vermelho: alarme falso ensina a ignorar alarmes.
+  const razoes = rodarReasonsFor({
+    ...saudavel,
+    metrics: {
+      ...saudavel.metrics,
+      cloudUploadPending: 40,
+      cloudUploadLastErrorCode: 'NetworkError',
+      cloudUploadLastErrorAgeSeconds: 86400,
+      cloudUploadLastSuccessAgeSeconds: 30,
+    },
+  });
+  assert.ok(!razoes.some(([, texto]) => texto.includes('nuvem')));
+});
+
+test('fila grande SEM erro registrado vira atenção amarela', () => {
+  const razoes = rodarReasonsFor({
+    ...saudavel,
+    metrics: { ...saudavel.metrics, cloudUploadPending: 500 },
+  });
+  const linha = razoes.find(([, texto]) => texto.includes('nuvem'));
+  assert.ok(linha, 'fila acumulando sem falha visível ainda é atraso de arquivamento');
+  assert.equal(linha[0], 'warn');
+});
+
+test('fila pequena e sem erro: nenhuma linha de nuvem', () => {
+  const razoes = rodarReasonsFor({
+    ...saudavel,
+    metrics: { ...saudavel.metrics, cloudUploadPending: 12 },
+  });
+  assert.ok(!razoes.some(([, texto]) => texto.includes('nuvem')));
 });

@@ -105,12 +105,27 @@ test('credencial ilegível não vira cliente com segredo vazio', async () => {
   assert.equal(await svc.storageDaGravacao('st-antigo'), null);
 });
 
-test('sem nenhum storage cadastrado, a escrita cai no legado', async () => {
+test('sem nenhum storage cadastrado, a escrita cai no legado — via reconciliação', async () => {
+  // Primeiro cadastro: a reconciliação CRIA a linha e devolve o legado já com
+  // identidade. É por ela que o destino chega — seguir sem id ancoraria as
+  // gravações em "storage legado" (null), que segue o bucket ativo para
+  // sempre e faria o acervo sumir na primeira troca de fornecedor.
   const svc = makeResolver({
     cloudConnector: { getCloudStorageConfig: async () => ({ enabled: true, bucket: 'legado', endpoint: 'http://x', region: 'us-east-1', prefix: '', accessKeyId: 'a', secretAccessKey: 'b', forcePathStyle: true, mode: 'tier', provider: 's3', localWindowHours: 24, updatedAt: null }) },
   });
+  svc.reconciliar = async (provisionado: any) => ({ ...provisionado, id: 'st-legado', name: 'legado' });
   const destino = await svc.storageParaEscrita();
   assert.equal(destino.bucket, 'legado');
+  assert.equal(destino.id, 'st-legado', 'a escrita nunca sai sem identidade de storage');
+});
+
+test('reconciliação FALHOU: a escrita é adiada (null), nunca sai sem identidade', async () => {
+  const svc = makeResolver({
+    cloudConnector: { getCloudStorageConfig: async () => ({ enabled: true, bucket: 'legado', endpoint: 'http://x', region: 'us-east-1', prefix: '', accessKeyId: 'a', secretAccessKey: 'b', forcePathStyle: true, mode: 'tier', provider: 's3', localWindowHours: 24, updatedAt: null }) },
+  });
+  svc.logger.error = () => {};
+  svc.reconciliar = async () => { throw new Error('banco indisponível'); };
+  assert.equal(await svc.storageParaEscrita(), null, 'ancorar prova no storage errado é pior que adiar um ciclo');
 });
 
 test('todosOsStorages devolve os cadastrados; sem eles, o legado', async () => {

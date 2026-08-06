@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import { statfs, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { CryptoService } from '../common/crypto/crypto.service';
 import { sanitizeSensitiveText } from '../common/security/sensitive-text.helper';
 import { AiService } from '../ai/ai.service';
 import { RecordingProcessManagerService } from '../recordings/recording-process-manager.service';
@@ -158,7 +159,10 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
           this.writeSetting('cloud.licenseMessage', licenseMessage),
           this.writeSetting('cloud.restrictions', JSON.stringify(restrictions)),
           this.writeSetting('cloud.lastPayloadSummary', JSON.stringify(payload.summary)),
-          this.writeSetting('cloud.storage', cloudStorage ? JSON.stringify(cloudStorage) : ''),
+          // A credencial NUNCA em claro no banco: a mesma secret é cifrada na
+          // tabela CloudStorage, mas esta cópia ia em texto puro — qualquer
+          // dump/backup/réplica do Postgres entregava a chave S3 do cliente.
+          this.writeSetting('cloud.storage', cloudStorage ? JSON.stringify(this.cifrarSegredoStorage(cloudStorage)) : ''),
           // POR QUE não desceu credencial. `disabled` é pausa (o operador
           // desligou, ou a licença suspendeu) e nada deve assumir o lugar;
           // `absent` é exclusão, e a instalação segue com outro storage que
@@ -445,6 +449,8 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
         // o normal; qualquer valor > 0 é a instalação se defendendo de um
         // detector que parou — e o operador da Central PRECISA ver isso.
         motionFailsafeCameras: this.getMotionFailsafeCount(),
+        // Saúde do envio à nuvem (fila, última falha) — só quando configurado.
+        ...(await this.getCloudOffloadMetrics()),
         activeUsers,
         diskUsagePercent: disk?.usagePercent ?? null,
         infraHealth: infraHealth
@@ -564,6 +570,39 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       return typeof manager.getRuntimeSummary === 'function' ? manager.getRuntimeSummary() : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Saúde do envio para a nuvem, achatada em métricas de heartbeat. Mesmo
+   * princípio do fail-safe abaixo: horas de NoSuchBucket ficaram invisíveis
+   * porque nenhum número viajava. Import dinâmico para não criar ciclo de
+   * módulos (o offload já importa este serviço); falha vira métricas nulas.
+   */
+  private async getCloudOffloadMetrics(): Promise<Record<string, unknown>> {
+    try {
+      const { CloudOffloadService } = await import('../cloud-storage/cloud-offload.service');
+      const offload = this.moduleRef.get(CloudOffloadService, { strict: false }) as {
+        saudeDoEnvio?: () => Promise<{
+          configurado: boolean;
+          pendentes: number;
+          maisAntigaPendenteSegundos: number | null;
+          ultimoEnvioOkHaSegundos: number | null;
+          ultimaFalhaCodigo: string | null;
+          ultimaFalhaHaSegundos: number | null;
+        } | null>;
+      };
+      const saude = typeof offload.saudeDoEnvio === 'function' ? await offload.saudeDoEnvio() : null;
+      if (!saude || !saude.configurado) return {};
+      return {
+        cloudUploadPending: saude.pendentes,
+        cloudUploadOldestPendingSeconds: saude.maisAntigaPendenteSegundos,
+        cloudUploadLastSuccessAgeSeconds: saude.ultimoEnvioOkHaSegundos,
+        cloudUploadLastErrorCode: saude.ultimaFalhaCodigo,
+        cloudUploadLastErrorAgeSeconds: saude.ultimaFalhaHaSegundos,
+      };
+    } catch {
+      return {};
     }
   }
 
@@ -853,12 +892,44 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
     return this.normalizeStorageState(settings['cloud.storageState']);
   }
 
+  /**
+   * Cifra a secret antes de persistir em SystemSetting. Prefixo `enc:` marca o
+   * formato; valor legado em claro continua sendo lido (e é recifrado no
+   * próximo heartbeat). Falha de cifra mantém o comportamento antigo — perder
+   * a config custaria o offload inteiro, o que é pior que o risco em repouso.
+   */
+  private cifrarSegredoStorage<T extends { secretAccessKey?: unknown }>(cloudStorage: T): T {
+    const secret = cloudStorage?.secretAccessKey;
+    if (typeof secret !== 'string' || !secret || secret.startsWith('enc:')) return cloudStorage;
+    try {
+      const crypto = this.moduleRef.get(CryptoService, { strict: false });
+      return { ...cloudStorage, secretAccessKey: `enc:${crypto.encrypt(secret)}` };
+    } catch {
+      return cloudStorage;
+    }
+  }
+
   async getCloudStorageConfig(): Promise<CloudStorageConfig | null> {
     const settings = await this.readSettings();
     const raw = settings['cloud.storage'];
     if (!raw) return null;
     try {
-      return this.normalizeCloudStorage(JSON.parse(raw));
+      const parsed = JSON.parse(raw) as { secretAccessKey?: unknown };
+      if (typeof parsed?.secretAccessKey === 'string' && parsed.secretAccessKey.startsWith('enc:')) {
+        try {
+          const crypto = this.moduleRef.get(CryptoService, { strict: false });
+          parsed.secretAccessKey = crypto.decrypt(parsed.secretAccessKey.slice(4));
+        } catch {
+          // Chave mestra trocada sem a legada: usar o cifrado como senha só
+          // geraria SignatureDoesNotMatch silencioso. Melhor parar e gritar.
+          this.logger.error(
+            'Credencial do storage em SystemSetting está ILEGÍVEL (a chave mestra mudou?). '
+            + 'O envio à nuvem fica parado até o próximo heartbeat trazer a credencial de novo.',
+          );
+          return null;
+        }
+      }
+      return this.normalizeCloudStorage(parsed);
     } catch {
       // Setting corrompido não pode derrubar quem consulta: tratar como
       // "sem storage" é o comportamento seguro.
