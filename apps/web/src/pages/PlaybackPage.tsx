@@ -63,6 +63,8 @@ type TimelineSegment = {
   start: number;
   end: number;
   type: 'recorded' | 'recorded_broken' | 'gap' | 'motion' | 'alarm';
+  /** Só existe no bucket — a cópia local já foi podada. */
+  cloudOnly?: boolean;
 };
 
 type RecordingItem = {
@@ -74,6 +76,9 @@ type RecordingItem = {
   sizeBytes: string;
   fileExists: boolean;
   fileUsable?: boolean;
+  /** Origem do arquivo: disco local e/ou nuvem (a API devolve os dois). */
+  localExists?: boolean;
+  cloudAvailable?: boolean;
   actualSizeBytes?: number;
   compatibleCached?: boolean;
   playUrl: string;
@@ -256,6 +261,12 @@ function buildTimelineSegments(
         start: clamp((startMs - dayStartMs) / 60_000, 0, TOTAL_MINS),
         end: clamp((endMs - dayStartMs) / 60_000, 0, TOTAL_MINS),
         type: (recording.fileUsable ?? recording.fileExists) ? 'recorded' as const : 'recorded_broken' as const,
+        // ORIGEM como canal SEPARADO, não como cor concorrente: um trecho pode
+        // ser, ao mesmo tempo, "gravado", "com movimento" e "só na nuvem" — e
+        // as três informações têm de caber. É como Avigilon Alta (barra +
+        // hachura) e Milestone Interconnect (padrão) resolvem; usar mais uma
+        // cor obrigaria a escolher qual verdade contar.
+        cloudOnly: recording.cloudAvailable === true && recording.localExists === false,
       };
     })
     .filter((segment) => segment.end > segment.start)
@@ -3153,7 +3164,7 @@ export default function PlaybackPage() {
                 // desenhados como marcador fino no topo, sobre a faixa verde.
                 const isEventMarker = segment.type === 'motion' || segment.type === 'alarm';
                 const segmentTitle = segment.type === 'recorded'
-                  ? `Gravação ${format(addMinutes(dayStart, segment.start), 'HH:mm')}–${format(addMinutes(dayStart, segment.end), 'HH:mm')}`
+                  ? `Gravação ${format(addMinutes(dayStart, segment.start), 'HH:mm')}–${format(addMinutes(dayStart, segment.end), 'HH:mm')}${segment.cloudOnly ? ' · somente na nuvem (sem cópia local)' : ''}`
                   : segment.type === 'recorded_broken'
                     ? 'Trecho com arquivo ausente/corrompido'
                     : segment.type === 'motion'
@@ -3203,7 +3214,15 @@ export default function PlaybackPage() {
                       // visão de 24h ocupa 0,003% da largura — desenhado com
                       // fidelidade, ele simplesmente não existe na tela.
                       width: `max(${isEventMarker ? 3 : 2}px, ${((segEnd - segStart) / windowSize) * 100}%)`,
-                      background: segment.type === 'recorded_broken' ? HACHURA_DEFEITO : getSegmentColor(segment.type),
+                      background: segment.type === 'recorded_broken'
+                        ? HACHURA_DEFEITO
+                        : segment.cloudOnly
+                          // Listra inferior de 3px = "este trecho depende do
+                          // bucket". Depois do incidente em que um bucket foi
+                          // apagado por fora, saber de relance QUE PARTE do dia
+                          // não tem mais cópia local deixou de ser detalhe.
+                          ? `linear-gradient(to bottom, ${getSegmentColor(segment.type)} 0 calc(100% - 3px), hsl(258,70%,62%) calc(100% - 3px) 100%)`
+                          : getSegmentColor(segment.type),
                       cursor: segment.type === 'recorded' || segment.type === 'recorded_broken' ? 'pointer' : 'default',
                       zIndex: isEventMarker ? 3 : 1,
                       borderRadius: isEventMarker ? '0 0 2px 2px' : '1px',
@@ -3269,6 +3288,13 @@ export default function PlaybackPage() {
                   <span className="text-[10px] text-[hsl(var(--muted-foreground))]">{label}</span>
                 </div>
               ))}
+              <div className="flex items-center gap-1" title="Trecho sem cópia local: a reprodução vem do bucket. Se o armazenamento em nuvem falhar, este trecho fica indisponível.">
+                <span
+                  className="h-2.5 w-2.5 rounded-sm"
+                  style={{ background: `linear-gradient(to bottom, ${getSegmentColor('recorded')} 0 60%, hsl(258,70%,62%) 60% 100%)` }}
+                />
+                <span className="text-[10px] text-[hsl(var(--muted-foreground))]">Só na nuvem</span>
+              </div>
               <span className="flex items-center gap-1 text-[10px] text-[hsl(var(--muted-foreground))]" title="Atalhos: Espaço/K play · J/L retroceder-avançar · ←/→ 10s · Shift+←/→ 1min · N/P evento · Home/End início-fim">
                 <span className="h-2.5 w-2.5 rounded-sm border border-[hsl(var(--border))] bg-[hsl(222,14%,15%)]" />
                 Sem gravação
