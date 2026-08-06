@@ -13,10 +13,17 @@ function makeManager() {
   const mgr = new RecordingProcessManagerService(config, {} as any, {} as any, {} as any, {} as any, {} as any) as any;
   mgr.logger = { error() {}, warn() {}, log() {}, debug() {} };
   const recentStart = new Date(Date.now() - 30_000); // segmento recente (<15min)
+  // O status agora pré-busca em LOTE (contextoDeStatus): findMany + DISTINCT ON
+  // via $queryRaw — eram 3 consultas POR CÂMERA a cada poll do painel.
   mgr.prisma = {
-    recording: { findFirst: async () => ({ startedAt: recentStart, endedAt: null, filePath: '/rec/x.mp4' }) },
-    camera: { findUnique: async () => ({ recordingEnabled: true }) },
-    cameraEvent: { findFirst: async () => null },
+    camera: { findMany: async () => [{ id: 'cam-1', recordingEnabled: true }] },
+    $queryRaw: async (query: any) => {
+      const texto = String(query?.sql ?? query);
+      if (texto.includes('FROM "Recording"')) {
+        return [{ cameraId: 'cam-1', startedAt: recentStart, endedAt: null, filePath: '/rec/x.mp4' }];
+      }
+      return [];
+    },
   };
   return mgr;
 }

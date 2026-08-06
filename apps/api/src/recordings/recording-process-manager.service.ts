@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
-import { RecordingSource, type Camera } from '@prisma/client';
+import { Prisma, RecordingSource, type Camera } from '@prisma/client';
 import { type Queue } from 'bullmq';
 import { execFile, spawnSync, type ChildProcessByStdio } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -2268,34 +2268,58 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     }
   }
 
+  /**
+   * Dados de banco de que o status precisa, pré-buscados em LOTE.
+   *
+   * O caminho antigo fazia 3 consultas POR CÂMERA (última gravação, flag da
+   * câmera, último evento de reconexão) — e /recordings/statuses é chamado a
+   * cada ciclo do painel: 27 câmeras = 81 consultas por poll; 500 = 1.500.
+   * `DISTINCT ON` resolve "a última por câmera" numa consulta só por tipo.
+   */
+  private async contextoDeStatus(cameraIds: string[]): Promise<{
+    cams: Map<string, { recordingEnabled: boolean | null }>;
+    ultimasGravacoes: Map<string, { startedAt: Date; endedAt: Date | null; filePath: string }>;
+    ultimasReconexoes: Map<string, { type: string; occurredAt: Date }>;
+  }> {
+    if (!cameraIds.length) {
+      return { cams: new Map(), ultimasGravacoes: new Map(), ultimasReconexoes: new Map() };
+    }
+    const [cams, ultimas, reconexoes] = await Promise.all([
+      this.prisma.camera.findMany({ where: { id: { in: cameraIds } }, select: { id: true, recordingEnabled: true } }),
+      this.prisma.$queryRaw<Array<{ cameraId: string; startedAt: Date; endedAt: Date | null; filePath: string }>>(
+        Prisma.sql`SELECT DISTINCT ON ("cameraId") "cameraId", "startedAt", "endedAt", "filePath"
+          FROM "Recording" WHERE "cameraId" IN (${Prisma.join(cameraIds)})
+          ORDER BY "cameraId", "startedAt" DESC`,
+      ),
+      this.prisma.$queryRaw<Array<{ cameraId: string; type: string; occurredAt: Date }>>(
+        Prisma.sql`SELECT DISTINCT ON ("cameraId") "cameraId", "type", "occurredAt"
+          FROM "CameraEvent" WHERE "cameraId" IN (${Prisma.join(cameraIds)})
+            AND "type" IN ('HEALTH_RECORDING_RECONNECT_REQUESTED', 'HEALTH_RECORDING_RECONNECT_SUCCESS', 'HEALTH_RECORDING_RECONNECT_FAILED')
+          ORDER BY "cameraId", "occurredAt" DESC`,
+      ),
+    ]);
+    return {
+      cams: new Map(cams.map((c) => [c.id, { recordingEnabled: c.recordingEnabled }])),
+      ultimasGravacoes: new Map(ultimas.map((r) => [r.cameraId, r])),
+      ultimasReconexoes: new Map(reconexoes.map((e) => [e.cameraId, e])),
+    };
+  }
+
   async getStatus(cameraId: string) {
+    return this.montarStatus(cameraId, await this.contextoDeStatus([cameraId]));
+  }
+
+  private montarStatus(cameraId: string, contexto: Awaited<ReturnType<RecordingProcessManagerService['contextoDeStatus']>>) {
     const nowMs = Date.now();
-    const latestRecording = await this.prisma.recording.findFirst({
-      where: { cameraId },
-      orderBy: { startedAt: 'desc' },
-      select: { startedAt: true, endedAt: true, filePath: true },
-    });
-    const cam = await this.prisma.camera.findUnique({ where: { id: cameraId }, select: { recordingEnabled: true } });
+    const latestRecording = contexto.ultimasGravacoes.get(cameraId) ?? null;
+    const cam = contexto.cams.get(cameraId) ?? null;
     const lastSegmentAtMs = latestRecording ? new Date(latestRecording.endedAt ?? latestRecording.startedAt).getTime() : null;
     const lastSegmentAgeSeconds = lastSegmentAtMs == null ? null : Math.max(0, Math.floor((nowMs - lastSegmentAtMs) / 1000));
     const inferredRecentRecording = lastSegmentAgeSeconds != null && lastSegmentAgeSeconds < 15 * 60;
     const staleThresholdSeconds = this.getRecordingStaleThresholdSeconds();
     const reconnectGraceSeconds = Math.max(staleThresholdSeconds, 180);
     const reconnectGraceAt = new Date(nowMs - reconnectGraceSeconds * 1000);
-    const latestReconnectEvent = await this.prisma.cameraEvent.findFirst({
-      where: {
-        cameraId,
-        type: {
-          in: [
-            'HEALTH_RECORDING_RECONNECT_REQUESTED',
-            'HEALTH_RECORDING_RECONNECT_SUCCESS',
-            'HEALTH_RECORDING_RECONNECT_FAILED',
-          ],
-        },
-      },
-      orderBy: { occurredAt: 'desc' },
-      select: { type: true, occurredAt: true },
-    });
+    const latestReconnectEvent = contexto.ultimasReconexoes.get(cameraId) ?? null;
     // ADITIVO: diagnóstico de progresso do arquivo em escrita. Só faz I/O quando
     // existe processo local ativo; nos demais casos devolve applicable=false.
     // NENHUM campo existente muda por causa dele — em especial `stale` continua
@@ -2388,7 +2412,8 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
 
   async getStatuses(cameraIds: string[]) {
     const uniqueIds = [...new Set(cameraIds)].filter((id) => id.trim().length > 0).slice(0, 500);
-    const items = await Promise.all(uniqueIds.map((cameraId) => this.getStatus(cameraId)));
+    const contexto = await this.contextoDeStatus(uniqueIds);
+    const items = uniqueIds.map((cameraId) => this.montarStatus(cameraId, contexto));
     const staleCount = items.filter((item: any) => item.stale).length;
     const recordingCount = items.filter((item: any) => item.isRecording).length;
     return {

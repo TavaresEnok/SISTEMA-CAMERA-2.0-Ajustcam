@@ -144,13 +144,6 @@ type RecordingHealthCamera = {
   alertReason: string | null;
 };
 
-type RecordingHealthSummary = {
-  date: string;
-  totalRecordings: number;
-  camerasNeedingAttention: number;
-  cameras: RecordingHealthCamera[];
-};
-
 type InvestigationOption = {
   id: string;
   title: string;
@@ -447,7 +440,6 @@ export default function PlaybackPage() {
   const previewMetaInFlightRef = useRef<Set<string>>(new Set());
   const [thumbnailRefreshNonce, setThumbnailRefreshNonce] = useState(0);
   const [diagnosticsByRecordingId, setDiagnosticsByRecordingId] = useState<Record<string, RecordingDiagnostics>>({});
-  const [healthSummary, setHealthSummary] = useState<RecordingHealthSummary | null>(null);
   const [preparingCompatibleId, setPreparingCompatibleId] = useState<string | null>(null);
   const [investigations, setInvestigations] = useState<InvestigationOption[]>([]);
   const [selectedInvestigationId, setSelectedInvestigationId] = useState('__none__');
@@ -1326,7 +1318,6 @@ export default function PlaybackPage() {
   const selectedDiagnostics = useMemo(() => (selectedRecordingId ? diagnosticsByRecordingId[selectedRecordingId] ?? null : null), [diagnosticsByRecordingId, selectedRecordingId]);
   const playbackMayUseCompatible = compatMode || (Boolean(selectedDiagnostics?.compatibleRecommended) && !BROWSER_PLAYS_HEVC);
   const recordingById = useMemo(() => new Map(recordings.map((recording) => [recording.id, recording] as const)), [recordings]);
-  const selectedHealth = useMemo(() => healthSummary?.cameras.find((item) => item.cameraId === selectedCamId) ?? null, [healthSummary, selectedCamId]);
 
   useEffect(() => {
     if (!selectedRecordingId || !accessToken) {
@@ -2691,10 +2682,21 @@ export default function PlaybackPage() {
           {zoomedWindow >= 60 ? `${(zoomedWindow / 60).toFixed(zoomedWindow % 60 === 0 ? 0 : 1)}h` : `${Math.round(zoomedWindow)}min`}
         </span>
 
-        {/* Recursos avançados ocultos para espelhar o mock (funcionalidade preservada) */}
-        <div className="hidden">
-          <input value={jumpTime} onChange={(event) => setJumpTime(event.target.value)} placeholder="HH:mm:ss" />
-          <button type="button" onClick={jumpToExactTime}>Ir para hora</button>
+        {/* "Ir para hora" resgatado do bloco oculto (mesmo caminho do
+            Multi-câmera): operador de VMS pensa em carimbo de hora — digitar
+            14:32:05 é mais rápido que caçar o instante na régua com zoom. */}
+        <div className="flex items-center gap-1">
+          <input
+            value={jumpTime}
+            onChange={(event) => setJumpTime(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') jumpToExactTime(); }}
+            placeholder="HH:mm:ss"
+            className="h-8 w-24 rounded-md border border-input bg-background px-2 font-mono text-xs"
+            title="Ir direto para um horário exato do dia selecionado"
+          />
+          <Button type="button" variant="outline" size="sm" onClick={jumpToExactTime}>
+            Ir para hora
+          </Button>
         </div>
         {/* Estava dentro do bloco oculto acima: o modo multi-câmera existia, com
             estado e réguas, mas sem forma de o operador chegar nele. */}
@@ -2785,31 +2787,10 @@ export default function PlaybackPage() {
         </div>
       )}
 
-      <div className="hidden">
-        <div className="rounded-lg border border-border bg-card px-3 py-2">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-[hsl(var(--muted-foreground))]">Segmentos</div>
-          <div className="mt-1 text-lg font-semibold">{selectedHealth?.total ?? recordings.length}</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card px-3 py-2">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-[hsl(var(--muted-foreground))]">Direto</div>
-          <div className="mt-1 text-lg font-semibold">{selectedHealth?.directLikely ?? recordings.filter((item) => item.fileUsable ?? item.fileExists).length}</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card px-3 py-2">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-[hsl(var(--muted-foreground))]">Compatível</div>
-          <div className="mt-1 text-lg font-semibold">{selectedHealth?.compatibleRecommended ?? Object.values(diagnosticsByRecordingId).filter((item) => item.compatibleRecommended).length}</div>
-        </div>
-        <div className={`rounded-lg border px-3 py-2 ${
-          selectedHealth?.needsAttention
-            ? 'border-[hsl(var(--destructive)_/_0.3)] bg-[hsl(var(--destructive)_/_0.1)]'
-            : 'border-border bg-card'
-        }`}>
-          <div className="text-[10px] uppercase tracking-[0.16em] text-[hsl(var(--muted-foreground))]">Saúde</div>
-          <div className={`mt-1 text-sm font-semibold ${selectedHealth?.needsAttention ? 'text-[hsl(var(--destructive))]' : 'text-[hsl(var(--status-online))]'}`}>
-            {selectedHealth?.needsAttention ? selectedHealth.alertReason ?? 'Atenção necessária' : 'Operacional'}
-          </div>
-        </div>
-      </div>
-
+      {/* Cartões de resumo removidos: referenciavam o resumo de saúde,
+          cuja busca saiu da página (24 ffprobe por troca para um bloco que o
+          mock escondia). Quando o cartão de saúde ganhar lugar no design, os
+          dados voltam com ele. */}
 
       <div className="flex flex-1 flex-col gap-4 min-h-0 p-3 sm:p-4 xl:flex-row">
         <div ref={playerColumnRef} className="flex min-w-0 flex-1 flex-col gap-3">

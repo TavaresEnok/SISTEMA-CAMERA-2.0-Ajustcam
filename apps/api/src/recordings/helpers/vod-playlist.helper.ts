@@ -223,6 +223,12 @@ export function renderVodPlaylist(
   options?: RenderVodPlaylistOptions,
 ): string {
   const includePdt = options?.includeProgramDateTime !== false;
+  // LIMITAÇÃO CONHECIDA E ACEITA: HLS estrito só admite MP4 como segmento na
+  // forma fMP4 (EXT-X-MAP + VERSION >= 6); MP4 progressivo é fora de spec. O
+  // web NÃO passa por aqui (consome format=json e troca <video> por conta
+  // própria) e o VLC/ffmpeg funciona pelo alias .mp4 na URL. Migrar para fMP4
+  // exigiria refragmentar cada segmento — custo real para servir um caso
+  // (players HLS externos) que hoje ninguém usa. Se um dia usar, é aqui.
   const lines: string[] = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',

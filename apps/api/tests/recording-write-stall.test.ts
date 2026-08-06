@@ -207,10 +207,16 @@ test('write-stall: limiar/graça configuráveis, com piso duro contra configura�
 function statusManager() {
   const mgr = makeManager();
   const recentStart = new Date(Date.now() - 30_000);
+  // Interface nova do status: pré-busca em lote (findMany + DISTINCT ON raw).
   mgr.prisma = {
-    recording: { findFirst: async () => ({ startedAt: recentStart, endedAt: null, filePath: '/rec/x.mp4' }) },
-    camera: { findUnique: async () => ({ recordingEnabled: true }) },
-    cameraEvent: { findFirst: async () => null },
+    camera: { findMany: async () => [{ id: 'cam-1', recordingEnabled: true }] },
+    $queryRaw: async (query: any) => {
+      const texto = String(query?.sql ?? query);
+      if (texto.includes('FROM "Recording"')) {
+        return [{ cameraId: 'cam-1', startedAt: recentStart, endedAt: null, filePath: '/rec/x.mp4' }];
+      }
+      return [];
+    },
   };
   mgr.isPidAlive = () => true;
   return mgr;

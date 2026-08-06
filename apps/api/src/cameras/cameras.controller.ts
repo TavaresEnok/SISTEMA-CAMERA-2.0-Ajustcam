@@ -210,13 +210,22 @@ export class CamerasController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {
+    // Feed RECENTE (sem from/to) é contexto de operação ao vivo: permissão de
+    // VER basta — é o que alimenta o painel de eventos do dashboard, inclusive
+    // para contas só-view legítimas. Consulta HISTÓRICA (com from/to) é
+    // navegação de acervo: quem não pode assistir ao playback também não deve
+    // reconstruir a linha do tempo de movimento de dias inteiros por metadado.
+    const consultaHistorica = Boolean(from || to);
     if (cameraId) {
-      await this.accessControlService.assertCanViewCamera(user, cameraId);
+      if (consultaHistorica) await this.accessControlService.assertCanPlaybackCamera(user, cameraId);
+      else await this.accessControlService.assertCanViewCamera(user, cameraId);
     }
     const accessibleCameraIds =
       user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN
         ? (await this.camerasService.findAll()).map((c: any) => c.id)
-        : await this.accessControlService.getAccessibleCameraIds(user);
+        : consultaHistorica
+          ? await this.accessControlService.getPlaybackCameraIds(user)
+          : await this.accessControlService.getAccessibleCameraIds(user);
     return this.camerasService.listEventsFeed({
       accessibleCameraIds,
       cameraId,
