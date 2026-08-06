@@ -139,6 +139,9 @@ function normalizeCloudStorage(input) {
     localWindowHours: readInt(source.localWindowHours, DEFAULT_CONFIG.localWindowHours, { min: 1, max: 24 * 30 }),
     forcePathStyle: readBool(source.forcePathStyle, DEFAULT_CONFIG.forcePathStyle),
     updatedAt: source.updatedAt ?? null,
+    // O selo de teste é emitido pelo SERVIDOR, nunca aceito do corpo: um
+    // chamador de API podia mandar `lastTestOk: true` e a Central passava a
+    // exibir "Conexão OK" sobre um bucket que ninguém tocou.
     lastTestAt: source.lastTestAt ?? null,
     lastTestOk: readBool(source.lastTestOk, null) === null ? null : readBool(source.lastTestOk, false),
   };
@@ -151,7 +154,7 @@ function normalizeCloudStorage(input) {
  * Assim o operador consegue salvar um rascunho sem ser obrigado a preencher
  * tudo de uma vez, mas não consegue LIGAR um storage pela metade.
  */
-function validateCloudStorage(input, { existingSecret = '' } = {}) {
+function validateCloudStorage(input, { existingSecret = '', installationId = '', prefixosEmUso = [] } = {}) {
   const errors = [];
   const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
 
@@ -175,8 +178,47 @@ function validateCloudStorage(input, { existingSecret = '' } = {}) {
     if (!endpoint) errors.push('endpoint é obrigatório para habilitar');
     else if (!/^https?:\/\/[^/\s]+/i.test(endpoint)) errors.push('endpoint inválido');
     if (!bucket) errors.push('bucket é obrigatório para habilitar');
+    else if (!/^[a-z0-9][a-z0-9._-]*$/.test(bucket) || bucket.length > 63) {
+      // Só o que QUEBRA de verdade: maiúscula, espaço ou barra entram sem
+      // escape na URI canônica e produzem assinatura inválida — o operador
+      // recebia "credencial inválida" por um erro de digitação no bucket.
+      // A gramática AWS completa (mínimo de 3 caracteres, etc.) NÃO é exigida:
+      // MinIO e outros compatíveis aceitam nomes que a AWS recusaria, e não
+      // cabe à Central ser mais restritiva que o fornecedor.
+      errors.push('bucket inválido: use apenas minúsculas, números, ponto, hífen e sublinhado (até 63 caracteres)');
+    }
     if (!accessKeyId) errors.push('accessKeyId é obrigatório para habilitar');
     if (!secret) errors.push('secretAccessKey é obrigatório para habilitar');
+  }
+
+  // ── PREFIXO: OBRIGATÓRIO, E EXCLUSIVO ─────────────────────────────────────
+  //
+  // Sem prefixo, duas instalações no mesmo bucket compartilham o espaço de
+  // chaves — e a varredura de órfãos de UMA lista o acervo da OUTRA, não acha
+  // dono no banco dela e apaga prova alheia. A instalação já tem uma trava
+  // ("não reconheço nada → aborta"), mas a origem do problema é aqui: o
+  // prefixo era um campo livre que a tela só SUGERIA.
+  // PREENCHE, em vez de recusar: o objetivo é que NUNCA existam duas
+  // instalações no mesmo espaço de chaves — e recusar o save não é o único
+  // jeito de garantir isso. Prefixo em branco vira o id da instalação, que é
+  // exatamente o que a tela já sugere como placeholder. O operador segue
+  // configurando sem tropeço, e o isolamento passa a ser o padrão.
+  const prefixPedido = String(source.prefix ?? '').trim().replace(/^\/+|\/+$/g, '');
+  const prefix = prefixPedido || (enabled ? String(installationId || '').trim() : '');
+  if (enabled) {
+    if (!prefix) errors.push('prefixo é obrigatório para habilitar (isola esta instalação dentro do bucket)');
+    else if (!/^[A-Za-z0-9!_.*'()/-]+$/.test(prefix)) {
+      errors.push("prefixo inválido: use apenas letras, números e - _ . ! * ' ( ) /");
+    }
+    const colisao = (prefixosEmUso || []).find(
+      (uso) => uso.installationId !== installationId
+        && uso.endpoint === endpoint
+        && uso.bucket === bucket
+        && uso.prefix === prefix,
+    );
+    if (colisao) {
+      errors.push(`este endpoint+bucket+prefixo já é usado pela instalação "${colisao.installationId}" — dois clientes no mesmo espaço de chaves se apagam`);
+    }
   }
 
   const windowHours = source.localWindowHours;
@@ -191,6 +233,7 @@ function validateCloudStorage(input, { existingSecret = '' } = {}) {
     enabled,
     endpoint,
     bucket,
+    prefix,
     accessKeyId,
     secretAccessKeyEncrypted: secret ? encryptSecret(secret) : '',
   });

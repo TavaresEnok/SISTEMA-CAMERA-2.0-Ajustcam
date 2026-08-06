@@ -1943,15 +1943,41 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
 
   const previous = normalizeCloudStorage(item.cloudStorage);
   let existingSecret = '';
+  let segredoIlegivel = false;
   try {
     existingSecret = decryptStorageSecret(previous.secretAccessKeyEncrypted);
   } catch {
     existingSecret = '';
+    // Chave mestra trocada (ou container subiu sem a env): o texto cifrado
+    // existe mas não abre. Seguir com "" faria a validação gravar segredo
+    // VAZIO por cima — a credencial do cliente destruída em disco por uma
+    // edição banal, sem aviso e sem como recuperar.
+    segredoIlegivel = Boolean(previous.secretAccessKeyEncrypted);
   }
+  const mandouSegredoNovo = Boolean(payload && typeof payload === 'object'
+    && typeof payload.secretAccessKey === 'string' && payload.secretAccessKey.trim());
+  if (segredoIlegivel && !mandouSegredoNovo) {
+    return json(req, res, 409, {
+      error: 'storage_secret_unreadable',
+      message: 'A credencial guardada não pôde ser decifrada (a chave mestra da Central mudou?). '
+        + 'Digite a Secret Access Key novamente para regravá-la — salvar sem ela apagaria a credencial atual.',
+    });
+  }
+
+  // Prefixos já em uso pelas OUTRAS instalações: dois clientes no mesmo
+  // endpoint+bucket+prefixo compartilham espaço de chaves e a limpeza de um
+  // apaga o acervo do outro.
+  const prefixosEmUso = Object.entries(db.installations || {})
+    .filter(([id]) => id !== installationId)
+    .map(([id, outra]) => {
+      const c = normalizeCloudStorage(outra && outra.cloudStorage);
+      return { installationId: id, endpoint: c.endpoint, bucket: c.bucket, prefix: c.prefix };
+    })
+    .filter((uso) => uso.endpoint && uso.bucket);
 
   let validation;
   try {
-    validation = validateCloudStorage({ ...previous, ...payload }, { existingSecret });
+    validation = validateCloudStorage({ ...previous, ...payload }, { existingSecret, installationId, prefixosEmUso });
   } catch (error) {
     // CENTRAL_STORAGE_SECRET ausente/fraco: a Central não pode guardar
     // credencial de cliente sem chave decente, e falhar alto é melhor que
@@ -1981,6 +2007,21 @@ async function handlePatchCloudStorage(req, res, db, actor, installationId) {
       lastTestOk: verificacao.ok,
     };
   }
+
+  // ── POR QUE NÃO BLOQUEAMOS A HABILITAÇÃO COM TESTE REPROVADO ──────────────
+  //
+  // A auditoria propôs recusar `enabled: true` quando a verificação falha,
+  // apontando isso como origem do `NoSuchBucket` desta instalação. A EVIDÊNCIA
+  // desmente: o registro mostra `lastTestOk: true` em 04/08 13:58 — o teste
+  // PASSOU, e o bucket foi apagado externamente no dia seguinte. A trava não
+  // teria evitado o incidente, e quebraria um fluxo deliberado e documentado
+  // ("storage que ainda vai subir, ou firewall no caminho, precisam poder ser
+  // configurados antes").
+  //
+  // Contra "o destino morre DEPOIS de configurado" — que é o caso real — o que
+  // protege é a vigilância contínua, já no ar: saúde do envio no heartbeat,
+  // linha vermelha na Central e verificação do acervo no bucket. Trava na
+  // configuração é remédio para outra doença.
 
   item.updatedAt = new Date().toISOString();
   bumpConfigRevision(item);
@@ -2171,14 +2212,20 @@ async function handleCloudStoragePerformance(req, res, db, actor, installationId
     medicao.local = local;
   }
 
-  addAuditEvent(db, req, {
-    type: 'installation.cloud_storage_measured',
-    actor: actor.email,
-    result: medicao.ok ? 'accepted' : 'rejected',
-    installationId,
-    bucket: config.bucket,
+  // Esta rota roda FORA do portão (ela dura minutos). A gravação é a única
+  // parte com corrida, então ela — e só ela — entra na fila: relê o banco
+  // FRESCO para não sobrescrever o que chegou durante a medição.
+  await runSerialized(async () => {
+    const atual = await loadDb();
+    addAuditEvent(atual, req, {
+      type: 'installation.cloud_storage_measured',
+      actor: actor.email,
+      result: medicao.ok ? 'accepted' : 'rejected',
+      installationId,
+      bucket: config.bucket,
+    });
+    await saveDb(atual);
   });
-  await saveDb(db);
   return json(req, res, medicao.ok ? 200 : 502, medicao);
 }
 
@@ -3137,9 +3184,26 @@ function startServer() {
   // route() é async; sem este .catch, uma rejeição (ex.: loadDb) escapava como
   // unhandledRejection. Aqui garantimos uma resposta 500 e seguimos vivos.
   const url = req.url || '';
+  // ── O PORTÃO NÃO PODE ENGOLIR ROTA LONGA ────────────────────────────────
+  //
+  // `runSerialized` envolve a PROMESSA INTEIRA da rota, e ele existe por um
+  // motivo legítimo: o datastore JSON faz read-modify-write sem lock, então
+  // duas edições concorrentes se sobrescrevem.
+  //
+  // Só que duas rotas medem coisas do mundo real e duram MINUTOS: o teste de
+  // desempenho do storage (teto de 30 min, escolhendo 256 MB num link lento) e
+  // o provisionamento remoto por SSH. Dentro do portão, elas param TODO
+  // `/api/*` atrás de si — inclusive o heartbeat de todas as instalações. Com
+  // o limiar de 180s, a frota inteira aparece OFFLINE na tela e as instalações
+  // registram falha de comunicação, por causa de um clique em "Desempenho".
+  //
+  // Elas passam a rodar FORA do portão; a parte que toca o banco (o evento de
+  // auditoria + saveDb) continua serializada dentro do próprio handler, que é
+  // o único trecho onde a corrida existe de verdade.
+  const rotaLonga = /^\/api\/admin\/installations\/[^/]+\/(cloud-storage\/performance|remote-install)/.test(url);
   const touchesDb =
-    (url.startsWith('/api/') && url !== '/api/health') ||
-    url.startsWith('/install/');
+    !rotaLonga
+    && ((url.startsWith('/api/') && url !== '/api/health') || url.startsWith('/install/'));
   const run = () => Promise.resolve(route(req, res));
   const started = touchesDb ? runSerialized(run) : run();
   started.catch((error) => {

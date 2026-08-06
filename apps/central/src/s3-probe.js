@@ -1,6 +1,23 @@
 'use strict';
 
-const { createHash, createHmac, randomBytes } = require('node:crypto');
+const { createHash, createHmac, randomBytes, randomFill } = require('node:crypto');
+const { promisify } = require('node:util');
+
+// ── GERAR A AMOSTRA SEM PARAR A CENTRAL ─────────────────────────────────────
+// `randomBytes(256 * 1024 * 1024)` é SÍNCRONO: enquanto o CSPRNG trabalha, o
+// laço de eventos não atende NADA — nem o heartbeat das instalações. Gerar em
+// blocos com `randomFill` (assíncrono) devolve o controle entre eles.
+// O conteúdo é descartável (a amostra é apagada do bucket no fim), então o que
+// importa é ser incompressível, não ser criptograficamente perfeito.
+const preencherAleatorio = promisify(randomFill);
+async function gerarAmostra(bytes) {
+  const buffer = Buffer.allocUnsafe(bytes);
+  const BLOCO = 4 * 1024 * 1024;
+  for (let offset = 0; offset < bytes; offset += BLOCO) {
+    await preencherAleatorio(buffer, offset, Math.min(BLOCO, bytes - offset));
+  }
+  return buffer;
+}
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const tls = require('node:tls');
@@ -233,7 +250,7 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
   };
 
   try {
-    let carga = randomBytes(mb * 1024 * 1024);
+    let carga = await gerarAmostra(mb * 1024 * 1024);
     let { r: put, ms: msSubida, chave } = await subir(carga);
     if (!put.ok) return { ok: false, error: `Escrita falhou: ${explain(put.status, put.code)}` };
 
@@ -245,7 +262,7 @@ async function measureS3Performance(config, { timeoutMs = 300000, sizeMb = null,
       const alvo = Math.min(TETO_MB, Math.ceil(mb * (DURACAO_ALVO_MS / Math.max(1, msSubida))));
       if (alvo > mb) {
         notas.push(`A primeira amostra de ${mb} MB subiu em ${(msSubida / 1000).toFixed(2)}s — rápido demais para ser confiável. Repetido com ${alvo} MB.`);
-        carga = randomBytes(alvo * 1024 * 1024);
+        carga = await gerarAmostra(alvo * 1024 * 1024);
         const nova = await subir(carga);
         if (nova.r.ok) { msSubida = nova.ms; chave = nova.chave; mb = alvo; }
       }

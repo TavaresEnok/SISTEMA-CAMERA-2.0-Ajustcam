@@ -35,6 +35,10 @@ const BASE = {
   endpoint: 'http://168.194.13.18:9100',
   region: 'us-east-1',
   bucket: 'meu-storage',
+  // Prefixo passou a ser exigido para habilitar (ou preenchido com o id da
+  // instalação): sem ele, duas instalações dividem o espaço de chaves do
+  // bucket e a limpeza de uma apaga o acervo da outra. Config real sempre tem.
+  prefix: 'inst-1',
   accessKeyId: 'AK123',
   secretAccessKey: 'SEGREDO-DO-CLIENTE',
 };
