@@ -1,25 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type WheelEvent } from 'react';
 import axios from 'axios';
 import { useLocation } from 'wouter';
-import {
-  Camera as CameraIcon,
-  Download,
-  FastForward,
-  FolderArchive,
-  LoaderCircle,
-  Maximize2,
-  Minimize2,
-  Pause,
-  Play,
-  Scissors,
-  SkipBack,
-  SkipForward,
-  StepBack,
-  StepForward,
-  VideoOff,
-  Volume2,
-  VolumeX,
-} from 'lucide-react';
+import { Camera as CameraIcon, ChevronLeft, ChevronRight, Download, FastForward, FolderArchive, LoaderCircle, Maximize2, Minimize2, Pause, Play, Scissors, SkipBack, SkipForward, StepBack, StepForward, VideoOff, Volume2, VolumeX } from 'lucide-react';
 import { addMinutes, format, startOfDay } from 'date-fns';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
@@ -55,6 +37,7 @@ import {
   type VodPlaylistSegment,
 } from '../lib/vod-continuous';
 import { janelaDaGravacao, selecionarGravacaoNoInstante } from '../lib/playback-selection';
+import { agregarMinimapa, escolherGranularidade, gerarTicks } from '../lib/timeline-ruler';
 import {
   TIMELINE_MAX_ZOOM,
   TIMELINE_TOTAL_MINUTES,
@@ -486,6 +469,8 @@ export default function PlaybackPage() {
   // Vigias de rede: uma retentativa por fonte no timeout (rede lenta) e uma no
   // stall do meio do vídeo (token vencido num buffer longo, Wi-Fi caindo) —
   // antes, as duas situações deixavam o spinner girando para sempre.
+  const minimapRef = useRef<HTMLDivElement | null>(null);
+  const minimapDragRef = useRef(false);
   const slowRetryRef = useRef<string | null>(null);
   const stallRetryRef = useRef<string | null>(null);
   /** Tentativas de recarga por gravação enquanto o transcode prepara (503). */
@@ -1202,6 +1187,19 @@ export default function PlaybackPage() {
   const selectedCam = useMemo(() => cameras.find((camera) => camera.id === selectedCamId) ?? cameras[0] ?? null, [cameras, selectedCamId]);
   const selectedDay = useMemo(() => new Date(`${selectedDate}T00:00:00`), [selectedDate]);
   const dayStart = useMemo(() => startOfDay(selectedDay), [selectedDay]);
+
+  // Largura real da régua: a granularidade dos ticks depende dela (rótulo que
+  // não cabe vira régua ilegível). Medida uma vez e a cada resize.
+  const [timelineWidthPx, setTimelineWidthPx] = useState(900);
+  useEffect(() => {
+    const el = timelineTrackRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const medir = () => setTimelineWidthPx(Math.max(200, el.getBoundingClientRect().width));
+    medir();
+    const observer = new ResizeObserver(medir);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const timelineSegments = useMemo(() => buildTimelineSegments(recordings, playbackEvents, dayStart.getTime()), [recordings, playbackEvents, dayStart]);
   const compareCameraItems = useMemo(() => (
@@ -2029,15 +2027,99 @@ export default function PlaybackPage() {
     };
   }, [accessToken, client, thumbnailCandidateIds]);
 
+  // PALETA. Regra que vale mais que gosto: VERMELHO É SÓ ALARME. O "defeito"
+  // era `hsl(0,48%,36%)` — vermelho escuro que, no canto do olho, o operador lê
+  // como alarme e vai conferir à toa. Vira cinza-arroxeado com hachura (a
+  // textura carrega o significado mesmo para quem não distingue a cor: ~8% dos
+  // homens têm alguma deficiência de visão de cor).
+  // Verde para gravação segue a escola Dahua/Synology, já é o hábito da equipe,
+  // e deixa toda a família quente livre para severidade (âmbar → vermelho).
   const getSegmentColor = (type: TimelineSegment['type']) => {
-    if (type === 'recorded') return 'hsl(150,60%,32%)';
-    if (type === 'recorded_broken') return 'hsl(0,48%,36%)';
-    if (type === 'motion') return 'hsl(35,95%,50%)';
-    if (type === 'alarm') return 'hsl(0,72%,50%)';
-    return 'hsl(var(--muted))';
+    if (type === 'recorded') return 'hsl(152,55%,34%)';
+    if (type === 'recorded_broken') return 'hsl(280,12%,34%)';
+    if (type === 'motion') return 'hsl(38,92%,50%)';
+    if (type === 'alarm') return 'hsl(0,75%,52%)';
+    return 'hsl(222,14%,15%)';
   };
+  const HACHURA_DEFEITO = 'repeating-linear-gradient(45deg, hsl(0,35%,42%) 0 3px, hsl(280,12%,30%) 3px 6px)';
 
   // Lê a posição atual do vídeo no momento da ação (evita ler o ref durante o render).
+  const ticksDaRegua = useMemo(() => {
+    const granularidade = escolherGranularidade(viewEnd - viewStart, timelineWidthPx);
+    return { granularidade, ticks: gerarTicks(viewStart, viewEnd, granularidade) };
+  }, [viewStart, viewEnd, timelineWidthPx]);
+
+  // Minimapa: o dia INTEIRO, sempre na mesma escala — é a âncora estável que
+  // diz "onde estou" quando a faixa detalhada está com zoom de 7 minutos.
+  // Agregado em buckets (não por segmento): 12.000 gravações viram 12.000 nós
+  // de DOM e o pan trava.
+  const minimapaBuckets = useMemo(
+    () => agregarMinimapa(timelineSegments as Array<{ start: number; end: number; type: string }>, TOTAL_MINS, 720),
+    [timelineSegments],
+  );
+
+  // Instantes de evento (movimento/alarme) para o salto ‹ › e as teclas N/P.
+  const instantesDeEvento = useMemo(
+    () => timelineSegments
+      .filter((s) => s.type === 'motion' || s.type === 'alarm')
+      .map((s) => (s.start + s.end) / 2)
+      .sort((a, b) => a - b),
+    [timelineSegments],
+  );
+  const irParaEvento = useCallback((direcao: 1 | -1) => {
+    if (!instantesDeEvento.length) {
+      toast({ title: 'Sem eventos neste dia', description: 'Não há movimento ou alarme registrado para navegar.' });
+      return;
+    }
+    const alvo = direcao > 0
+      ? instantesDeEvento.find((m) => m > playhead + 0.05)
+      : [...instantesDeEvento].reverse().find((m) => m < playhead - 0.05);
+    if (alvo == null) {
+      toast({ title: direcao > 0 ? 'Último evento do dia' : 'Primeiro evento do dia' });
+      return;
+    }
+    setPlayheadFromMinute(alvo);
+  }, [instantesDeEvento, playhead, setPlayheadFromMinute]);
+
+  // Atalhos JKL — a convenção de TODO software de vídeo profissional (e do
+  // Milestone/Genetec). Sem eles, revisar horas de gravação é só mouse.
+  // Ignorados enquanto o foco está num campo, senão digitar "n" numa busca
+  // saltaria de evento.
+  useEffect(() => {
+    const aoTeclar = (event: globalThis.KeyboardEvent) => {
+      const alvo = event.target as HTMLElement | null;
+      if (alvo && /^(INPUT|TEXTAREA|SELECT)$/.test(alvo.tagName)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const video = videoRef.current;
+      const tecla = event.key.toLowerCase();
+      const passoMin = event.shiftKey ? 1 : 1 / 6; // Shift = 1 min, senão 10s
+      if (tecla === ' ' || tecla === 'k') {
+        event.preventDefault();
+        if (video) { if (video.paused) void video.play().catch(() => {}); else video.pause(); }
+      } else if (tecla === 'arrowleft' || tecla === 'j') {
+        event.preventDefault();
+        setPlayheadFromMinute(playhead - (tecla === 'j' ? 1 : passoMin));
+      } else if (tecla === 'arrowright' || tecla === 'l') {
+        event.preventDefault();
+        setPlayheadFromMinute(playhead + (tecla === 'l' ? 1 : passoMin));
+      } else if (tecla === 'n') {
+        event.preventDefault(); irParaEvento(1);
+      } else if (tecla === 'p') {
+        event.preventDefault(); irParaEvento(-1);
+      } else if (tecla === 'home') {
+        event.preventDefault(); setPlayheadFromMinute(0);
+      } else if (tecla === 'end') {
+        event.preventDefault(); setPlayheadFromMinute(TOTAL_MINS - 1);
+      } else if (tecla === '+' || tecla === '=') {
+        event.preventDefault(); setZoom((z) => clamp(z * 1.5, 1, TIMELINE_MAX_ZOOM));
+      } else if (tecla === '-') {
+        event.preventDefault(); setZoom((z) => clamp(z / 1.5, 1, TIMELINE_MAX_ZOOM));
+      }
+    };
+    window.addEventListener('keydown', aoTeclar);
+    return () => window.removeEventListener('keydown', aoTeclar);
+  }, [irParaEvento, playhead, setPlayheadFromMinute]);
+
   const getCurrentVideoSeconds = useCallback(
     () => videoRef.current?.currentTime ?? pendingSeekSeconds ?? 0,
     [pendingSeekSeconds],
@@ -2911,9 +2993,99 @@ export default function PlaybackPage() {
                 </div>
               </div>
             )}
+            {/* ── MINIMAPA DO DIA ────────────────────────────────────────
+                O dia INTEIRO, sempre 00:00→24:00, sem nunca dar zoom. É a
+                âncora que responde "onde eu estou" quando a faixa detalhada
+                está mostrando 7 minutos — sem ele, o operador com zoom se
+                perde no dia. Retângulo = janela visível: clique centra,
+                arraste move. Padrão de Milestone/Frigate. */}
+            <div
+              ref={minimapRef}
+              className="relative mb-1.5 h-5 cursor-pointer select-none overflow-hidden rounded-sm border border-[hsl(var(--border))] bg-[hsl(222,14%,12%)]"
+              title="Dia inteiro — clique para ir, arraste a janela para navegar"
+              onMouseDown={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                minimapDragRef.current = true;
+                const minuto = ((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS;
+                setViewCenter(clamp(minuto, zoomedWindow / 2, TOTAL_MINS - zoomedWindow / 2));
+              }}
+              onMouseMove={(event) => {
+                if (!minimapDragRef.current) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                const minuto = ((event.clientX - rect.left) / Math.max(1, rect.width)) * TOTAL_MINS;
+                setViewCenter(clamp(minuto, zoomedWindow / 2, TOTAL_MINS - zoomedWindow / 2));
+              }}
+              onMouseUp={() => { minimapDragRef.current = false; }}
+              onMouseLeave={() => { minimapDragRef.current = false; }}
+            >
+              {minimapaBuckets.map((bucket) => (
+                <div
+                  key={bucket.indice}
+                  className="pointer-events-none absolute top-0 h-full"
+                  style={{
+                    left: `${(bucket.indice / 720) * 100}%`,
+                    // Largura MÍNIMA de 2px: um alarme de 3 segundos ocupa
+                    // 0,003% do dia — renderizado com fidelidade, some.
+                    width: 'max(2px, 0.1389%)',
+                    background: getSegmentColor(bucket.tipo),
+                    opacity: bucket.tipo === 'recorded' ? 0.75 : 1,
+                  }}
+                />
+              ))}
+              {/* Janela visível */}
+              <div
+                className="pointer-events-none absolute top-0 h-full rounded-[2px] border-[1.5px] border-white/70 bg-white/10"
+                style={{
+                  left: `${(viewStart / TOTAL_MINS) * 100}%`,
+                  width: `max(8px, ${((viewEnd - viewStart) / TOTAL_MINS) * 100}%)`,
+                }}
+              />
+              <div
+                className="pointer-events-none absolute top-0 h-full w-px bg-white/90"
+                style={{ left: `${(playhead / TOTAL_MINS) * 100}%` }}
+              />
+            </div>
+
+            {/* ── RÉGUA DE TICKS ────────────────────────────────────────────
+                Três níveis em horários REDONDOS, com granularidade que
+                acompanha o zoom (../lib/timeline-ruler). Antes eram cinco
+                rótulos em posição fixa, que com zoom caíam em "06:37" e não
+                serviam para mirar nada. */}
+            <div className="relative mb-0.5 h-4 select-none overflow-hidden">
+              {ticksDaRegua.ticks.map((tick) => {
+                const pct = ((tick.minuto - viewStart) / (viewEnd - viewStart)) * 100;
+                if (pct < -2 || pct > 102) return null;
+                const altura = tick.nivel === 'maior' ? 'h-2.5' : tick.nivel === 'medio' ? 'h-1.5' : 'h-1';
+                const cor = tick.nivel === 'maior' ? 'bg-white/45' : tick.nivel === 'medio' ? 'bg-white/25' : 'bg-white/15';
+                return (
+                  <div key={`${tick.nivel}-${tick.minuto}`} className="pointer-events-none absolute bottom-0" style={{ left: `${pct}%` }}>
+                    <div className={`${altura} ${cor} w-px`} />
+                  </div>
+                );
+              })}
+              {ticksDaRegua.ticks.filter((t) => t.nivel === 'maior').map((tick) => {
+                const pct = ((tick.minuto - viewStart) / (viewEnd - viewStart)) * 100;
+                if (pct < 0 || pct > 100) return null;
+                const rotulo = ticksDaRegua.granularidade.formato === 'HH'
+                  ? format(addMinutes(dayStart, tick.minuto), 'HH') + 'h'
+                  : format(addMinutes(dayStart, tick.minuto), ticksDaRegua.granularidade.formato === 'HH:mm' ? 'HH:mm' : 'HH:mm:ss');
+                return (
+                  <div
+                    key={`rot-${tick.minuto}`}
+                    // tabular-nums: sem isso os dígitos mudam de largura e a
+                    // régua "vibra" durante o pan.
+                    className="pointer-events-none absolute top-0 font-mono text-[10px] tabular-nums text-white/55"
+                    style={{ left: `${pct}%`, transform: 'translateX(-50%)' }}
+                  >
+                    {rotulo}
+                  </div>
+                );
+              })}
+            </div>
+
             <div
               ref={timelineTrackRef}
-              className="relative mb-2 h-9 cursor-pointer select-none overflow-hidden rounded bg-[hsl(var(--muted))]"
+              className="relative mb-2 h-9 cursor-pointer select-none overflow-hidden rounded-sm border border-[hsl(var(--border))] bg-[hsl(222,14%,15%)]"
               title="Clique para posicionar · role para dar zoom · arraste para mover"
               onMouseDown={onTimelinePanStart}
               onMouseMove={onTimelineHover}
@@ -2997,42 +3169,80 @@ export default function PlaybackPage() {
                     }}
                     style={{
                       left: `${((segStart - viewStart) / windowSize) * 100}%`,
-                      width: `${((segEnd - segStart) / windowSize) * 100}%`,
-                      background: getSegmentColor(segment.type),
+                      // Largura MÍNIMA de 2px: um alarme de 3 segundos numa
+                      // visão de 24h ocupa 0,003% da largura — desenhado com
+                      // fidelidade, ele simplesmente não existe na tela.
+                      width: `max(${isEventMarker ? 3 : 2}px, ${((segEnd - segStart) / windowSize) * 100}%)`,
+                      background: segment.type === 'recorded_broken' ? HACHURA_DEFEITO : getSegmentColor(segment.type),
                       cursor: segment.type === 'recorded' || segment.type === 'recorded_broken' ? 'pointer' : 'default',
-                      zIndex: isEventMarker ? 2 : 1,
+                      zIndex: isEventMarker ? 3 : 1,
+                      borderRadius: isEventMarker ? '0 0 2px 2px' : '1px',
                     }}
                   />
                 );
               })}
-              <div className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-white shadow-lg" style={{ left: `${((playhead - viewStart) / (viewEnd - viewStart)) * 100}%` }}>
-                <div className="absolute top-0 left-1/2 h-0 w-0 -translate-x-1/2 border-l-[4px] border-r-[4px] border-t-[6px] border-transparent border-t-white" />
+              {/* Playhead: linha + pílula com a hora exata. Os rótulos fixos
+                  de 0/25/50/75/100% saíram — quem dá a escala agora é a régua
+                  de ticks acima, em horários redondos. */}
+              <div
+                className="pointer-events-none absolute top-0 bottom-0 z-[4] w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.6)]"
+                style={{ left: `${((playhead - viewStart) / (viewEnd - viewStart)) * 100}%` }}
+              >
+                <div className="absolute top-0 left-1/2 h-0 w-0 -translate-x-1/2 border-l-[5px] border-r-[5px] border-t-[7px] border-transparent border-t-white" />
+                <div className="absolute -top-[19px] left-1/2 -translate-x-1/2 rounded bg-white px-1 py-px font-mono text-[9px] font-semibold tabular-nums leading-tight text-black shadow">
+                  {format(addMinutes(dayStart, playhead), 'HH:mm:ss')}
+                </div>
               </div>
-              {[0, 0.25, 0.5, 0.75, 1].map((pct) => {
-                const minute = viewStart + pct * (viewEnd - viewStart);
-                return (
-                  <div key={pct} className="pointer-events-none absolute bottom-1 font-mono text-[9px] text-white/40" style={{ left: `${pct * 100}%`, transform: 'translateX(-50%)' }}>
-                    {format(addMinutes(dayStart, minute), 'HH:mm')}
-                  </div>
-                );
-              })}
             </div>
             </div>
 
             <div className="mb-3 flex flex-wrap items-center gap-3">
+              {/* Salto entre eventos: em 24h com 5 eventos, achar no olho é
+                  tortura. Padrão Verkada (setas nas bordas) + teclas N/P. */}
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => irParaEvento(-1)}
+                  title="Evento anterior (P)"
+                  className="rounded border border-border px-1.5 py-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <span className="px-1 text-[10px] text-[hsl(var(--muted-foreground))]">
+                  {instantesDeEvento.length ? `${instantesDeEvento.length} evento(s)` : 'sem eventos'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => irParaEvento(1)}
+                  title="Próximo evento (N)"
+                  className="rounded border border-border px-1.5 py-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <span className="h-4 w-px bg-[hsl(var(--border))]" />
+              {/* Legenda SEMPRE visível: sem ela o operador adivinha o que é
+                  âmbar vs laranja. A forma acompanha a cor (barra alta =
+                  trecho, marcador baixo = evento) porque cor sozinha exclui
+                  quem tem deficiência de visão de cor. */}
               {[
-                ['Gravação', 'recorded', 'Trecho com vídeo gravado em disco'],
-                ['Evento de movimento', 'motion', 'Marcador no topo: movimento detectado dentro da gravação'],
-                ['Evento de alarme', 'alarm', 'Marcador no topo: alarme dentro da gravação'],
+                ['Gravação', 'recorded', 'Trecho com vídeo disponível (disco ou nuvem)'],
+                ['Movimento', 'motion', 'Marcador no topo: movimento detectado dentro da gravação'],
+                ['Alarme', 'alarm', 'Marcador no topo: alarme dentro da gravação'],
+                ['Indisponível', 'recorded_broken', 'Arquivo ausente, incompleto ou corrompido — hachurado'],
               ].map(([label, type, hint]) => (
                 <div key={type} className="flex items-center gap-1" title={hint}>
                   <span
-                    className={type === 'recorded' ? 'h-2.5 w-2.5 rounded-sm' : 'h-1 w-2.5 rounded-sm'}
-                    style={{ background: getSegmentColor(type as TimelineSegment['type']) }}
+                    className={type === 'recorded' || type === 'recorded_broken' ? 'h-2.5 w-2.5 rounded-sm' : 'h-1 w-2.5 rounded-sm'}
+                    style={{ background: type === 'recorded_broken' ? HACHURA_DEFEITO : getSegmentColor(type as TimelineSegment['type']) }}
                   />
                   <span className="text-[10px] text-[hsl(var(--muted-foreground))]">{label}</span>
                 </div>
               ))}
+              <span className="flex items-center gap-1 text-[10px] text-[hsl(var(--muted-foreground))]" title="Atalhos: Espaço/K play · J/L retroceder-avançar · ←/→ 10s · Shift+←/→ 1min · N/P evento · Home/End início-fim">
+                <span className="h-2.5 w-2.5 rounded-sm border border-[hsl(var(--border))] bg-[hsl(222,14%,15%)]" />
+                Sem gravação
+              </span>
               <button type="button" onClick={() => void handleDownload()} disabled={!selectedRecording || downloadingRecordingId === selectedRecording?.id} className="ml-auto flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45">
                 {downloadingRecordingId === selectedRecording?.id ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 Baixar
