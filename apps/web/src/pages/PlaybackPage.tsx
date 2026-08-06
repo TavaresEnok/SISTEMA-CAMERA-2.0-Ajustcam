@@ -350,7 +350,7 @@ async function createPlaybackToken(recordingId: string, accessToken: string) {
   const { data } = await axios.post<{ playToken: string; expiresAt?: string | null }>(
     `${API_URL}/recordings/${recordingId}/play-token`,
     {},
-    { headers: authHeaders(accessToken), withCredentials: true },
+    { headers: authHeaders(accessToken), withCredentials: true, timeout: 15_000 },
   );
   return data;
 }
@@ -364,7 +364,7 @@ async function downloadRecording(recordingId: string, cameraCode: string, access
   const { data } = await axios.post<{ downloadToken: string }>(
     `${API_URL}/recordings/download-batch-token`,
     { recordingIds: [recordingId] },
-    { headers: authHeaders(accessToken), withCredentials: true },
+    { headers: authHeaders(accessToken), withCredentials: true, timeout: 15_000 },
   );
   const anchor = document.createElement('a');
   anchor.href = `${API_URL}/recordings/${recordingId}/download-file?token=${encodeURIComponent(data.downloadToken)}`;
@@ -419,6 +419,8 @@ export default function PlaybackPage() {
   const [selectedForZip, setSelectedForZip] = useState<Set<string>>(new Set());
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [pendingSeekSeconds, setPendingSeekSeconds] = useState<number | null>(null);
+  const [windowRetryNonce, setWindowRetryNonce] = useState(0);
+  const [windowRetryAttempts, setWindowRetryAttempts] = useState(0);
   // Posição a restaurar num RETRY (stall/"Tentar novamente"). Ref separado do
   // pendingSeekSeconds de propósito: o efeito de "seek no mesmo segmento"
   // consome o estado no elemento VELHO (que ainda está montado e com a mesma
@@ -1245,6 +1247,41 @@ export default function PlaybackPage() {
     };
   }, [accessToken, cameras.length, client, compareCameraIds, compareEnabled, selectedCamId, selectedDate]);
 
+  // ── PRINCIPAL SEM GRAVAÇÃO NO DIA: PROMOVE QUEM TEM ───────────────────────
+  //
+  // O transporte do multi-câmera é comandado pela PRINCIPAL. Com uma principal
+  // sem gravação no dia (visto em produção: entrar no modo com a câmera de
+  // teste selecionada), os seguidores carregavam o trecho certo mas o play
+  // ficava morto — e qualquer tentativa era pausada de volta pelo laço de
+  // sincronia. O operador ficava sem entender por que nada andava.
+  //
+  // A promoção troca a principal pela primeira câmera da comparação que TEM
+  // gravação, mantendo a antiga como seguidora (o conjunto de células na tela
+  // não muda), e avisa o que fez — mágica silenciosa também confunde.
+  useEffect(() => {
+    if (!compareEnabled) return;
+    const gravacoesDa = (cameraId: string) => compareRecordingsByCamera[cameraId] ?? null;
+    const principal = gravacoesDa(selectedCamId);
+    if (principal === null) return; // ainda carregando: não decidir no escuro
+    if (principal.some((item) => item.fileUsable ?? item.fileExists)) return;
+    const candidata = compareCameraIds.find((cameraId) => {
+      const items = gravacoesDa(cameraId);
+      return Boolean(items?.some((item) => item.fileUsable ?? item.fileExists));
+    });
+    if (!candidata) return;
+    const antiga = selectedCamId;
+    const nomeCandidata = cameras.find((camera) => camera.id === candidata)?.name ?? 'outra câmera';
+    setSelectedCamId(candidata);
+    setCompareCameraIds((atuais) => {
+      const semCandidata = atuais.filter((id) => id !== candidata);
+      return antiga && !semCandidata.includes(antiga) ? [...semCandidata, antiga] : semCandidata;
+    });
+    toast({
+      title: 'Câmera principal trocada',
+      description: `A principal não tinha gravação neste dia — "${nomeCandidata}" assumiu o comando da reprodução.`,
+    });
+  }, [cameras, compareCameraIds, compareEnabled, compareRecordingsByCamera, selectedCamId]);
+
   const selectedCam = useMemo(() => cameras.find((camera) => camera.id === selectedCamId) ?? cameras[0] ?? null, [cameras, selectedCamId]);
   const selectedDay = useMemo(() => new Date(`${selectedDate}T00:00:00`), [selectedDate]);
   const dayStart = useMemo(() => startOfDay(selectedDay), [selectedDay]);
@@ -1802,7 +1839,32 @@ export default function PlaybackPage() {
     viewEnd,
     viewStart,
     windowedFallback,
+    windowRetryNonce,
   ]);
+
+  // ── O SPINNER "aguardando o detalhe" TEM SAÍDA ────────────────────────────
+  //
+  // Estado sem vigia: gravação selecionada (pela playlist/auto-avanço) cujo
+  // detalhe ainda não está na lista → spinner. Se a carga daquela faixa
+  // FALHOU (o catch de fundo é silencioso de propósito), nada re-tentava — e o
+  // vigia de stall não cobre porque não há URL ativa. Spinner eterno.
+  //
+  // A cada 7s preso, o nonce força o efeito de janela a re-planejar (faixa que
+  // falhou voltou a ficar livre, então é re-pedida). Depois de 2 tentativas o
+  // spinner passa a DIZER que está demorando — retry silencioso que nunca
+  // avisa é quase tão ruim quanto travar.
+  useEffect(() => {
+    const preso = loadingPlayback && Boolean(selectedRecordingId) && !recordingById.has(selectedRecordingId ?? '');
+    if (!preso) {
+      setWindowRetryAttempts(0);
+      return;
+    }
+    const timer = globalThis.setTimeout(() => {
+      setWindowRetryAttempts((n) => n + 1);
+      setWindowRetryNonce((n) => n + 1);
+    }, 7_000);
+    return () => globalThis.clearTimeout(timer);
+  }, [loadingPlayback, recordingById, selectedRecordingId, windowRetryNonce]);
 
   // Seguir o playhead SEM roubar a janela: regra pura em
   // ../lib/timeline-window (decidirCentroAoMoverPlayhead) — reprodução só
@@ -3107,7 +3169,13 @@ export default function PlaybackPage() {
               <div className="absolute inset-0 flex items-center justify-center bg-black/35">
                 <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/55 px-3 py-2 text-xs text-white/80">
                   <LoaderCircle className="h-4 w-4 animate-spin" />
-                  {loadingRecordings ? 'Carregando gravações do dia' : compatMode && selectedRecording && !selectedRecording.compatibleCached ? 'Preparando gravação compatível' : 'Carregando gravação'}
+                  {loadingRecordings
+                    ? 'Carregando gravações do dia'
+                    : compatMode && selectedRecording && !selectedRecording.compatibleCached
+                      ? 'Preparando gravação compatível'
+                      : windowRetryAttempts >= 2
+                        ? 'A gravação está demorando a carregar — tentando de novo…'
+                        : 'Carregando gravação'}
                 </div>
               </div>
             )}
@@ -3471,7 +3539,13 @@ export default function PlaybackPage() {
               )}
             </div>
 
-            <details className="hidden mb-3 rounded-lg border border-border bg-background/55 p-3">
+            {/* Reexibido a pedido do dono (2026-08-07): estava `hidden` desde
+                57547ec (23/06) sem comentário de intenção — diferente dos
+                blocos vizinhos, que declaram por que foram ocultados. É o
+                ÚNICO caminho da página para exportar trecho com motivo
+                auditado, salvar marcador e baixar clipe. Fica em <details>
+                fechado: presente sem atrapalhar quem não usa. */}
+            <details className="mb-3 rounded-lg border border-border bg-background/55 p-3">
               <summary className="cursor-pointer text-xs font-semibold">
                 <span className="inline-flex items-center gap-2">
                   <Scissors className="h-3.5 w-3.5 text-[hsl(var(--primary))]" />
