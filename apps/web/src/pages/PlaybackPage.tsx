@@ -2905,7 +2905,8 @@ export default function PlaybackPage() {
                     const segStart = Math.max(segment.start, viewStart);
                     const segEnd = Math.min(segment.end, viewEnd);
                     const windowSize = viewEnd - viewStart;
-                    const isEventMarker = segment.type === 'motion' || segment.type === 'alarm';
+                    if (segment.type === 'motion') return null;
+                    const isEventMarker = segment.type === 'alarm';
                     return (
                       <div
                         key={`${camera.id}-${segment.type}-${index}-${segStart}`}
@@ -3187,16 +3188,20 @@ export default function PlaybackPage() {
                 const segStart = Math.max(segment.start, viewStart);
                 const segEnd = Math.min(segment.end, viewEnd);
                 const windowSize = viewEnd - viewStart;
-                // Movimento/alarme são EVENTOS dentro de uma gravação, não trechos:
-                // desenhados como marcador fino no topo, sobre a faixa verde.
-                const isEventMarker = segment.type === 'motion' || segment.type === 'alarm';
+                // A régua marca GRAVAÇÃO: verde do início ao fim, e ponto
+                // (decisão do dono, 2026-08-07 — "se tem gravação de 10:20 até
+                // 10:22, esses 2 minutos ficam verdes"). MOVIMENTO NÃO PINTA:
+                // nesta frota o detector dispara o dia todo e os marcadores
+                // amarelos viravam uma banda contínua que engolia o verde.
+                // Movimento continua na contagem/saltos ‹ › N/P e na página
+                // /review. ALARME (raro e grave) segue como marcador fino.
+                if (segment.type === 'motion') return null;
+                const isEventMarker = segment.type === 'alarm';
                 const segmentTitle = segment.type === 'recorded'
                   ? `Gravação ${format(addMinutes(dayStart, segment.start), 'HH:mm')}–${format(addMinutes(dayStart, segment.end), 'HH:mm')}${segment.cloudOnly ? ' · somente na nuvem (sem cópia local)' : ''}`
                   : segment.type === 'recorded_broken'
                     ? 'Trecho com arquivo ausente/corrompido'
-                    : segment.type === 'motion'
-                      ? `Evento de movimento ${format(addMinutes(dayStart, segment.start), 'HH:mm')}`
-                      : segment.type === 'alarm'
+                    : segment.type === 'alarm'
                         ? `Evento de alarme ${format(addMinutes(dayStart, segment.start), 'HH:mm')}`
                         : 'Sem gravação';
                 return (
@@ -3301,9 +3306,12 @@ export default function PlaybackPage() {
                   âmbar vs laranja. A forma acompanha a cor (barra alta =
                   trecho, marcador baixo = evento) porque cor sozinha exclui
                   quem tem deficiência de visão de cor. */}
+              {/* "Movimento" saiu da legenda porque saiu da régua: verde marca
+                  gravação do início ao fim, e ponto. Movimento vive na página
+                  /review e nos saltos de evento ‹ › — legenda só descreve o
+                  que está DESENHADO, senão ela mesma vira fonte de confusão. */}
               {[
                 ['Gravação', 'recorded', 'Trecho com vídeo disponível (disco ou nuvem)'],
-                ['Movimento', 'motion', 'Marcador no topo: movimento detectado dentro da gravação'],
                 ['Alarme', 'alarm', 'Marcador no topo: alarme dentro da gravação'],
                 ['Indisponível', 'recorded_broken', 'Arquivo ausente, incompleto ou corrompido — hachurado'],
               ].map(([label, type, hint]) => (
