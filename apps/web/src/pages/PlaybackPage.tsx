@@ -2098,14 +2098,22 @@ export default function PlaybackPage() {
   // (feedback do dono, 2026-08-07). É como os grandes VMS desenham o resumo:
   // a trilha de cobertura é uma; eventos são detalhe da faixa de baixo. A
   // exceção é ALARME: raro e grave demais para sumir do mapa do dia.
+  // A base é a COBERTURA DO DIA INTEIRO (o resumo barato), não só o detalhe
+  // carregado: com timeline por janela, o detalhe existe apenas onde o operador
+  // já navegou — sem o resumo, o minimapa mostraria "sem gravação" em faixas
+  // que simplesmente ainda não carregaram. O detalhe entra por cima para
+  // marcar defeito (hachura) e alarme.
   const minimapaBuckets = useMemo(
     () => agregarMinimapa(
-      (timelineSegments as Array<{ start: number; end: number; type: string }>)
-        .filter((s) => s.type === 'recorded' || s.type === 'recorded_broken' || s.type === 'alarm'),
+      [
+        ...dayCoverage.map((span) => ({ start: span.start, end: span.end, type: 'recorded' as const })),
+        ...(timelineSegments as Array<{ start: number; end: number; type: string }>)
+          .filter((s) => s.type === 'recorded' || s.type === 'recorded_broken' || s.type === 'alarm'),
+      ],
       TOTAL_MINS,
       720,
     ),
-    [timelineSegments],
+    [dayCoverage, timelineSegments],
   );
 
   // Instantes de evento (movimento/alarme) para o salto ‹ › e as teclas N/P.
