@@ -409,6 +409,9 @@ export default function PlaybackPage() {
   // Prévia ao passar o mouse na timeline: miniatura + hora do trecho sob o cursor.
   const [timelineHover, setTimelineHover] = useState<{ x: number; minute: number; recordingId: string | null } | null>(null);
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
+  // Espelho para timers assíncronos checarem a seleção VIGENTE sem stale closure.
+  const selectedRecordingIdRef = useRef<string | null>(null);
+  useEffect(() => { selectedRecordingIdRef.current = selectedRecordingId; }, [selectedRecordingId]);
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [loadingPlayback, setLoadingPlayback] = useState(false);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -416,6 +419,12 @@ export default function PlaybackPage() {
   const [selectedForZip, setSelectedForZip] = useState<Set<string>>(new Set());
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [pendingSeekSeconds, setPendingSeekSeconds] = useState<number | null>(null);
+  // Posição a restaurar num RETRY (stall/"Tentar novamente"). Ref separado do
+  // pendingSeekSeconds de propósito: o efeito de "seek no mesmo segmento"
+  // consome o estado no elemento VELHO (que ainda está montado e com a mesma
+  // gravação) antes de o elemento novo nascer — o ref só é lido no
+  // onLoadedMetadata do elemento remontado.
+  const retrySeekSecondsRef = useRef<number | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [compatMode, setCompatMode] = useState(false);
@@ -946,6 +955,28 @@ export default function PlaybackPage() {
           // Segundo plano: a janela do operador já está desenhada. O que faltar
           // é buscado de novo quando ele mover a régua para lá.
         });
+        // ── EVENTOS do dia INTEIRO, também em segundo plano ─────────────────
+        //
+        // Três recursos prometem escopo de DIA usando o que havia carregado:
+        // o contador "X evento(s)", os saltos ‹ ›/N/P e o alarme no minimapa
+        // (cuja exceção declarada é "raro e grave demais para sumir do mapa").
+        // Sem esta varredura, um alarme das 09:00 numa vista aberta às 18:00
+        // rendia "0 eventos" e P dizia "Primeiro evento do dia" — para um VMS
+        // probatório, "não há eventos" quando há é a mentira mais cara.
+        void loadEventRanges(
+          orderRangesByDistance(
+            chunkRanges(
+              subtractRanges({ start: 0, end: TOTAL_MINS }, reservedEventRangesRef.current),
+              WINDOW_BACKGROUND_CHUNK_MINUTES,
+            ),
+            center,
+          ),
+          key,
+          dayStartMs,
+          selectedCamId,
+        ).catch(() => {
+          // Cosmético que se cura sozinho: a régua busca ao navegar.
+        });
       } catch {
         if (cancelled || loadKeyRef.current !== key) return;
         setWindowedFallback(true);
@@ -1284,10 +1315,15 @@ export default function PlaybackPage() {
     const items = compareRecordingsByCamera[camera.id] ?? (camera.id === selectedCamId ? recordings : []);
     const eventsForCamera = camera.id === selectedCamId ? playbackEvents : [];
     const segments = buildTimelineSegments(items, eventsForCamera, dayStart.getTime());
+    // Janela ABSOLUTA da lib testada — este trecho ainda usava a aritmética
+    // antiga (hora de relógio + fim = startedAt quando não há endedAt), as
+    // mesmas três causas documentadas como "O defeito" no cabeçalho de
+    // playback-selection.ts: gravação em curso aparecia como "Vazio" enquanto
+    // o vídeo dela tocava logo acima.
+    const instanteMs = dayStart.getTime() + playhead * 60_000;
     const current = items.find((recording) => {
-      const start = minuteOfDay(recording.startedAt);
-      const end = minuteOfDay(recording.endedAt ?? recording.startedAt);
-      return playhead >= start && playhead <= end;
+      const janela = janelaDaGravacao(recording, Date.now());
+      return instanteMs >= janela.startMs && instanteMs < janela.endMs;
     });
     return { camera, items, segments, current };
   }), [compareCameraItems, compareRecordingsByCamera, playbackEvents, playhead, recordings, selectedCamId]);
@@ -1540,7 +1576,21 @@ export default function PlaybackPage() {
   useEffect(() => {
     setCompatMode(false);
     setReloadNonce(0);
-    autoSkipTriedRef.current.clear();
+    // Um retry agendado para a gravação ANTERIOR não pode aterrissar nesta.
+    retrySeekSecondsRef.current = null;
+    // Marca de clipe é POR GRAVAÇÃO (offset em segundos dentro do arquivo):
+    // sobreviver ao auto-avanço exportava do segmento B um intervalo marcado
+    // no A — um trecho que o operador nunca escolheu.
+    setClipStartSeconds(null);
+    setClipEndSeconds(null);
+    // NÃO limpar autoSkipTriedRef aqui. O auto-skip TROCA a seleção — limpar o
+    // guard na troca de seleção o apagava a cada salto, e duas gravações
+    // vizinhas quebradas (listadas no banco, 404 no storage — o caso do bucket
+    // apagado) entravam em ping-pong eterno: A falha → pula p/ B → guard limpo
+    // → B falha → volta p/ A → … com POST de token, sonda e remontagem do
+    // <video> a cada volta. O guard agora só zera em navegação EXPLÍCITA do
+    // operador (setPlayheadFromMinute) — o gesto humano é o que diz "tente de
+    // novo a partir daqui".
   }, [selectedRecordingId]);
 
   // Modo compatível (servidor transcodifica HEVC→H.264 sob demanda) é assunto do
@@ -1635,6 +1685,11 @@ export default function PlaybackPage() {
       setVideoError('O vídeo parou de receber dados — reconectando…');
       lastVideoPlayheadRef.current = null;
       autoResumeRef.current = true;
+      // POSIÇÃO preservada de verdade: no caminho legado, mudar só o nonce não
+      // re-roda a seleção (que é quem calculava o seek) — o comentário
+      // prometia "posição preservada pelo playhead", mas o elemento remontava
+      // e recomeçava do segundo 0: travou aos 7min, reassistia 7min.
+      retrySeekSecondsRef.current = video.currentTime > 1 ? video.currentTime : null;
       setVodFallback(true);
       setReloadNonce((current) => current + 1);
     }, 5_000);
@@ -1642,7 +1697,13 @@ export default function PlaybackPage() {
   }, [activeSourceUrl]);
 
   const syncVideoToPlayhead = useCallback(() => {
-    if (!videoRef.current || pendingSeekSeconds == null) return;
+    if (!videoRef.current) return;
+    if (retrySeekSecondsRef.current != null) {
+      videoRef.current.currentTime = retrySeekSecondsRef.current;
+      retrySeekSecondsRef.current = null;
+      return;
+    }
+    if (pendingSeekSeconds == null) return;
     videoRef.current.currentTime = pendingSeekSeconds;
     setPendingSeekSeconds(null);
   }, [pendingSeekSeconds]);
@@ -1780,8 +1841,14 @@ export default function PlaybackPage() {
     const rect = el.getBoundingClientRect();
     const janelaAtual = TOTAL_MINS / zoom;
     const janelaNova = TOTAL_MINS / nextZoom;
+    // O início REAL da janela é o CLAMPADO (o mesmo que o render usa): perto
+    // das bordas do dia, viewCenter pode estar a menos de meia-janela da borda
+    // (ex.: carga inicial centrada na última gravação, 23:30) e derivar o
+    // cursor do centro cru fazia o zoom "fugir" do ponto mirado — exatamente o
+    // defeito que a âncora existe para evitar.
+    const inicioAtual = clamp(viewCenter - janelaAtual / 2, 0, TOTAL_MINS - janelaAtual);
     const fracao = rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0.5;
-    const cursorMin = viewCenter - janelaAtual / 2 + fracao * janelaAtual;
+    const cursorMin = inicioAtual + fracao * janelaAtual;
     const novoCentro = cursorMin + (0.5 - fracao) * janelaNova;
     setZoom(nextZoom);
     setViewCenter(clamp(novoCentro, janelaNova / 2, TOTAL_MINS - janelaNova / 2));
@@ -1843,6 +1910,9 @@ export default function PlaybackPage() {
     // reprodução assim que o vídeo estiver pronto (comportamento padrão de VMS).
     lastVideoPlayheadRef.current = null;
     autoResumeRef.current = true;
+    // Gesto explícito: o operador escolheu um ponto — o histórico de "já tentei
+    // e falhou" do auto-skip recomeça daqui.
+    autoSkipTriedRef.current.clear();
     // O nonce garante a re-seleção mesmo quando o minuto clicado É o atual:
     // setPlayhead(mesmo valor) não re-renderiza e o efeito de seleção nunca
     // rodava — clique "no lugar onde estou" não fazia nada.
@@ -2159,6 +2229,16 @@ export default function PlaybackPage() {
     const aoTeclar = (event: globalThis.KeyboardEvent) => {
       const alvo = event.target as HTMLElement | null;
       if (alvo && /^(INPUT|TEXTAREA|SELECT)$/.test(alvo.tagName)) return;
+      if (alvo?.isContentEditable) return;
+      // Dropdown/modal Radix aberto: as teclas pertencem a ELE. O seletor de
+      // câmera é BUTTON + DIVs role=option (não <select>): digitar "Portão" no
+      // typeahead disparava N/P/J/K/L no vídeo por baixo, e Espaço — que no
+      // Radix seleciona o item — virava play/pause de um vídeo escondido.
+      if (document.querySelector('[data-radix-popper-content-wrapper], [role="dialog"][data-state="open"]')) return;
+      if (alvo?.closest('[role="dialog"], [role="listbox"], [role="menu"]')) return;
+      // Espaço num BOTÃO focado deve ACIONAR o botão (comportamento nativo),
+      // não pausar o vídeo.
+      if (alvo?.tagName === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const video = videoRef.current;
       const tecla = event.key.toLowerCase();
@@ -2202,7 +2282,12 @@ export default function PlaybackPage() {
     () => recordings.filter((item) => item.fileUsable ?? item.fileExists).map((item) => item.id),
     [recordings],
   );
-  const allUsableSelected = usableRecordingIds.length > 0 && usableRecordingIds.every((id) => selectedForZip.has(id));
+  // "Tudo selecionado" para o botão de alternância: com mais gravações que o
+  // teto do ZIP, o critério é ter batido o teto — exigir TODAS fazia o botão
+  // nunca virar "Limpar seleção" numa lista de 120 (seleciona 50, rótulo
+  // continua "Selecionar todas", e desfazer era desmarcar 50 na mão).
+  const allUsableSelected = usableRecordingIds.length > 0
+    && (usableRecordingIds.every((id) => selectedForZip.has(id)) || selectedForZip.size >= ZIP_MAX_RECORDINGS);
 
   const toggleZipSelection = useCallback((recordingId: string) => {
     setSelectedForZip((current) => {
@@ -2218,14 +2303,23 @@ export default function PlaybackPage() {
 
   const toggleSelectAllForZip = useCallback(() => {
     setSelectedForZip((current) => {
-      if (usableRecordingIds.length && usableRecordingIds.every((id) => current.has(id))) return new Set();
-      const capped = usableRecordingIds.slice(0, ZIP_MAX_RECORDINGS);
+      const cheio = usableRecordingIds.length
+        && (usableRecordingIds.every((id) => current.has(id)) || current.size >= ZIP_MAX_RECORDINGS);
+      if (cheio) return new Set();
+      // As MAIS NOVAS primeiro — a mesma ordem da lista na tela. Cortar pelas
+      // mais antigas selecionava 50 gravações que o operador nem estava vendo.
+      const capped = [...usableRecordingIds]
+        .sort((a, b) => {
+          const ra = recordingById.get(a); const rb = recordingById.get(b);
+          return new Date(rb?.startedAt ?? 0).getTime() - new Date(ra?.startedAt ?? 0).getTime();
+        })
+        .slice(0, ZIP_MAX_RECORDINGS);
       if (usableRecordingIds.length > ZIP_MAX_RECORDINGS) {
-        toast({ title: 'Seleção limitada', description: `Selecionadas as ${ZIP_MAX_RECORDINGS} primeiras gravações (limite por ZIP).` });
+        toast({ title: 'Seleção limitada', description: `Selecionadas as ${ZIP_MAX_RECORDINGS} gravações mais recentes (limite por ZIP).` });
       }
       return new Set(capped);
     });
-  }, [usableRecordingIds]);
+  }, [recordingById, usableRecordingIds]);
 
   // Limpa a seleção ao trocar câmera/data e remove ids que saíram da lista.
   useEffect(() => {
@@ -2745,7 +2839,15 @@ export default function PlaybackPage() {
               const tentativas = (preparandoRetryRef.current.get(selectedRecordingId ?? '') ?? 0) + 1;
               preparandoRetryRef.current.set(selectedRecordingId ?? '', tentativas);
               if (tentativas <= 40) {
-                window.setTimeout(() => setReloadNonce((current) => current + 1), 4000);
+                // O timer captura a gravação que estava preparando: se antes
+                // dos 4s o operador trocar de gravação/câmera, o disparo
+                // NÃO recarrega a nova (recarregava do zero, com piscada e
+                // token extra, sem motivo nenhum).
+                const gravacaoDoAgendamento = selectedRecordingId;
+                window.setTimeout(() => {
+                  if (selectedRecordingIdRef.current !== gravacaoDoAgendamento) return;
+                  setReloadNonce((current) => current + 1);
+                }, 4000);
               } else {
                 setVideoError('A preparação da versão compatível está demorando além do normal. Tente novamente mais tarde.');
               }
@@ -2985,7 +3087,7 @@ export default function PlaybackPage() {
                 {standbyThumbnailUrl ? <div className="absolute inset-0 bg-black/35" /> : null}
                 <div className="text-center">
                   {recordings.length ? <CameraIcon className="mx-auto mb-2 h-10 w-10 text-white/10" /> : <VideoOff className="mx-auto mb-2 h-10 w-10 text-white/10" />}
-                  <div className="text-xs text-white/30">
+                  <div className="text-xs text-white/60">
                     {recordings.length ? 'Selecione um ponto da timeline' : 'Sem gravações nesta data'}
                   </div>
                 </div>
@@ -3022,6 +3124,9 @@ export default function PlaybackPage() {
                       // Retentar é sempre pelo caminho antigo (token novo, URL
                       // nova, elemento remontado) — inclusive saindo do contínuo.
                       lastVideoPlayheadRef.current = null;
+                      // Volta para ONDE PAROU, não para o começo do arquivo.
+                      const tempoAtual = videoRef.current?.currentTime ?? 0;
+                      retrySeekSecondsRef.current = tempoAtual > 1 ? tempoAtual : null;
                       setVodFallback(true);
                       setReloadNonce((current) => current + 1);
                     }}
@@ -3053,7 +3158,7 @@ export default function PlaybackPage() {
                     ) : timelineHover.recordingId && thumbnailUrls[timelineHover.recordingId] ? (
                       <img src={thumbnailUrls[timelineHover.recordingId]} alt="" className="h-full w-full object-cover" />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center text-[9px] text-white/30">
+                      <div className="flex h-full w-full items-center justify-center text-[9px] text-white/60">
                         {timelineHover.recordingId ? '…' : 'sem gravação'}
                       </div>
                     )}
@@ -3282,7 +3387,10 @@ export default function PlaybackPage() {
                 style={{ left: `${((playhead - viewStart) / (viewEnd - viewStart)) * 100}%` }}
               >
                 <div className="absolute top-0 left-1/2 h-0 w-0 -translate-x-1/2 border-l-[5px] border-r-[5px] border-t-[7px] border-transparent border-t-white" />
-                <div className="absolute -top-[19px] left-1/2 -translate-x-1/2 rounded bg-white px-1 py-px font-mono text-[9px] font-semibold tabular-nums leading-tight text-black shadow">
+                {/* DENTRO da trilha (top-2), não acima dela: a trilha tem
+                    overflow-hidden e a pílula posicionada em -19px era
+                    recortada — a hora exata simplesmente nunca aparecia. */}
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 rounded bg-white px-1 py-px font-mono text-[9px] font-semibold tabular-nums leading-tight text-black shadow">
                   {format(addMinutes(dayStart, playhead), 'HH:mm:ss')}
                 </div>
               </div>

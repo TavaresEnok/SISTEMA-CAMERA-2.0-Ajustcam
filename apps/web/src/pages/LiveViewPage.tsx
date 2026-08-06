@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
 import axios from 'axios';
 import { useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -183,6 +183,12 @@ export default function LiveViewPage() {
 
         const localLayouts = loadSavedLayouts();
         if (!localLayouts.length) return;
+        // Trava de migração ÚNICA (sessionStorage cobre duas abas do mesmo
+        // navegador): sem ela, duas abas de /live abertas com o servidor ainda
+        // vazio migravam as duas — layouts duplicados no servidor.
+        const TRAVA = 'drac-live-layouts-migrando';
+        if (window.sessionStorage.getItem(TRAVA)) return;
+        window.sessionStorage.setItem(TRAVA, String(Date.now()));
         const migrated = await Promise.all(localLayouts.map(async (layout) => {
           const created = await axios.post<ApiLiveLayout>(`${API_URL}/live-layouts`, {
             name: layout.name,
@@ -232,12 +238,17 @@ export default function LiveViewPage() {
   }, [cameraIds.length, cameras, setCameraIds]);
 
   useEffect(() => {
+    // Colapsa só ao CRUZAR o limiar (largo→estreito). A versão anterior rodava
+    // em todo resize e, com a janela já estreita, fechava o painel que o
+    // operador tinha acabado de abrir para escolher câmera — abrir DevTools ou
+    // girar a tela bastava para perder o painel no meio da ação.
+    let estavaLargo = window.innerWidth >= LIVE_PANEL_AUTO_COLLAPSE_WIDTH;
     const collapseWhenTight = () => {
-      if (window.innerWidth < LIVE_PANEL_AUTO_COLLAPSE_WIDTH) {
-        setPanelOpen(false);
-      }
+      const estreitoAgora = window.innerWidth < LIVE_PANEL_AUTO_COLLAPSE_WIDTH;
+      if (estreitoAgora && estavaLargo) setPanelOpen(false);
+      estavaLargo = !estreitoAgora;
     };
-    collapseWhenTight();
+    if (window.innerWidth < LIVE_PANEL_AUTO_COLLAPSE_WIDTH) setPanelOpen(false);
     window.addEventListener('resize', collapseWhenTight);
     return () => window.removeEventListener('resize', collapseWhenTight);
   }, []);
@@ -327,6 +338,10 @@ export default function LiveViewPage() {
       if (layoutDialog || deleteTarget) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      // Esc com um popover/menu/diálogo Radix aberto pertence a ELE (fechá-lo),
+      // não à página: sem esta guarda, fechar o popover "Layouts" também tirava
+      // o operador do zoom 1×1 — dois efeitos para uma tecla.
+      if (document.querySelector('[data-radix-popper-content-wrapper], [role="dialog"][data-state="open"]')) return;
       restoreLayout();
     };
     window.addEventListener('keydown', onKey);
@@ -395,13 +410,24 @@ export default function LiveViewPage() {
     setSelectedSlotIndex(null);
   };
 
+  // Trocar o tamanho da grade invalida o slot selecionado: o índice aponta
+  // para outro quadro (ou para fora da grade) na geometria nova.
+  useEffect(() => {
+    setSelectedSlotIndex(null);
+  }, [gridSize]);
+
   const addCameraToGrid = (camId: string) => {
     const newIds = [...cameraIds.slice(0, count)];
     while (newIds.length < count) newIds.push('');
     const previousIdx = newIds.findIndex((id) => id === camId);
     if (previousIdx >= 0) newIds[previousIdx] = '';
-    const targetIdx = selectedSlotIndex != null
-      ? selectedSlotIndex
+    // O slot selecionado pode ter ficado FORA da grade (operador selecionou o
+    // quadro 15 numa 5×5 e depois trocou para 2×2): escrever nele criaria um
+    // array esparso e a câmera "sumia" sem nenhum feedback — o slice(0, count)
+    // do render cortava o índice fantasma.
+    const slotValido = selectedSlotIndex != null && selectedSlotIndex < count ? selectedSlotIndex : null;
+    const targetIdx = slotValido != null
+      ? slotValido
       : newIds.findIndex(id => !id || !cameras.find(c => c.id === id));
     newIds[targetIdx >= 0 ? targetIdx : count - 1] = camId;
     setCameraIds(newIds);
@@ -438,8 +464,14 @@ export default function LiveViewPage() {
     setDeleteTarget(layout);
   };
 
+  const commitLayoutDialogRef = useRef(false);
   const commitLayoutDialog = async () => {
     if (!layoutDialog) return;
+    // Reentrância: Enter duplo (ou Enter + clique em "Salvar") disparava dois
+    // POSTs antes de o diálogo fechar — dois layouts idênticos no servidor.
+    if (commitLayoutDialogRef.current) return;
+    commitLayoutDialogRef.current = true;
+    try {
     const name = layoutDialog.name.trim();
     if (!name) return;
     const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined;
@@ -450,8 +482,13 @@ export default function LiveViewPage() {
       setSavedLayouts(nextLayouts);
       persistSavedLayouts(nextLayouts);
       try {
-        if (!headers) throw new Error('Sessão inválida.');
-        await axios.patch(`${API_URL}/live-layouts/${layoutDialog.id}`, { name }, { headers });
+        // Layout salvo offline (id `local-...`) não existe no servidor: o PATCH
+        // respondia 404 para sempre e o rename revertia — o delete já tinha
+        // esta guarda, o rename não. Localmente, renomear é só persistir.
+        if (!layoutDialog.id.startsWith('local-')) {
+          if (!headers) throw new Error('Sessão inválida.');
+          await axios.patch(`${API_URL}/live-layouts/${layoutDialog.id}`, { name }, { headers });
+        }
         toast({ title: 'Layout renomeado', description: name });
       } catch {
         setSavedLayouts(previousLayouts);
@@ -491,6 +528,9 @@ export default function LiveViewPage() {
       toast({ title: 'Layout salvo', description: name });
     }
     setLayoutDialog(null);
+    } finally {
+      commitLayoutDialogRef.current = false;
+    }
   };
 
   const confirmDeleteLayout = async () => {
@@ -550,61 +590,22 @@ export default function LiveViewPage() {
     }
   };
 
-  if (wallMode) {
-    return (
-      <div className="fixed inset-0 z-50 bg-black">
-        <div className="absolute top-3 left-3 z-50 flex items-center gap-2 px-3 py-1.5 rounded-md bg-black/72 border border-white/10 text-white text-xs font-medium">
-          <Video className="w-3.5 h-3.5 text-[hsl(var(--status-online))]" />
-          Ao Vivo / Modo Mural
-        </div>
-        <div
-          className="h-full w-full grid gap-0.5 p-0.5"
-          style={{ gridTemplateColumns: `repeat(${gridCols}, 1fr)`, gridTemplateRows: `repeat(${gridRows}, 1fr)` }}
-        >
-          {displayedCams.map((cam, i) => (
-            <div key={cam ? cam.id : `empty-${i}`} className="relative min-h-0">
-              {cam ? (
-                <CameraTile
-                  camera={{
-                    ...cam,
-                    status: isCameraRecording(cam)
-                      ? 'recording'
-                      : (cam.status === 'recording' ? 'online' : cam.status),
-                  }}
-                  selected={selectedCam === cam.id}
-                  showDetectionOverlay={selectedCam === cam.id}
-                  // Full HD só quando há exatamente 1 câmera na tela.
-                  // Em grade 2x2 ou maior, até a câmera selecionada permanece
-                  // no perfil reduzido para preservar CPU/banda.
-                  liveViewMode={count === 1 ? 'selected' : 'grid'}
-                  onClick={() => handleCamClick(cam.id)}
-                  onDoubleClick={() => handleCamDoubleClick(cam)}
-                  onAction={handleCamAction}
-                  streamStartDelayMs={streamStartDelay(i, count)}
-                />
-              ) : (
-                <div className="w-full h-full bg-[hsl(210,15%,5%)] flex items-center justify-center">
-                  <span className="text-[11px] text-white/35">Sem câmera</span>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        <button
-          onClick={toggleWallMode}
-          className="fixed top-3 right-3 z-50 ops-button flex items-center gap-1.5 px-3 text-xs bg-black/72 text-white border-white/10"
-        >
-          <Maximize2 className="w-3.5 h-3.5" />
-          Sair do Modo Mural
-        </button>
-      </div>
-    );
-  }
-
+  // ── MODO MURAL SEM DERRUBAR NENHUM PLAYER ─────────────────────────────────
+  //
+  // O mural era um `return` separado com uma árvore JSX própria. Alternar
+  // desmontava a grade INTEIRA na reconciliação: todas as sessões WHEP eram
+  // encerradas e renegociadas em rajada — a piscada em massa que o projeto
+  // declara como invariante proibido ("live saudável nunca pisca"), além do
+  // estresse no MediaMTX de cortar e reabrir ~30 leitores de uma vez.
+  //
+  // Agora o mural é a MESMA árvore com classes condicionais: o caminho do nó
+  // raiz até cada <CameraTile> não muda, então o React só re-estiliza — nenhum
+  // player desmonta, nenhum stream cai. Toolbar e painel ficam com `hidden`
+  // (montados, invisíveis) para não deslocar os irmãos na reconciliação.
   return (
-    <div className="live-workspace relative flex h-full min-h-0">
+    <div className={wallMode ? 'fixed inset-0 z-50 flex bg-black' : 'live-workspace relative flex h-full min-h-0'}>
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
-        <div className="toolbar">
+        <div className={wallMode ? 'hidden' : 'toolbar'}>
           <div className="segment">
             {GRID_PRESETS.map(({ size, icon }) => (
               <Tooltip key={size} delayDuration={0}>
@@ -813,7 +814,7 @@ export default function LiveViewPage() {
         </div>
 
         <div
-          className="cam-grid-bg flex-1 p-1 grid gap-1 min-h-0"
+          className={wallMode ? 'flex-1 grid gap-0.5 bg-black p-0.5 min-h-0' : 'cam-grid-bg flex-1 p-1 grid gap-1 min-h-0'}
           style={{ gridTemplateColumns: `repeat(${gridCols}, 1fr)`, gridTemplateRows: `repeat(${gridRows}, 1fr)` }}
         >
           {displayedCams.map((cam, i) => (
@@ -821,7 +822,7 @@ export default function LiveViewPage() {
               // Key por id de câmera: mover uma câmera de quadro MOVE o nó no DOM
               // (stream preservado) em vez de desmontar/remontar o player.
               key={cam ? `cam-${cam.id}` : `empty-${i}`}
-              className={`group relative min-h-0 rounded-md ${selectedSlotIndex === i ? 'ring-2 ring-[hsl(var(--primary))]' : ''}`}
+              className={`group relative min-h-0 rounded-md ${!wallMode && selectedSlotIndex === i ? 'ring-2 ring-[hsl(var(--primary))]' : ''}`}
               style={{ minHeight: 80 }}
             >
               {cam ? (
@@ -834,7 +835,7 @@ export default function LiveViewPage() {
                         : (cam.status === 'recording' ? 'online' : cam.status),
                     }}
                     selected={selectedCam === cam.id}
-                    showDetectionOverlay={true}
+                    showDetectionOverlay={!wallMode || selectedCam === cam.id}
                     // Full HD só quando há exatamente 1 câmera na tela.
                     // Em grade 2x2 ou maior, até a câmera selecionada permanece
                     // no perfil reduzido para preservar CPU/banda.
@@ -847,7 +848,7 @@ export default function LiveViewPage() {
                     onAction={handleCamAction}
                     streamStartDelayMs={streamStartDelay(i, count)}
                   />
-                  <div className="absolute top-9 right-1.5 z-40 flex items-center gap-1.5 opacity-0 transition-opacity hover:opacity-100 group-hover:opacity-100">
+                  <div className={wallMode ? 'hidden' : 'pointer-events-none absolute top-9 right-1.5 z-40 flex items-center gap-1.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100'}>
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
@@ -890,7 +891,7 @@ export default function LiveViewPage() {
       </div>
 
       <AnimatePresence>
-        {panelOpen && (
+        {panelOpen && !wallMode && (
           <motion.aside
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: 224, opacity: 1 }}
@@ -1034,6 +1035,21 @@ export default function LiveViewPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {wallMode && (
+        <>
+          <div className="absolute top-3 left-3 z-50 flex items-center gap-2 rounded-md border border-white/10 bg-black/72 px-3 py-1.5 text-xs font-medium text-white">
+            <Video className="w-3.5 h-3.5 text-[hsl(var(--status-online))]" />
+            Ao Vivo / Modo Mural
+          </div>
+          <button
+            onClick={toggleWallMode}
+            className="ops-button fixed top-3 right-3 z-50 flex items-center gap-1.5 border-white/10 bg-black/72 px-3 text-xs text-white"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            Sair do Modo Mural
+          </button>
+        </>
+      )}
     </div>
   );
 }

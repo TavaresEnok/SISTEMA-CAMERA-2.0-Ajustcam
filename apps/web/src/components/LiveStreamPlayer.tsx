@@ -1796,6 +1796,11 @@ export function LiveStreamPlayer({
     window.addEventListener('focus', onFocus);
     window.addEventListener('pageshow', onPageShow);
     window.addEventListener('pagehide', onPageHide);
+    // Aba que JÁ nasce em segundo plano (clique-do-meio, "abrir em nova aba"):
+    // nenhuma transição de visibilidade acontece, então a suspensão de 45s —
+    // que existe exatamente para este caso — nunca engatava, e N sessões
+    // WebRTC + transcode rodavam para sempre numa aba que ninguém viu.
+    if (document.hidden) markHidden();
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       document.removeEventListener('freeze', onFreeze);
@@ -1966,7 +1971,7 @@ export function LiveStreamPlayer({
   }, [autoPlay, error, failActiveProtocol, framesAreProgressing, isLikelyBlackFrame, isLoading, liveViewMode]);
 
   useEffect(() => {
-    if (!aiOverlayEnabled || !accessToken || !tokenHeaders) return;
+    if (!aiOverlayEnabled || !tokenHeadersRef.current) return;
     const sessionId = liveViewSessionIdRef.current;
 
     const postLease = async (action: 'start' | 'heartbeat' | 'stop') => {
@@ -1974,7 +1979,13 @@ export function LiveStreamPlayer({
         await axios.post(
           `${API_URL}/ai/live-view/${action}/${cameraId}`,
           { sessionId, ttlSeconds: LIVE_VIEW_LEASE_TTL_SECONDS, viewMode: liveViewModeRef.current },
-          { headers: tokenHeaders },
+          // Token via REF, como no efeito principal de conexão (linhas ~517):
+          // com o token nas deps, a rotação de 5 min re-executava o efeito e
+          // disparava stop+start quase simultâneos com o MESMO sessionId — se
+          // o stop chegasse depois, matava o lease recém-criado e a análise
+          // daquela câmera ficava morta até o próximo heartbeat. Numa grade de
+          // 20 câmeras eram 40 requisições inúteis a cada 5 minutos.
+          { headers: tokenHeadersRef.current },
         );
       } catch {
       }
@@ -1989,7 +2000,7 @@ export function LiveStreamPlayer({
       window.clearInterval(heartbeat);
       void postLease('stop');
     };
-  }, [accessToken, aiOverlayEnabled, cameraId, tokenHeaders]);
+  }, [aiOverlayEnabled, cameraId]);
 
   useEffect(() => {
     if (!aiOverlayEnabled || !accessToken || error) {

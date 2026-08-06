@@ -70,16 +70,28 @@ export function SyncedCameraPlayer({
   const loadedRecordingIdRef = useRef<string | null>(null);
   const lastSeekAtRef = useRef<number | null>(null);
   const [statusLabel, setStatusLabel] = useState<string | null>('Carregando...');
+  // Renova a playlist (e com ela os tokens de segmento) antes de o TTL de ~5
+  // minutos vencer. A página principal renova a cada 15s; o seguidor buscava
+  // UMA vez e, numa comparação mais longa que o TTL, a virada de segmento
+  // usava token morto → 401 silencioso → célula preta com cara de "sem cena".
+  const [playlistNonce, setPlaylistNonce] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setPlaylistNonce((n) => n + 1), 4 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Playlist do dia desta câmera. Falha é SILENCIOSA e vira rótulo na célula:
   // uma câmera sem gravação no dia não pode virar tela de erro no meio de uma
   // investigação das outras.
   useEffect(() => {
     let cancelled = false;
-    playlistRef.current = null;
-    tokensRef.current = {};
-    loadedRecordingIdRef.current = null;
-    setStatusLabel('Carregando...');
+    const renovacao = playlistNonce > 0 && playlistRef.current !== null;
+    if (!renovacao) {
+      playlistRef.current = null;
+      tokensRef.current = {};
+      loadedRecordingIdRef.current = null;
+      setStatusLabel('Carregando...');
+    }
 
     void (async () => {
       try {
@@ -88,14 +100,16 @@ export function SyncedCameraPlayer({
         const playlist = normalizeVodPlaylist(raw, Date.now());
         playlistRef.current = playlist;
         tokensRef.current = segmentTokens(playlist);
-        setStatusLabel(playlist ? null : 'Sem gravação neste dia');
+        if (!renovacao) setStatusLabel(playlist ? null : 'Sem gravação neste dia');
       } catch {
-        if (!cancelled) setStatusLabel('Sem gravação neste dia');
+        // Renovação que falhou não derruba o que está tocando: os tokens
+        // antigos podem ainda valer, e a próxima renovação tenta de novo.
+        if (!cancelled && !renovacao) setStatusLabel('Sem gravação neste dia');
       }
     })();
 
     return () => { cancelled = true; };
-  }, [cameraId, fetchPlaylist]);
+  }, [cameraId, fetchPlaylist, playlistNonce]);
 
   const segmentUrl = useCallback((playUrl: string) => {
     const path = refreshSegmentUrl(playUrl, tokensRef.current);
@@ -199,6 +213,15 @@ export function SyncedCameraPlayer({
         playsInline
         preload="auto"
         crossOrigin="use-credentials"
+        // Sem isto, um 401/404 no src virava retângulo preto SEM AVISO — numa
+        // tela feita para "seguir a pessoa entre ambientes", célula congelada
+        // com cara de câmera sem cena induz conclusão errada. Zerar o
+        // loadedRecordingId faz o laço de sync recarregar o segmento com o
+        // token renovado no próximo tick.
+        onError={() => {
+          loadedRecordingIdRef.current = null;
+          setStatusLabel('Falha no vídeo — recarregando…');
+        }}
       />
       {statusLabel && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70 px-2 text-center text-[10px] text-[hsl(var(--muted-foreground))]">
