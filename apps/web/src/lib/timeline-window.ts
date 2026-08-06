@@ -395,3 +395,42 @@ export function mergeByIdSorted<T>(
     return 0;
   });
 }
+
+// ── SEGUIR O PLAYHEAD SEM ROUBAR A JANELA DO OPERADOR ───────────────────────
+//
+// O defeito que isto corrige: a janela recentrava no playhead SEMPRE que ele
+// estava fora dela. Durante a reprodução o playhead atualiza a cada ~250ms —
+// no zoom máximo, qualquer pan era desfeito no instante seguinte e o operador
+// "não conseguia caminhar pela timeline" (relato de produção, 2026-08-07).
+//
+// A regra dos grandes VMS tem dois lados:
+//   · o operador NAVEGOU (clique, salto de evento, "Ir para hora") → a janela
+//     VAI até lá — ele pediu para ver aquele ponto;
+//   · a REPRODUÇÃO empurrou o playhead para fora → a janela só acompanha se
+//     ela JÁ estava acompanhando (o playhead estava visível no quadro
+//     anterior). Se o operador tinha ido embora, a janela é DELE.
+export function decidirCentroAoMoverPlayhead(entrada: {
+  /** Centro atual da janela, em minutos. */
+  centro: number;
+  /** Minutos visíveis na janela atual. */
+  janelaMinutos: number;
+  /** Total de minutos do dia. */
+  totalMinutos: number;
+  /** Playhead ANTES desta mudança. */
+  playheadAnterior: number;
+  /** Playhead agora. */
+  playhead: number;
+  /** A mudança veio da reprodução (onTimeUpdate), não de navegação. */
+  vindoDoVideo: boolean;
+}): number {
+  const { centro, janelaMinutos, totalMinutos, playheadAnterior, playhead, vindoDoVideo } = entrada;
+  const inicio = Math.min(Math.max(centro - janelaMinutos / 2, 0), totalMinutos - janelaMinutos);
+  const margem = janelaMinutos * 0.05;
+  const visivel = playhead >= inicio + margem && playhead <= inicio + janelaMinutos - margem;
+  if (visivel) return centro;
+  if (vindoDoVideo) {
+    const anteriorVisivel = playheadAnterior >= inicio && playheadAnterior <= inicio + janelaMinutos;
+    if (!anteriorVisivel) return centro;
+  }
+  return playhead;
+}

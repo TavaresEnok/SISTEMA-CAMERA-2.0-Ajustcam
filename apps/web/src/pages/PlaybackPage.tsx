@@ -56,6 +56,7 @@ import {
   subtractRanges,
   type PagePlan,
   type TimeRange,
+  decidirCentroAoMoverPlayhead,
 } from '../lib/timeline-window';
 
 type TimelineSegment = {
@@ -1742,15 +1743,26 @@ export default function PlaybackPage() {
     windowedFallback,
   ]);
 
+  // Seguir o playhead SEM roubar a janela: regra pura em
+  // ../lib/timeline-window (decidirCentroAoMoverPlayhead) — reprodução só
+  // arrasta a janela se ela já estava acompanhando; navegação explícita sempre
+  // leva a janela junto. E só roda quando o PLAYHEAD muda: rodar no zoom
+  // desfazia a âncora do cursor no instante seguinte à roda.
+  const playheadAnteriorRef = useRef(playhead);
   useEffect(() => {
-    setViewCenter((center) => {
-      const windowMins = TOTAL_MINS / zoom;
-      const start = clamp(center - windowMins / 2, 0, TOTAL_MINS - windowMins);
-      const margin = windowMins * 0.05;
-      if (playhead >= start + margin && playhead <= start + windowMins - margin) return center;
-      return playhead;
-    });
-  }, [playhead, zoom]);
+    const anterior = playheadAnteriorRef.current;
+    playheadAnteriorRef.current = playhead;
+    if (anterior === playhead) return;
+    const vindoDoVideo = lastVideoPlayheadRef.current === playhead;
+    setViewCenter((center) => decidirCentroAoMoverPlayhead({
+      centro: center,
+      janelaMinutos: TOTAL_MINS / zoomRef.current,
+      totalMinutos: TOTAL_MINS,
+      playheadAnterior: anterior,
+      playhead,
+      vindoDoVideo,
+    }));
+  }, [playhead]);
 
   // Zoom com a roda do mouse, sempre centrado no PONTEIRO de reprodução: ao
   // aproximar/afastar, o indicador continua no centro e as gravações não "fogem"

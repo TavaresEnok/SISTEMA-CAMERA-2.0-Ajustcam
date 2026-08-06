@@ -17,6 +17,7 @@ import {
   sliceVisibleSpans,
   subtractRanges,
   visibleSpanRange,
+  decidirCentroAoMoverPlayhead,
 } from '../src/lib/timeline-window.ts';
 
 // Timeline por JANELA (item "timeline virtualizada"): a PlaybackPage não pode mais
@@ -442,4 +443,46 @@ test('mergeByIdSorted: item novo substitui o antigo de mesmo id', () => {
   );
   assert.equal(merged.length, 1);
   assert.equal(merged[0].fileUsable, true);
+});
+
+// ── SEGUIR O PLAYHEAD SEM ROUBAR A JANELA ───────────────────────────────────
+// Relato de produção (2026-08-07): "no zoom máximo, movo para o lado e quando
+// solto o mouse volta para onde o play está — não consigo caminhar pela
+// timeline". A reprodução atualiza o playhead a cada ~250ms; se a regra
+// recentra sempre que ele está fora da janela, qualquer pan é desfeito no
+// instante seguinte.
+
+test('REPRODUÇÃO não rouba a janela de quem navegou para longe', () => {
+  // Operador foi ver 08:00 da manhã; o vídeo segue tocando às 16:00.
+  const centro = decidirCentroAoMoverPlayhead({
+    centro: 480, janelaMinutos: 10, totalMinutos: 1440,
+    playheadAnterior: 960, playhead: 960.05, vindoDoVideo: true,
+  });
+  assert.equal(centro, 480, 'o pan do operador tem de sobreviver ao timeupdate');
+});
+
+test('reprodução ARRASTA a janela quando ela já estava acompanhando', () => {
+  // Playhead saiu pela borda direita da janela que o acompanhava: segue.
+  const centro = decidirCentroAoMoverPlayhead({
+    centro: 960, janelaMinutos: 10, totalMinutos: 1440,
+    playheadAnterior: 964.9, playhead: 965.1, vindoDoVideo: true,
+  });
+  assert.equal(centro, 965.1, 'auto-follow durante a reprodução é o esperado');
+});
+
+test('NAVEGAÇÃO explícita sempre leva a janela junto', () => {
+  // Salto de evento / "Ir para hora" para um ponto distante: a janela vai.
+  const centro = decidirCentroAoMoverPlayhead({
+    centro: 480, janelaMinutos: 10, totalMinutos: 1440,
+    playheadAnterior: 481, playhead: 1200, vindoDoVideo: false,
+  });
+  assert.equal(centro, 1200);
+});
+
+test('playhead visível na janela: nada se move', () => {
+  const centro = decidirCentroAoMoverPlayhead({
+    centro: 480, janelaMinutos: 60, totalMinutos: 1440,
+    playheadAnterior: 470, playhead: 481, vindoDoVideo: true,
+  });
+  assert.equal(centro, 480);
 });
