@@ -1201,6 +1201,12 @@ function licenseResponse(item) {
     restrictions: applyAiPolicyToRestrictions(restrictions, item.aiPolicy),
     cloudStorage,
     cloudStorageState: cloudStorageState(item, status),
+    // Storages EXCLUÍDOS aqui. Excluir na Central quer dizer "este destino
+    // acabou e o conteúdo dele já foi embora" — a instalação usa esta lista
+    // para expurgar do banco tudo que apontava para ele. É LISTA, e não um
+    // aviso único, porque a instalação pode passar dias offline e perderia a
+    // notificação de uma exclusão feita nesse meio-tempo.
+    cloudStorageRemovals: Array.isArray(item.cloudStorageRemovals) ? item.cloudStorageRemovals : [],
     // Revisão DESEJADA. A instalação devolve a que aplicou no próximo heartbeat.
     configRevision: Number(item.configRevision || 0) || 0,
   };
@@ -2064,6 +2070,20 @@ async function handleDeleteCloudStorage(req, res, db, actor, installationId) {
     await saveDb(db);
     return json(req, res, 404, { error: 'storage_not_set', message: 'Esta instalação não tem armazenamento em nuvem.' });
   }
+
+  // LÁPIDE da exclusão: o endereço do storage que saiu. É por ela que a
+  // instalação sabe QUAL storage expurgar — sem isso ela só saberia que "não
+  // há storage provisionado", que também acontece quando o envio é pausado.
+  // Guardadas as últimas 10: passado esse ponto, uma instalação que ficou
+  // offline tanto tempo precisa de atenção humana, não de fila infinita.
+  const lapides = Array.isArray(item.cloudStorageRemovals) ? item.cloudStorageRemovals : [];
+  lapides.push({
+    endpoint: anterior.endpoint,
+    bucket: anterior.bucket,
+    prefix: anterior.prefix,
+    deletedAt: new Date().toISOString(),
+  });
+  item.cloudStorageRemovals = lapides.slice(-10);
 
   item.cloudStorage = normalizeCloudStorage(null);
   item.updatedAt = new Date().toISOString();

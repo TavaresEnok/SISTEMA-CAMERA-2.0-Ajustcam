@@ -3204,20 +3204,35 @@
         const alvo = body.querySelector('#cloud-delete-confirm');
         if (!alvo) return;
         const c = item.cloudStorage || {};
+        // ── O ALERTA DIZ O QUE REALMENTE ACONTECE ──────────────────────────
+        // A versão anterior prometia "nenhuma gravação é apagada", e isso
+        // deixava o banco afirmando para sempre que existiam gravações num
+        // bucket que ninguém mais ia consultar. A regra passou a ser a que o
+        // dono definiu: excluir aqui significa "não usamos mais, e o conteúdo
+        // já foi embora" — então a instalação EXPURGA o que apontava para ele.
+        // Um aviso que subestima a consequência é pior que nenhum aviso.
         alvo.innerHTML = `
-          <div class="alert-item" style="margin-top:11px;border-color:var(--amber-line);background:var(--amber-soft)">
-            <div style="font-weight:500">Excluir o armazenamento <b>${escapeHtml(c.bucket || '')}</b> desta instalação?</div>
+          <div class="alert-item" style="margin-top:11px;border-color:var(--red-line);background:var(--red-soft)">
+            <div style="font-weight:600">Excluir o armazenamento <b>${escapeHtml(c.bucket || '')}</b> desta instalação?</div>
             <div style="margin-top:7px">
-              Nenhuma gravação é apagada — os arquivos continuam no fornecedor e a instalação
-              continua conseguindo reproduzi-los, porque sabe de qual storage cada gravação veio.
+              <b>Tudo que se refere a este storage sai do sistema.</b> Na instalação, as gravações
+              que estavam <b>somente nele</b> (sem cópia no disco local) têm o registro
+              <b>REMOVIDO do banco</b> — elas deixam de existir para o playback, a linha do tempo
+              e os relatórios. As que ainda têm arquivo no disco continuam existindo, como
+              gravações apenas locais.
             </div>
             <div style="margin-top:7px">
-              O que muda é o DESTINO das gravações novas: se a instalação tiver outro storage
-              cadastrado, ele assume; se não tiver, elas ficam apenas no disco local.
+              Use isto quando o storage <b>acabou</b> — contrato encerrado, bucket já apagado no
+              fornecedor. Se a intenção é apenas <b>pausar o envio</b>, feche esta caixa e use
+              <b>Editar → desmarcar “Habilitado”</b>: aí o cadastro e o acervo ficam intactos.
+            </div>
+            <div style="margin-top:7px" class="subtext">
+              A exclusão vale a partir do próximo sinal da instalação. Ela não apaga nada no
+              fornecedor — a Central não tem mais a credencial depois disto.
             </div>
             <div class="license-actions" style="margin-top:11px">
-              <button id="cloud-delete-yes" class="primary">Excluir armazenamento</button>
-              <button id="cloud-delete-no">Cancelar</button>
+              <button id="cloud-delete-yes" class="danger">Excluir e limpar do sistema</button>
+              <button id="cloud-delete-no" class="primary">Cancelar</button>
               <span id="cloud-delete-feedback"></span>
             </div>
           </div>`;

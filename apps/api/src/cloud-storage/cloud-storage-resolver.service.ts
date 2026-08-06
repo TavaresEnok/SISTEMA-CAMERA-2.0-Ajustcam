@@ -56,6 +56,8 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
   onModuleInit(): void {
     const reconciliar = () => {
       void this.storageParaEscrita().catch(() => undefined);
+      // Expurgo do que a Central excluiu — no mesmo ciclo, sem timer novo.
+      void this.expurgarStoragesRemovidos().catch(() => undefined);
     };
     reconciliar();
     this.timer = setInterval(reconciliar, 15 * 60 * 1000);
@@ -210,6 +212,75 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
   private comOperacao(linha: StorageResolvido | null, config: StorageResolvido): StorageResolvido | null {
     if (!linha) return null;
     return { ...linha, mode: config.mode, localWindowHours: config.localWindowHours, uploadConcurrency: config.uploadConcurrency };
+  }
+
+  /**
+   * EXPURGO de storages que a Central excluiu.
+   *
+   * Excluir um storage na Central significa "este destino acabou e o conteúdo
+   * dele já foi embora" — não é pausa nem troca. A partir daí, manter as
+   * linhas apontando para ele faz o banco MENTIR: ele afirmaria que existem
+   * gravações arquivadas num bucket que ninguém mais vai consultar.
+   *
+   * O que acontece com cada gravação depende de ela ter, ou não, cópia local:
+   *
+   *   · SEM cópia local (`localDeletedAt` preenchido) — o vídeo não existe em
+   *     lugar nenhum. A linha é REMOVIDA: registro sem lastro é pior que
+   *     ausência, porque a régua pinta verde onde não há nada e o operador
+   *     descobre no pior momento.
+   *   · COM cópia local — o vídeo continua no disco. A linha FICA e só os
+   *     campos de nuvem são limpos: ela volta a ser uma gravação local comum.
+   *
+   * ORDEM É INVARIANTE: as gravações são tratadas ANTES de a linha do storage
+   * sair. A relação é `onDelete: SetNull`, então apagar o storage primeiro
+   * deixaria `cloudStorageId` nulo — que significa "storage legado" e faz a
+   * gravação seguir o bucket ATIVO. Seria trocar um registro obsoleto por um
+   * ponteiro errado.
+   */
+  async expurgarStoragesRemovidos(): Promise<Array<{ bucket: string; linhasRemovidas: number; linhasLocais: number }>> {
+    let remocoes: Array<{ endpoint?: string; bucket?: string; prefix?: string }> = [];
+    try {
+      const bruto = await this.cloudConnector.getCloudStorageRemovals();
+      remocoes = Array.isArray(bruto) ? bruto : [];
+    } catch {
+      return [];
+    }
+    if (!remocoes.length) return [];
+
+    const feitos: Array<{ bucket: string; linhasRemovidas: number; linhasLocais: number }> = [];
+    for (const alvo of remocoes) {
+      const endereco = {
+        endpoint: String(alvo?.endpoint ?? '').trim(),
+        bucket: String(alvo?.bucket ?? '').trim(),
+        prefix: String(alvo?.prefix ?? '').trim(),
+      };
+      if (!endereco.endpoint || !endereco.bucket) continue;
+      const linha = await this.prisma.cloudStorage.findFirst({ where: endereco }).catch(() => null);
+      if (!linha) continue;
+      // Nunca expurga o que está RECEBENDO gravação agora: se a Central voltou
+      // a provisionar este mesmo endereço, a exclusão foi desfeita.
+      if (linha.isActive) continue;
+
+      try {
+        const semLastro = await this.prisma.recording.deleteMany({
+          where: { cloudStorageId: linha.id, localDeletedAt: { not: null } },
+        });
+        const comArquivoLocal = await this.prisma.recording.updateMany({
+          where: { cloudStorageId: linha.id },
+          data: { cloudKey: null, cloudUploadedAt: null, cloudStorageId: null, cloudMissingSince: null, cloudVerifiedAt: null },
+        });
+        await this.prisma.cloudStorage.delete({ where: { id: linha.id } });
+        feitos.push({ bucket: linha.bucket, linhasRemovidas: semLastro.count, linhasLocais: comArquivoLocal.count });
+        this.logger.warn(
+          `Storage "${linha.name}" (${linha.bucket}) foi EXCLUÍDO na Central: `
+          + `${semLastro.count} gravação(ões) sem cópia local removidas do banco `
+          + `e ${comArquivoLocal.count} que ainda têm arquivo no disco voltaram a ser somente locais.`,
+        );
+      } catch (error) {
+        this.logger.warn(`Falha ao expurgar o storage "${linha.bucket}": ${String(error)}`);
+      }
+    }
+    return feitos;
   }
 
   private async reconciliar(config: StorageResolvido): Promise<StorageResolvido | null> {

@@ -66,6 +66,9 @@ const SETTING_KEYS = [
   // POR QUE não há storage. Sem isto a instalação não distingue "o operador
   // desligou o envio" de "o storage foi EXCLUÍDO" — reações opostas.
   'cloud.storageState',
+  // Storages EXCLUÍDOS na Central. Excluir lá quer dizer "este destino acabou
+  // e o conteúdo já foi embora"; a instalação expurga o que aponta para ele.
+  'cloud.storageRemovals',
   // CONFIRMAÇÃO DE APLICAÇÃO. Sem isto, a Central só sabe que a instalação
   // esteve online depois da mudança — não que ela APLICOU a mudança. Uma
   // instalação antiga que ignore um campo desconhecido sumiria da lista de
@@ -170,6 +173,13 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
           // manda o campo: nesse caso `disabled` é o palpite conservador —
           // promover storage sozinho é o erro caro.
           this.writeSetting('cloud.storageState', this.normalizeStorageState(response.data?.cloudStorageState)),
+          // Storages que a Central EXCLUIU. Excluir lá significa "este destino
+          // acabou e o conteúdo já foi embora" — a instalação expurga o que
+          // aponta para ele. Lista (e não um aviso único) porque a instalação
+          // pode passar dias offline e perder a notificação de uma exclusão.
+          this.writeSetting('cloud.storageRemovals', JSON.stringify(
+            Array.isArray(response.data?.cloudStorageRemovals) ? response.data.cloudStorageRemovals : [],
+          )),
         ]);
         await this.enforceRuntimeRestrictions(restrictions);
       } catch (applyFailure) {
@@ -908,6 +918,19 @@ export class CloudConnectorService implements OnModuleInit, OnModuleDestroy {
       return { ...cloudStorage, secretAccessKey: `enc:${crypto.encrypt(secret)}` };
     } catch {
       return cloudStorage;
+    }
+  }
+
+  /** Storages que a Central excluiu (endpoint/bucket/prefixo de cada um). */
+  async getCloudStorageRemovals(): Promise<Array<{ endpoint?: string; bucket?: string; prefix?: string }>> {
+    const settings = await this.readSettings();
+    const raw = settings['cloud.storageRemovals'];
+    if (!raw) return [];
+    try {
+      const lista = JSON.parse(raw);
+      return Array.isArray(lista) ? lista : [];
+    } catch {
+      return [];
     }
   }
 
