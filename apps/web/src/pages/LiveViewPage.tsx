@@ -52,6 +52,7 @@ import { Button } from '@/components/ui/button';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
 import { useToast } from '../hooks/use-toast';
+import { useAutoHideControls } from '../hooks/use-auto-hide-controls';
 import { ToastAction } from '@/components/ui/toast';
 
 // Presets (atalhos rápidos). Qualquer CxL livre também é aceito via campo custom.
@@ -152,6 +153,8 @@ export default function LiveViewPage() {
   const generatedLayouts = useVmsDataStore((state) => state.layouts);
   const { gridSize, cameraIds, wallMode, prevLayout, setGridSize, setCameraIds, toggleWallMode, savePrevLayout, clearPrevLayout } = useGridStore();
   const [, setLocation] = useLocation();
+  // Selo e botão do mural somem sozinhos depois de 3s parado.
+  const muralControles = useAutoHideControls(wallMode);
   const { toast } = useToast();
   const [selectedCam, setSelectedCam] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1067,13 +1070,27 @@ export default function LiveViewPage() {
       </AlertDialog>
       {wallMode && (
         <>
-          <div className="absolute top-3 left-3 z-50 flex items-center gap-2 rounded-md border border-white/10 bg-black/72 px-3 py-1.5 text-xs font-medium text-white">
+          {/* Somem após 3s sem interação e voltam ao primeiro movimento. O mural
+              fica horas numa TV, e dois selos fixos por cima do vídeo são ruído
+              permanente — em painel OLED, imagem parada sobre imagem parada é
+              retenção de tela. Esconder não prende ninguém: Esc já sai do mural.
+              `pointer-events-none` enquanto invisível para o botão não ser
+              clicado às cegas. */}
+          <div
+            {...muralControles.propsDoControle}
+            className={`absolute top-3 left-3 z-50 flex items-center gap-2 rounded-md border border-white/10 bg-black/72 px-3 py-1.5 text-xs font-medium text-white transition-opacity duration-300 motion-reduce:transition-none ${
+              muralControles.visivel ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
+          >
             <Video className="w-3.5 h-3.5 text-[hsl(var(--status-online))]" />
             Ao Vivo / Modo Mural
           </div>
           <button
             onClick={toggleWallMode}
-            className="ops-button fixed top-3 right-3 z-50 flex items-center gap-1.5 border-white/10 bg-black/72 px-3 text-xs text-white"
+            {...muralControles.propsDoControle}
+            className={`ops-button fixed top-3 right-3 z-50 flex items-center gap-1.5 border-white/10 bg-black/72 px-3 text-xs text-white transition-opacity duration-300 motion-reduce:transition-none ${
+              muralControles.visivel ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
           >
             <Maximize2 className="w-3.5 h-3.5" />
             Sair do Modo Mural
