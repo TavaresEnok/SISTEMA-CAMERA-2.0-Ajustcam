@@ -185,8 +185,12 @@ export default function UsuariosPage() {
     await updateUserActive(id, active);
   };
 
+  // A exclusão é PERMANENTE e usava a caixa cinza do navegador — fora do tema,
+  // sem foco preso, um Enter distraído apagava a conta. Excluir um GRUPO, uma
+  // ação menos grave, já tinha diálogo completo.
+  const [excluirAlvo, setExcluirAlvo] = useState<{ id: string; name: string; email: string } | null>(null);
+
   const deleteUser = async (u: { id: string; name: string; email: string }) => {
-    if (!window.confirm(`Excluir permanentemente "${u.name}" (${u.email})?\n\nEsta ação não pode ser desfeita. O histórico de auditoria é preservado (anonimizado).`)) return;
     try {
       await apiClient().delete(`/users/${u.id}/permanent`);
       toast({ title: 'Usuário excluído', description: `${u.name} foi removido do sistema.` });
@@ -381,7 +385,7 @@ export default function UsuariosPage() {
                         </button>
                         {u.id !== currentUser?.id && (
                           <button
-                            onClick={() => void deleteUser(u)}
+                            onClick={() => setExcluirAlvo({ id: u.id, name: u.name, email: u.email })}
                             className="w-6 h-6 flex items-center justify-center rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))] hover:bg-[hsl(var(--accent))] transition-colors"
                             title="Excluir permanentemente"
                           >
@@ -530,6 +534,31 @@ export default function UsuariosPage() {
           </div>
         </DialogContent>
       </Dialog>
+      {/* Exclusão PERMANENTE: diálogo do sistema, foco preso, ação em vermelho. */}
+      {excluirAlvo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div role="alertdialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-[hsl(var(--destructive)_/_0.4)] bg-card p-5 shadow-xl">
+            <h2 className="text-sm font-semibold text-[hsl(var(--destructive))]">Excluir permanentemente?</h2>
+            <p className="mt-2 text-xs text-muted-foreground">
+              A conta de <b className="text-foreground">{excluirAlvo.name}</b> ({excluirAlvo.email}) será
+              removida do sistema. <b>Não pode ser desfeito.</b> O histórico de auditoria é preservado
+              de forma anonimizada.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setExcluirAlvo(null)} className="btn btn-primary btn-sm">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => { const alvo = excluirAlvo; setExcluirAlvo(null); void deleteUser(alvo); }}
+                className="btn btn-sm border-[hsl(var(--destructive)_/_0.45)] text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)_/_0.1)]"
+              >
+                Excluir permanentemente
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

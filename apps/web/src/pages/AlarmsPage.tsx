@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { toast } from '../hooks/use-toast';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format } from 'date-fns';
 import { Link, useLocation } from 'wouter';
@@ -352,6 +353,8 @@ export default function AlertasPage() {
   const [ruleForm, setRuleForm] = useState<RuleFormState>(EMPTY_RULE_FORM);
   const [savingRule, setSavingRule] = useState(false);
   const [deletingAllAlarms, setDeletingAllAlarms] = useState(false);
+  const [apagarTudoAberto, setApagarTudoAberto] = useState(false);
+  const [confirmApagarTudo, setConfirmApagarTudo] = useState('');
   const [simCameraId, setSimCameraId] = useState('');
   const [simSeverity, setSimSeverity] = useState('WARNING');
   const [runningSimulationId, setRunningSimulationId] = useState<string | null>(null);
@@ -547,8 +550,11 @@ export default function AlertasPage() {
   }
 
   async function handleDeleteAllAlarms() {
-    const confirmed = window.confirm('Apagar todos os alertas do sistema? Esta ação não pode ser desfeita.');
-    if (!confirmed) return;
+    // O endpoint apaga TODOS os alarmes do sistema — não os da lista filtrada.
+    // O botão, porém, era habilitado pela lista visível: filtrar "Câmera 3" e
+    // ver 12 itens fazia parecer que 12 seriam apagados. Agora a confirmação
+    // declara o alcance real e exige digitação, como já se exige para esvaziar
+    // um bucket. (O diálogo é aberto pelo botão; esta função só executa.)
     setDeletingAllAlarms(true);
     try {
       await client.delete('/cameras/alarms');
@@ -557,7 +563,7 @@ export default function AlertasPage() {
       await load();
     } catch (error) {
       const msg = axios.isAxiosError(error) ? (error.response?.data?.message || error.message) : 'Falha ao apagar alertas.';
-      window.alert(Array.isArray(msg) ? msg.join(' | ') : String(msg));
+      toast({ title: 'Não foi possível apagar', description: Array.isArray(msg) ? msg.join(' | ') : String(msg), variant: 'destructive' });
     } finally {
       setDeletingAllAlarms(false);
     }
@@ -613,7 +619,7 @@ export default function AlertasPage() {
       await loadRules();
     } catch (error) {
       const msg = axios.isAxiosError(error) ? (error.response?.data?.message || error.message) : 'Falha ao salvar regra.';
-      window.alert(Array.isArray(msg) ? msg.join(' | ') : String(msg));
+      toast({ title: 'Não foi possível salvar a regra', description: Array.isArray(msg) ? msg.join(' | ') : String(msg), variant: 'destructive' });
     } finally {
       setSavingRule(false);
     }
@@ -624,14 +630,14 @@ export default function AlertasPage() {
       await client.patch(`/alarms/rules/${rule.id}/enabled`, { isEnabled: !rule.isEnabled });
       await loadRules();
     } catch {
-      window.alert('Não foi possível alterar o status da regra.');
+      toast({ title: 'Não foi possível alterar a regra', variant: 'destructive' });
     }
   }
 
   async function runSimulation(rule: AlarmRule) {
     const cameraId = simCameraId || cameras[0]?.id;
     if (!cameraId) {
-      window.alert('Selecione uma câmera para simular.');
+      toast({ title: 'Selecione uma câmera para simular', variant: 'destructive' });
       return;
     }
 
@@ -644,9 +650,9 @@ export default function AlertasPage() {
         message: `Simulação manual da regra ${rule.name}`,
       });
       await load();
-      window.alert('Simulação executada com sucesso.');
+      toast({ title: 'Simulação executada' });
     } catch {
-      window.alert('Falha ao simular regra.');
+      toast({ title: 'Falha ao simular a regra', variant: 'destructive' });
     } finally {
       setRunningSimulationId(null);
     }
@@ -903,12 +909,12 @@ export default function AlertasPage() {
             Voltar à operação
           </button>
           <button
-            onClick={handleDeleteAllAlarms}
-            disabled={deletingAllAlarms || visibleAlarms.length === 0}
+            onClick={() => { setConfirmApagarTudo(''); setApagarTudoAberto(true); }}
+            disabled={deletingAllAlarms}
             className="btn btn-sm border-[hsl(var(--destructive)_/_0.35)] text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)_/_0.08)] disabled:opacity-45"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            {deletingAllAlarms ? 'Apagando...' : 'Apagar todos'}
+            {deletingAllAlarms ? 'Apagando...' : 'Apagar todo o histórico'}
           </button>
           <button
             onClick={toggleAlarmSound}
@@ -1201,6 +1207,51 @@ export default function AlertasPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── APAGAR TODO O HISTÓRICO: atrito proporcional ao alcance ─────────
+          O endpoint apaga TODOS os alarmes do sistema, mas o botão era
+          habilitado pela lista FILTRADA e confirmado por uma caixa nativa do
+          navegador: filtrar "Câmera 3", ver 12 itens e clicar destruía o
+          histórico de todas as câmeras. Agora a confirmação declara o alcance
+          e exige digitação — o mesmo atrito que já se exige para esvaziar um
+          bucket, que é uma ação MENOS destrutiva que esta. */}
+      {apagarTudoAberto && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div role="alertdialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-[hsl(var(--destructive)_/_0.4)] bg-card p-5 shadow-xl">
+            <h2 className="text-sm font-semibold text-[hsl(var(--destructive))]">
+              Apagar TODO o histórico de alarmes?
+            </h2>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Isto apaga os alarmes de <b>todas as câmeras</b> — não apenas os que estão na lista
+              filtrada. O histórico que embasaria uma investigação vai junto, e não pode ser desfeito.
+            </p>
+            <label className="mt-4 block text-[11px] text-muted-foreground" htmlFor="confirmar-apagar-alarmes">
+              Para confirmar, digite <b className="font-mono text-foreground">APAGAR</b>:
+            </label>
+            <input
+              id="confirmar-apagar-alarmes"
+              autoFocus
+              value={confirmApagarTudo}
+              onChange={(event) => setConfirmApagarTudo(event.target.value)}
+              className="input mt-1 w-full"
+              placeholder="APAGAR"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setApagarTudoAberto(false)} className="btn btn-primary btn-sm">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={confirmApagarTudo.trim().toUpperCase() !== 'APAGAR' || deletingAllAlarms}
+                onClick={() => { setApagarTudoAberto(false); void handleDeleteAllAlarms(); }}
+                className="btn btn-sm border-[hsl(var(--destructive)_/_0.45)] text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)_/_0.1)] disabled:opacity-40"
+              >
+                Apagar definitivamente
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

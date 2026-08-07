@@ -93,6 +93,7 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
   const [form, setForm] = useState<Form | null>(null);
   const [ingest, setIngest] = useState<IngestTarget | null>(null);
   const [ingestBusy, setIngestBusy] = useState(false);
+  const [confirmarVoltarRtsp, setConfirmarVoltarRtsp] = useState(false);
   const [copiado, setCopiado] = useState<string | null>(null);
   const [pendentes, setPendentes] = useState<PendingIngest[]>([]);
   const onCloseRef = useRef(onClose);
@@ -361,7 +362,13 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => { if (modoPush && !ingestBusy) void desativarPush(); }}
+                      // CONFIRMAR ANTES DE APAGAR A CHAVE. Estes dois cartões
+                      // parecem um seletor inofensivo, mas clicar aqui disparava
+                      // `DELETE .../rtmp-ingest` na hora: uma câmera 4G já
+                      // instalada em campo para de publicar imediatamente e a
+                      // chave NÃO volta — é preciso gerar outra e reconfigurar o
+                      // equipamento no local.
+                      onClick={() => { if (modoPush && !ingestBusy) setConfirmarVoltarRtsp(true); }}
                       disabled={ingestBusy}
                       className={cn(
                         'rounded-lg border p-3 text-left transition-colors disabled:opacity-60',
@@ -650,6 +657,33 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
               </Button>
             </SheetFooter>
           </>
+        )}
+        {/* Confirmação da troca de modo: apagar a chave de publicação para uma
+            câmera em campo é irreversível pelo lado do equipamento. */}
+        {confirmarVoltarRtsp && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div role="alertdialog" aria-modal="true" className="w-full rounded-xl border border-[hsl(var(--destructive)_/_0.4)] bg-card p-4 shadow-xl">
+              <h3 className="text-sm font-semibold text-[hsl(var(--destructive))]">
+                Voltar a buscar o vídeo na câmera?
+              </h3>
+              <p className="mt-2 text-xs text-muted-foreground">
+                A <b>chave de publicação será apagada</b>. Se esta câmera já está instalada em campo
+                enviando vídeo (4G/CGNAT), ela <b>para de transmitir imediatamente</b> — e a chave não
+                volta: seria preciso gerar outra e reconfigurar o equipamento no local.
+              </p>
+              <div className="mt-4 flex justify-end gap-2">
+                <Button size="sm" onClick={() => setConfirmarVoltarRtsp(false)}>Cancelar</Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={ingestBusy}
+                  onClick={() => { setConfirmarVoltarRtsp(false); void desativarPush(); }}
+                >
+                  Apagar a chave e voltar
+                </Button>
+              </div>
+            </div>
+          </div>
         )}
       </SheetContent>
     </Sheet>

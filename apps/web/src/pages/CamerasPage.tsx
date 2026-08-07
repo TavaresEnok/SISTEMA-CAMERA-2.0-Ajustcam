@@ -1754,7 +1754,14 @@ export default function CamerasPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void confirmDeleteCamera()}>Excluir</AlertDialogAction>
+            {/* VERMELHO. Com a variante padrão (primária/azul), "Excluir" e
+                "Cancelar" ficavam com peso visual invertido em relação ao risco. */}
+            <AlertDialogAction
+              onClick={() => void confirmDeleteCamera()}
+              className="bg-[hsl(var(--destructive))] text-white hover:bg-[hsl(var(--destructive)_/_0.9)]"
+            >
+              Excluir
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

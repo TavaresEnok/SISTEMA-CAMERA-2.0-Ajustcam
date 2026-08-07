@@ -59,6 +59,7 @@ export default function MonitoramentoPage() {
   const system = useVmsDataStore((state) => state.system);
   const load = useVmsDataStore((state) => state.load);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [confirmApagarVideos, setConfirmApagarVideos] = useState('');
   const [fromDate, setFromDate] = useState(() => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -339,19 +340,51 @@ export default function MonitoramentoPage() {
 
       <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
         <AlertDialogContent>
+          {/* ATRITO PROPORCIONAL. Esta é a ação mais destrutiva do sistema —
+              apaga o acervo inteiro — e era um clique com texto genérico,
+              enquanto esvaziar um bucket JÁ DESATIVADO exige digitar o nome do
+              bucket. O atrito estava invertido. */}
           <AlertDialogHeader>
             <AlertDialogTitle>Apagar todas as gravações?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Isto remove <strong>todas</strong> as gravações e clipes exportados do armazenamento, de todas as câmeras. Esta ação não pode ser desfeita.
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  Isto remove <strong>todas</strong> as gravações e clipes exportados de{' '}
+                  <strong>todas as câmeras</strong>. Não pode ser desfeito.
+                </p>
+                {analytics?.summary ? (
+                  <p className="rounded border border-[hsl(var(--destructive)_/_0.3)] bg-[hsl(var(--destructive)_/_0.08)] px-2 py-1.5 text-[hsl(var(--destructive))]">
+                    No período consultado são <strong>{analytics.summary.rows}</strong> registro(s),{' '}
+                    <strong>{toGB(analytics.summary.totalBytes)} GB</strong> de vídeo.
+                  </p>
+                ) : null}
+                <p>
+                  As cópias já enviadas para a <strong>nuvem não são apagadas</strong> por esta ação —
+                  para removê-las, use “Esvaziar” no armazenamento correspondente.
+                </p>
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="px-6">
+            <label className="block text-[11px] text-muted-foreground" htmlFor="confirmar-apagar-videos">
+              Para confirmar, digite <b className="font-mono text-foreground">APAGAR</b>:
+            </label>
+            <input
+              id="confirmar-apagar-videos"
+              value={confirmApagarVideos}
+              onChange={(event) => setConfirmApagarVideos(event.target.value)}
+              className="input mt-1 w-full"
+              placeholder="APAGAR"
+            />
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
             <AlertDialogAction
+              disabled={confirmApagarVideos.trim().toUpperCase() !== 'APAGAR'}
               onClick={() => void handleDeleteAllVideos()}
-              className="bg-[hsl(var(--destructive))] text-white hover:bg-[hsl(var(--destructive)_/_0.9)]"
+              className="bg-[hsl(var(--destructive))] text-white hover:bg-[hsl(var(--destructive)_/_0.9)] disabled:opacity-40"
             >
-              Apagar tudo
+              Apagar definitivamente
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
