@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { useAuthStore } from '../store/authStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
-import { PRODUCT_NAME } from '../lib/product-brand';
+import { useBrandingStore } from '../store/brandingStore';
 
 export function StatusStrip() {
+  const facilityName = useBrandingStore((state) => state.facilityName);
   const [now, setNow] = useState(new Date());
   const { user } = useAuthStore();
   const alarms = useVmsDataStore((state) => state.alarms);
@@ -40,7 +41,7 @@ export function StatusStrip() {
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${systemOk ? 'status-online' : 'status-alarm rec-pulse'}`} />
         <span className="text-[hsl(var(--muted-foreground))] truncate">
-          {PRODUCT_NAME}
+          {facilityName}
         </span>
         <span className="text-[hsl(var(--border))] hidden sm:block">│</span>
         <span className="text-[hsl(var(--muted-foreground))] hidden sm:block">

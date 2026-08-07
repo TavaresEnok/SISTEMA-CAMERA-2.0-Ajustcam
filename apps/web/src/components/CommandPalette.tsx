@@ -12,7 +12,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { useAuthStore } from '../store/authStore';
 import { useThemeStore } from '../store/themeStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
-import { PRODUCT_NAME } from '../lib/product-brand';
+import { useBrandingStore } from '../store/brandingStore';
 
 type PalettePage = {
   label: string;
@@ -45,6 +45,7 @@ interface Props {
 }
 
 export function CommandPalette({ open, onClose }: Props) {
+  const facilityName = useBrandingStore((state) => state.facilityName);
   const [, setLocation] = useLocation();
   const { logout, user } = useAuthStore();
   const { theme, setTheme } = useThemeStore();
@@ -145,7 +146,7 @@ export function CommandPalette({ open, onClose }: Props) {
               <span className="font-mono text-[hsl(var(--muted-foreground))]">↵ selecionar</span>
               <span className="font-mono text-[hsl(var(--muted-foreground))]">esc fechar</span>
               <span className="ml-auto font-mono text-[hsl(var(--muted-foreground))]">
-                <Shield className="w-3 h-3 inline mr-1" />{PRODUCT_NAME}
+                <Shield className="w-3 h-3 inline mr-1" />{facilityName}
               </span>
             </div>
           </Command>

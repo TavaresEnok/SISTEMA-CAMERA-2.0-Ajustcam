@@ -1,8 +1,9 @@
 import { Link } from 'wouter';
 import { AlertCircle, Monitor } from 'lucide-react';
-import { PRODUCT_NAME } from '../lib/product-brand';
+import { useBrandingStore } from '../store/brandingStore';
 
 export default function NotFound() {
+  const facilityName = useBrandingStore((state) => state.facilityName);
   return (
     <div className="app-main flex min-h-screen w-full items-center justify-center p-4">
       <div className="ops-card w-full max-w-md p-8 text-center">
@@ -10,7 +11,7 @@ export default function NotFound() {
           <AlertCircle className="h-5 w-5 text-[hsl(var(--destructive))]" />
         </div>
         <div className="mx-auto mb-3 inline-flex items-center rounded-full border border-[hsl(var(--border)_/_0.75)] bg-[hsl(var(--background)_/_0.36)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          {PRODUCT_NAME}
+          {facilityName}
         </div>
         <h1 className="text-[18px] font-semibold tracking-normal">Página não encontrada</h1>
         <p className="mx-auto mt-2 max-w-xs text-[12px] leading-relaxed text-muted-foreground">

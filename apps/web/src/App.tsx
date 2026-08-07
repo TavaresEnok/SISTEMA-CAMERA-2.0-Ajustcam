@@ -11,7 +11,7 @@ import { useAuthStore } from './store/authStore';
 import { useThemeStore } from './store/themeStore';
 import { useVmsDataStore } from './store/vmsDataStore';
 import { useBrandingStore } from './store/brandingStore';
-import { productPageTitle, PRODUCT_NAME } from './lib/product-brand';
+import { productPageTitle } from './lib/product-brand';
 
 const queryClient = new QueryClient();
 
@@ -71,7 +71,7 @@ const NotFound        = lazyWithReload(() => import('./pages/not-found'));
 function AppFallback() {
   return (
     <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-      Carregando {PRODUCT_NAME}...
+      Carregando...
     </div>
   );
 }

@@ -153,7 +153,16 @@ export function buildBrandColorCss(input: BrandColorInput): string | null {
   });
   if (light.length === 0 && dark.length === 0) return null;
   const rules: string[] = [];
-  if (light.length > 0) rules.push(`:root{${light.join(';')};}`);
+  // `:not(.dark)` NÃO é firula de especificidade — é o que impede o tema claro de
+  // vazar para o escuro. A classe `dark` vive no <html>, o MESMO elemento que
+  // `:root` casa, e ambos os seletores pesam igual; como este <style> é injetado
+  // depois da folha do app, um `:root` puro venceria o `.dark` base em toda
+  // variável que o bloco escuro abaixo não redeclare. Cliente com paleta clara
+  // cheia e escura pela metade (o caso comum: o formulário já vem com o claro
+  // preenchido) ganhava --card/--popover/--secondary/--muted/--accent BRANCOS no
+  // tema escuro — caixas brancas no meio da tela preta. Foi o que aconteceu na
+  // primeira instalação de cliente (D-GUARDIAN, 07/08/2026).
+  if (light.length > 0) rules.push(`:root:not(.dark){${light.join(';')};}`);
   if (dark.length > 0) rules.push(`.dark{${dark.join(';')};}`);
   return rules.join('\n');
 }

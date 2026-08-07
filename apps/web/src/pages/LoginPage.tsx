@@ -5,7 +5,7 @@ import axios from 'axios';
 import { useAuthStore } from '../store/authStore';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useBrandingStore } from '../store/brandingStore';
-import { PRODUCT_NAME } from '../lib/product-brand';
+import { PRODUCT_TAGLINE } from '../lib/product-brand';
 
 function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
   const [email, setEmail] = useState('');
@@ -194,7 +194,7 @@ export default function LoginPage() {
             </div>
           </div>
           <h1 className="text-[23px] font-bold" style={{ color: 'var(--tx)', letterSpacing: '-0.01em' }}>{facilityName}</h1>
-          <p className="mt-1 font-mono text-[9px] uppercase" style={{ color: 'var(--tx-4)', letterSpacing: '0.22em' }}>{PRODUCT_NAME} · Central de Monitoramento</p>
+          <p className="mt-1 font-mono text-[9px] uppercase" style={{ color: 'var(--tx-4)', letterSpacing: '0.22em' }}>{PRODUCT_TAGLINE}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
@@ -292,7 +292,7 @@ export default function LoginPage() {
             <ShieldCheck size={12} style={{ color: 'var(--s-online)' }} />
             Conexão local segura
           </span>
-          <span className="font-mono text-[9px]" style={{ color: 'var(--tx-4)' }}>{PRODUCT_NAME}</span>
+          <span className="font-mono text-[9px]" style={{ color: 'var(--tx-4)' }}>{facilityName}</span>
         </div>
       </div>
 
