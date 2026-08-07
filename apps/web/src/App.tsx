@@ -50,14 +50,11 @@ const LiveViewPage    = lazyWithReload(() => import('./pages/LiveViewPage'));
 const PlaybackPage    = lazyWithReload(() => import('./pages/PlaybackPage'));
 const ReviewPage      = lazyWithReload(() => import('./pages/ReviewPage'));
 // Páginas que existiam sem rota nenhuma — 1.441 linhas inalcançáveis.
-const EvidencePage    = lazyWithReload(() => import('./pages/EvidencePage'));
 const PerformancePage = lazyWithReload(() => import('./pages/PerformancePage'));
 const AuditLogsPage   = lazyWithReload(() => import('./pages/AuditLogsPage'));
 const EventsPage      = lazyWithReload(() => import('./pages/EventsPage'));
-const ReportsPage     = lazyWithReload(() => import('./pages/ReportsPage'));
 const AlarmsPage      = lazyWithReload(() => import('./pages/AlarmsPage'));
 const CamerasPage     = lazyWithReload(() => import('./pages/CamerasPage'));
-const MapPage         = lazyWithReload(() => import('./pages/MapPage'));
 const PTZPage         = lazyWithReload(() => import('./pages/PTZPage'));
 const InvestigationPage = lazyWithReload(() => import('./pages/InvestigationPage'));
 const StoragePage     = lazyWithReload(() => import('./pages/StoragePage'));
@@ -67,7 +64,6 @@ const WallModePage    = lazyWithReload(() => import('./pages/WallModePage'));
 const UsersPage       = lazyWithReload(() => import('./pages/UsersPage'));
 const GroupsPage      = lazyWithReload(() => import('./pages/GroupsPage'));
 const RolesPage       = lazyWithReload(() => import('./pages/RolesPage'));
-const AppBuilderPage  = lazyWithReload(() => import('./pages/AppBuilderPage'));
 const ProfilePage     = lazyWithReload(() => import('./pages/ProfilePage'));
 const NotFound        = lazyWithReload(() => import('./pages/not-found'));
 
@@ -241,23 +237,14 @@ function AppRoutes() {
       <Route path="/alarms">
         {() => <ProtectedRoute component={AlarmsPage} minRole="operator" />}
       </Route>
-      <Route path="/map">
-        {() => <ProtectedRoute component={MapPage} minRole="operator" />}
-      </Route>
       <Route path="/investigation">
         {() => <ProtectedRoute component={InvestigationPage} minRole="operator" />}
-      </Route>
-      <Route path="/evidence">
-        {() => <ProtectedRoute component={EvidencePage} minRole="operator" />}
       </Route>
       <Route path="/events">
         {() => <ProtectedRoute component={EventsPage} minRole="operator" />}
       </Route>
       <Route path="/performance">
         {() => <ProtectedRoute component={PerformancePage} minRole="operator" />}
-      </Route>
-      <Route path="/reports">
-        {() => <ProtectedRoute component={ReportsPage} minRole="operator" />}
       </Route>
       <Route path="/storage">
         {() => <ProtectedRoute component={StoragePage} minRole="operator" />}
@@ -279,9 +266,8 @@ function AppRoutes() {
       <Route path="/audit-logs">
         {() => <ProtectedRoute component={AuditLogsPage} minRole="admin" />}
       </Route>
-      <Route path="/app-builder">
-        {() => <ProtectedRoute component={AppBuilderPage} minRole="admin" />}
-      </Route>
+      {/* Geração de APK é exclusiva da DRAC Central — a instalação não tem
+          mais a rota /app-builder, nem escondida por URL. */}
 
       <Route path="/" component={RootRedirect} />
       <Route component={NotFound} />

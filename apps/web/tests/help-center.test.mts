@@ -45,7 +45,8 @@ test('a ajuda cobre todas as páginas operacionais do AjustCam', () => {
     'minha-conta',
     'cameras',
     'alertas',
-    'mapa',
+    // 'mapa' saiu junto com a página /map, removida em 2026-08-07 — a ajuda
+    // não deve documentar tela que a instalação não tem.
     'investigacoes',
     'armazenamento',
     'usuarios',

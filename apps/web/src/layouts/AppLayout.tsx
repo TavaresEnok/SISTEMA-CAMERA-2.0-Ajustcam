@@ -18,7 +18,6 @@ const PAGE_TITLES: Record<string, string> = {
   '/review':        'Revisão',
   '/alarms':        'Alarmes',
   '/cameras':       'Câmeras',
-  '/map':           'Mapa / Planta',
   '/ptz':           'Controle PTZ',
   '/investigation': 'Investigação',
   '/storage':       'Armazenamento',
@@ -30,11 +29,8 @@ const PAGE_TITLES: Record<string, string> = {
   // Faltavam: o cabeçalho de "Minha conta" — item que TODO usuário tem —
   // mostrava o texto genérico "DRAC VMS".
   '/profile':       'Minha conta',
-  '/app-builder':   'Apps white-label',
-  '/evidence':      'Evidências',
   '/events':        'Eventos',
   '/performance':   'Desempenho',
-  '/reports':       'Relatórios',
   '/audit-logs':    'Auditoria',
 };
 

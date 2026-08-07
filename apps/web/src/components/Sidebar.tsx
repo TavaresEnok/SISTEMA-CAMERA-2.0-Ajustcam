@@ -5,8 +5,8 @@ import {
   Camera, Settings,
   ChevronLeft, ChevronRight, LogOut, Keyboard, Shield,
   Server, Users, Radar, FolderKey, ShieldCheck, Search, Sun, Moon,
-  Bell, Crosshair, HardDrive, UserCircle, Smartphone,
-  CircleHelp, Map, LayoutGrid, Activity, FileSearch, FileArchive, FileText, ScrollText,
+  Bell, Crosshair, HardDrive, UserCircle,
+  CircleHelp, LayoutGrid, Activity, FileSearch, ScrollText,
   type LucideIcon,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -41,10 +41,6 @@ const NAV_SECTIONS: NavSection[] = [
       // Alertas requerem operador ou superior (viewers não têm acesso)
       { path: '/alarms',   label: 'Alarmes',        icon: Bell,     roles: ['admin', 'operator'] },
       { path: '/ptz',      label: 'Controle PTZ',   icon: Crosshair },
-      // Mapa entra no menu agora que a responsividade e o acesso por teclado
-      // foram corrigidos. /wall, /investigation, /events e /reports seguem
-      // fora até deixarem de ser casca (ver plano, Fase 4b).
-      { path: '/map',      label: 'Mapa / Planta',  icon: Map,       roles: ['admin', 'operator'] },
       { path: '/wall',     label: 'Modo Mural',     icon: LayoutGrid },
       { path: '/events',   label: 'Eventos',        icon: Bell,      roles: ['admin', 'operator'] },
     ],
@@ -64,8 +60,6 @@ const NAV_SECTIONS: NavSection[] = [
     icon: FileSearch,
     items: [
       { path: '/investigation', label: 'Investigação', icon: FileSearch, roles: ['admin', 'operator'] },
-      { path: '/evidence', label: 'Evidências', icon: FileArchive, roles: ['admin', 'operator'] },
-      { path: '/reports',  label: 'Relatórios', icon: FileText,    roles: ['admin', 'operator'] },
     ],
   },
   {
@@ -80,9 +74,8 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/roles',   label: 'Funções',     icon: ShieldCheck, roles: ['admin'] },
       { path: '/settings',label: 'Configurações',icon: Settings,   roles: ['admin'] },
       { path: '/audit-logs', label: 'Auditoria', icon: ScrollText,  roles: ['admin'] },
-      { path: '/app-builder', label: 'Apps white-label', icon: Smartphone, roles: ['admin'] },
-      // Geração de APK foi movida para a DRAC Central (painel mestre). Mantemos a
-      // rota /app-builder acessível por URL, mas fora do menu de cada instalação.
+      // Geração de APK é exclusiva da DRAC Central (painel mestre) — a
+      // instalação não tem mais essa tela nem a rota.
     ],
   },
 ];

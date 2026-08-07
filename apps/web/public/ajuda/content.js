@@ -67,7 +67,7 @@
             keywords: "menu navegar barra lateral busca filtro botão tela",
             related: ["inicio", "perfis-e-permissoes", "status-e-indicadores"],
             body: `
-              <section class="doc-section"><h2>Menu principal</h2><p>O menu lateral reúne as áreas disponíveis para sua conta. Em telas menores ele pode ficar recolhido; use o botão de menu no canto superior para abri-lo.</p><div class="feature-grid"><div class="feature-card"><h3>Monitoramento</h3><p>Ao Vivo, Reprodução, Revisão, Alertas e Controle PTZ.</p></div><div class="feature-card"><h3>Infraestrutura</h3><p>Câmeras e Armazenamento, quando liberados para seu perfil.</p></div><div class="feature-card"><h3>Administração</h3><p>Minha conta, Usuários, Grupos, Funções e Configurações.</p></div><div class="feature-card"><h3>Recursos complementares</h3><p>Mapa e Investigações podem aparecer conforme o acesso e a configuração.</p></div></div></section>
+              <section class="doc-section"><h2>Menu principal</h2><p>O menu lateral reúne as áreas disponíveis para sua conta. Em telas menores ele pode ficar recolhido; use o botão de menu no canto superior para abri-lo.</p><div class="feature-grid"><div class="feature-card"><h3>Monitoramento</h3><p>Ao Vivo, Reprodução, Revisão, Alertas e Controle PTZ.</p></div><div class="feature-card"><h3>Infraestrutura</h3><p>Câmeras e Armazenamento, quando liberados para seu perfil.</p></div><div class="feature-card"><h3>Administração</h3><p>Minha conta, Usuários, Grupos, Funções e Configurações.</p></div><div class="feature-card"><h3>Recursos complementares</h3><p>Investigações pode aparecer conforme o acesso e a configuração.</p></div></div></section>
               <section class="doc-section"><h2>Filtros e listas</h2><p>Filtros reduzem o que aparece sem apagar registros. Se uma lista parecer vazia, primeiro limpe os filtros de data, câmera, grupo, situação ou texto.</p><ol class="steps"><li><strong>Confira o período.</strong> Listas históricas costumam abrir em um intervalo recente.</li><li><strong>Confira o grupo ou câmera.</strong> Um filtro anterior pode ter permanecido selecionado.</li><li><strong>Veja sua permissão.</strong> A ausência de um item também pode indicar que ele não foi liberado para sua conta.</li></ol></section>
               <section class="doc-section"><h2>Ações e confirmações</h2><p>Botões que alteram a operação, como excluir, suspender, finalizar ou mudar configurações, podem solicitar confirmação. Leia o texto antes de prosseguir e não feche a tela enquanto a operação estiver sendo concluída.</p>${callout("warning", "Evite ações repetidas", "Ao perceber lentidão, aguarde a confirmação. Clicar várias vezes pode gerar solicitações duplicadas ou dificultar a identificação do resultado.")}</section>`
           },
@@ -222,19 +222,6 @@
               <section class="doc-section"><h2>Modos de gravação</h2><div class="feature-grid"><div class="feature-card"><h3>Contínua</h3><p>Grava de forma permanente enquanto a câmera e o armazenamento estiverem disponíveis.</p></div><div class="feature-card"><h3>Por movimento</h3><p>Grava quando há mudança relevante na cena, com regras próprias da instalação.</p></div><div class="feature-card"><h3>Por agenda</h3><p>Grava em dias e horários definidos.</p></div><div class="feature-card"><h3>Manual</h3><p>Um usuário autorizado inicia e encerra a gravação quando necessário.</p></div></div></section>
               <section class="doc-section"><h2>Ações operacionais</h2><p>Dependendo da sua permissão, você pode iniciar uma gravação manual, ativar o monitoramento de movimento ou solicitar uma reconexão. Aguarde o resultado antes de repetir a ação.</p>${callout("danger", "Configurações especializadas", "Endereço, credenciais, formato da imagem, agenda de gravação e conexão devem ser alterados somente por administrador treinado ou suporte. Uma mudança incorreta pode interromper imagens e gravações.")}</section>
               <section class="doc-section"><h2>Ao cadastrar ou substituir uma câmera</h2><ul><li>Defina nome e localização sem ambiguidade.</li><li>Confirme data e hora do equipamento.</li><li>Valide imagem ao vivo e gravação.</li><li>Teste retorno após uma interrupção controlada.</li><li>Confirme acesso dos grupos corretos.</li><li>Registre quem realizou e aprovou a mudança.</li></ul></section>`
-          },
-          {
-            id: "mapa",
-            title: "Mapa da instalação",
-            summary: "Localize câmeras por área e abra rapidamente a visualização do ponto desejado.",
-            roles: ["Visualizador autorizado", "Operador", "Administrador"],
-            time: "4 min",
-            keywords: "mapa planta andar zona local marcador câmera",
-            related: ["ao-vivo", "cameras", "ptz"],
-            body: `
-              <section class="doc-section"><h2>Visão por local</h2><p>O Mapa organiza câmeras sobre plantas, andares ou zonas da instalação. Ele ajuda operadores que conhecem o espaço físico a encontrar rapidamente a imagem correta.</p></section>
-              <section class="doc-section"><h2>Usar o mapa</h2><ol class="steps"><li>Escolha o andar ou zona.</li><li>Localize o marcador da câmera.</li><li>Clique no marcador para ver as ações disponíveis.</li><li>Abra Ao Vivo ou Reprodução conforme a necessidade e sua permissão.</li></ol></section>
-              <section class="doc-section"><h2>Manter o mapa confiável</h2><p>Depois de mover, renomear ou substituir uma câmera, atualize sua posição no mapa. Um marcador desatualizado pode atrasar a resposta a uma ocorrência.</p></section>`
           },
           {
             id: "investigacoes",

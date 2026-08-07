@@ -31,7 +31,6 @@ import { RolePermissionsModule } from './role-permissions/role-permissions.modul
 import { CloudConnectorModule } from './cloud-connector/cloud-connector.module';
 import { CloudStorageModule } from './cloud-storage/cloud-storage.module';
 import { CommercialPolicyModule } from './commercial-policy/commercial-policy.module';
-import { AppBuilderModule } from './app-builder/app-builder.module';
 import { LiveLayoutsModule } from './live-layouts/live-layouts.module';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard } from '@nestjs/throttler';
@@ -54,7 +53,6 @@ import { EventLoopLagService } from './common/observability/event-loop-lag.servi
     PrismaModule,
     CommercialPolicyModule,
     SettingsModule,
-    AppBuilderModule,
     LiveLayoutsModule,
     GpuModule,
     RolePermissionsModule,

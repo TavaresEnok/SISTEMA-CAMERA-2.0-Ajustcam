@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { format } from 'date-fns';
-import { Search, Filter, CheckCheck, X, ChevronRight, ExternalLink, Shield, Clock, Archive, Video } from 'lucide-react';
+import { Search, Filter, CheckCheck, X, ChevronRight, ExternalLink, Shield, Clock, Video } from 'lucide-react';
 import { VMSEvent, useVmsDataStore } from '../store/vmsDataStore';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Link, useLocation } from 'wouter';
@@ -420,22 +420,14 @@ export default function EventosPage() {
                   </div>
                 </div>
 
+                {/* Havia aqui um segundo botão, "Evidência", que só levava à
+                    página de Evidências — removida. O caminho para o vídeo (e o
+                    download dele) já está acima, no link de Reprodução. */}
                 <div className="flex gap-2">
                   <button onClick={() => current && acknowledgeEvents([current.id])} disabled={!current || isAcknowledged(current)} className="flex-1 h-9 rounded-xl bg-[hsl(var(--primary)_/_0.12)] border border-[hsl(var(--primary)_/_0.28)] text-[hsl(var(--primary))] text-[11px] hover:bg-[hsl(var(--primary)_/_0.16)] transition-colors flex items-center justify-center gap-2 disabled:opacity-45">
                     <CheckCheck className="w-4 h-4" />
                     {isAcknowledged(current) ? 'Reconhecido' : 'Reconhecer'}
                   </button>
-                  {current ? (
-                    <Link href="/evidence" className="flex-1 h-9 rounded-xl border border-border text-[11px] hover:bg-[hsl(var(--accent))] transition-colors flex items-center justify-center gap-2">
-                      <Archive className="w-4 h-4" />
-                      Evidência
-                    </Link>
-                  ) : (
-                    <button disabled className="flex-1 h-9 rounded-xl border border-border text-[11px] flex items-center justify-center gap-2 opacity-45">
-                      <Archive className="w-4 h-4" />
-                      Evidência
-                    </button>
-                  )}
                 </div>
               </div>
             </div>
