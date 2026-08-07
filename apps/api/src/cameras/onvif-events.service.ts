@@ -10,6 +10,7 @@ import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { envNumber } from '../common/config/env-number.helper';
 import { assertCameraTargetAllowed } from '../common/network/safe-url.helper';
 import { candidateOnvifPorts, streamUriIdentifiesCamera } from './helpers/onvif-port-discovery.helper';
+import { classificarEventoOnvif, deveGravar, tipoDeEventoDoSistema, type EventoOnvifClassificado } from './helpers/evento-onvif.helper';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const onvif = require('onvif');
 
@@ -467,10 +468,16 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
         this.activeCams.set(camera.id, { cam, connectedAt: Date.now() });
 
         cam.on('event', (camMessage: any) => {
-          const str = JSON.stringify(camMessage);
-          if (!MOTION_TOPIC_RE.test(str)) return; // não é evento de movimento
-          if (MOTION_STOP_RE.test(str)) return;    // é FIM de movimento → ignora
-          this.onCameraMotion(camera.id);
+          // ANTES: uma pergunta só — "casa com /motion/?" — e o resto ia para o
+          // lixo em silêncio. A sondagem da frota (07/08/2026) mostrou o que
+          // estava sendo descartado: Cam-04/05/06 declaram
+          // `ruleEngine/lineDetector/crossed` (cruzamento de linha, COM
+          // direção) e `ruleEngine/fieldDetector/objectsInside`; outras,
+          // `userAlarm/IVA/humanShapeDetect`. A câmera gritava "alguém cruzou a
+          // linha" e o sistema desligava na cara dela.
+          const evento = classificarEventoOnvif(camMessage);
+          if (!deveGravar(evento.tipo)) return;
+          this.onCameraEvent(camera.id, evento);
         });
         // Erro DEPOIS de conectado (queda de rede/câmera reiniciou): derruba a
         // escuta para o sync de 60s reconectar. Antes o erro era engolido e a
@@ -491,15 +498,21 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
    * como o detector local) e dispara a gravação DIRETO (se armada). Prova de vida
    * da nativa: desliga a reserva local, se estava ligada. Cooldown evita enxurrada.
    */
-  private onCameraMotion(cameraId: string) {
+  private onCameraEvent(cameraId: string, evento: EventoOnvifClassificado) {
     const cooldownMs = envNumber('AI_ONVIF_TRIGGER_COOLDOWN_MS', 5000);
     const now = Date.now();
     const state = this.getNativeState(cameraId);
     state.lastEventAt = now;
     if (state.fallbackActive) void this.deactivateFallback(cameraId);
-    if (now - (this.lastTriggerByCamera.get(cameraId) ?? 0) < cooldownMs) return;
+
+    // PERÍMETRO NÃO ESPERA. O intervalo de silêncio existe para o movimento,
+    // que dispara em rajada por natureza (medido: ~222/hora em cena vazia).
+    // Cruzamento de linha e intrusão são raros e caros de perder: alguém pode
+    // cruzar duas vezes em 5 segundos, e a segunda é justamente a que importa.
+    const ehPerimetro = evento.tipo === 'linha-cruzada' || evento.tipo === 'intrusao';
+    if (!ehPerimetro && now - (this.lastTriggerByCamera.get(cameraId) ?? 0) < cooldownMs) return;
     this.lastTriggerByCamera.set(cameraId, now);
-    void this.handleNativeMotion(cameraId);
+    void this.handleNativeMotion(cameraId, evento);
   }
 
   /**
@@ -513,8 +526,14 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
    * frame e afirmou que NÃO há objeto (confirmed=false). Perder gravação real
    * por causa da IA é inaceitável; gravar um evento sem objeto é só custo.
    */
-  private async handleNativeMotion(cameraId: string) {
-    const filterEnabled = String(process.env.AI_ONVIF_SEMANTIC_FILTER ?? 'true').trim().toLowerCase() !== 'false';
+  private async handleNativeMotion(cameraId: string, evento?: EventoOnvifClassificado) {
+    const tipo = evento?.tipo ?? 'movimento';
+    // Perímetro (linha/intrusão) e forma humana já SÃO a decisão da câmera
+    // sobre haver algo relevante. Rodar o YOLO em cima disso é pagar duas
+    // vezes pela mesma resposta — e a confirmação semântica está desligada
+    // nesta instalação justamente pelo custo. Só movimento cru é confirmado.
+    const ehPerimetro = tipo === 'linha-cruzada' || tipo === 'intrusao' || tipo === 'forma-humana';
+    const filterEnabled = !ehPerimetro && String(process.env.AI_ONVIF_SEMANTIC_FILTER ?? 'true').trim().toLowerCase() !== 'false';
 
     let confirmation: { confirmed: boolean | null; labels: string[]; confidence?: number; reason?: string | null } | null = null;
     if (filterEnabled) {
@@ -539,12 +558,31 @@ export class OnvifEventsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const semanticLabel = confirmation?.confirmed === true ? (confirmation.labels[0] ?? null) : null;
-    void this.registerCameraEvent(cameraId, 'MOTION_DETECTED', 'INFO',
-      semanticLabel
-        ? `${semanticLabel} detectado(a) pela câmera (ONVIF).`
-        : 'Movimento detectado pela própria câmera (ONVIF).',
+
+    // O evento registrado reflete o que a CÂMERA disse. Antes tudo virava
+    // MOTION_DETECTED — um cruzamento de linha e um galho balançando ficavam
+    // indistinguíveis no histórico, e a Revisão não tinha como priorizar.
+    const tipoDoSistema = tipoDeEventoDoSistema(tipo) ?? 'MOTION_DETECTED';
+    const severidade = ehPerimetro && tipo !== 'forma-humana' ? 'WARNING' : 'INFO';
+    const ondeDiz = evento?.regra ? ` (${evento.regra})` : '';
+    const descricao =
+      tipo === 'linha-cruzada'
+        ? `Cruzamento de linha detectado pela câmera${ondeDiz}${evento?.direcao ? ` — sentido ${evento.direcao}` : ''}.`
+        : tipo === 'intrusao'
+          ? `Intrusão em área detectada pela câmera${ondeDiz}.`
+          : tipo === 'forma-humana'
+            ? 'Pessoa detectada pela própria câmera.'
+            : semanticLabel
+              ? `${semanticLabel} detectado(a) pela câmera (ONVIF).`
+              : 'Movimento detectado pela própria câmera (ONVIF).';
+
+    void this.registerCameraEvent(cameraId, tipoDoSistema, severidade, descricao,
       {
         source: 'onvif',
+        ...(tipo !== 'movimento' ? { perimetro: tipo } : {}),
+        ...(evento?.direcao ? { direcao: evento.direcao } : {}),
+        ...(evento?.regra ? { regra: evento.regra } : {}),
+        ...(evento?.topico ? { topico: evento.topico } : {}),
         ...(semanticLabel ? { semanticLabel, semanticConfirmed: true, semanticConfidence: confirmation?.confidence } : {}),
       });
 

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
+import { validarZonasDeDeteccao } from './helpers/validar-zonas.helper';
 import { CameraStatus, CameraPermissionLevel } from '@prisma/client';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
@@ -412,6 +413,9 @@ export class CamerasService {
       this.assertTestTargetAllowed(normalizedIp, targetOnvifPort);
     }
     await this.validateReferences(dto.siteId, dto.areaId, dto.groupId);
+    // O DTO valida a lista com uma regra só; a exigência por TIPO (linha tem
+    // 2 pontos, área tem 3+) precisa do `kind`, que só é conhecido aqui.
+    validarZonasDeDeteccao(dto.detectionZones);
     const normalizedProfile = this.normalizeProfileToDetected(dto, existing);
     const camera = await this.prisma.camera.update({
       where: { id },

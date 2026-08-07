@@ -14,6 +14,12 @@ const REVIEWABLE_TYPES = [
   'FACE_DETECTED',
   'FACE_RECOGNIZED',
   'FACE_UNKNOWN',
+  // Perímetro (07/08/2026). São os eventos de MAIOR valor da fila: alguém
+  // cruzou uma linha ou entrou numa área proibida — não é galho balançando.
+  // Ficar de fora daqui seria esconder justamente o que se quer revisar.
+  'LINE_CROSSED',
+  'INTRUSION_DETECTED',
+  'HUMAN_DETECTED',
 ];
 
 // Teto da janela do casamento evento→gravação em lote. A query em lote (que matou o

@@ -8,8 +8,10 @@ import { toast } from '../hooks/use-toast';
 export type DetectionZone = {
   id: string;
   name: string;
-  kind: 'include' | 'exclude';
+  kind: 'include' | 'exclude' | 'line';
   points: number[][];
+  /** Só em `line`: sentido PROIBIDO da travessia. */
+  sentido?: 'ambos' | 'ab' | 'ba';
   color?: string;
 };
 
@@ -28,6 +30,9 @@ const MAX_POINTS = 40;
 const ZONE_COLOR = {
   exclude: { stroke: 'hsl(0,72%,55%)', fill: 'hsl(0,72%,55%,0.22)' },
   include: { stroke: 'hsl(150,60%,45%)', fill: 'hsl(150,60%,45%,0.20)' },
+  // Âmbar para a linha: não é área monitorada nem ignorada — é um limite que
+  // não se atravessa. Cor distinta evita confundir com as duas zonas de área.
+  line: { stroke: 'hsl(38,92%,55%)', fill: 'none' },
 } as const;
 
 /**
@@ -51,7 +56,7 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [zones, setZones] = useState<DetectionZone[]>(initialZones ?? []);
   const [drawing, setDrawing] = useState<number[][] | null>(null);
-  const [drawKind, setDrawKind] = useState<'include' | 'exclude'>('exclude');
+  const [drawKind, setDrawKind] = useState<'include' | 'exclude' | 'line'>('exclude');
   const [saving, setSaving] = useState(false);
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -95,6 +100,9 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
     if (!point) return;
     setDrawing((current) => {
       if (!current) return current;
+      // A linha tem exatamente 2 pontos: fechar sozinha no segundo clique
+      // evita o passo extra de "confirmar" algo que já está completo.
+      if (drawKind === 'line' && current.length >= 2) return current;
       if (current.length >= MAX_POINTS) {
         toast({ title: 'Limite de pontos', description: `Máximo de ${MAX_POINTS} pontos por zona.`, variant: 'destructive' });
         return current;
@@ -105,11 +113,17 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
 
   const finishDrawing = useCallback(() => {
     if (!drawing) return;
-    if (drawing.length < 3) {
+    // Exigências OPOSTAS: área com 2 pontos tem espessura zero (nunca dispara);
+    // linha com 3 não diz qual trecho é a travessia nem para onde aponta a seta.
+    if (drawKind === 'line' && drawing.length !== 2) {
+      toast({ title: 'Linha incompleta', description: 'Marque o início e o fim da linha (2 pontos).', variant: 'destructive' });
+      return;
+    }
+    if (drawKind !== 'line' && drawing.length < 3) {
       toast({ title: 'Zona incompleta', description: 'Marque pelo menos 3 pontos para fechar a área.', variant: 'destructive' });
       return;
     }
-    const kindLabel = drawKind === 'exclude' ? 'Ignorar' : 'Monitorar';
+    const kindLabel = drawKind === 'exclude' ? 'Ignorar' : drawKind === 'include' ? 'Monitorar' : 'Linha';
     const sameKind = zones.filter((z) => z.kind === drawKind).length + 1;
     setZones((current) => [
       ...current,
@@ -118,6 +132,7 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
         name: `${kindLabel} ${sameKind}`,
         kind: drawKind,
         points: drawing,
+        ...(drawKind === 'line' ? { sentido: 'ambos' as const } : {}),
       },
     ]);
     setDrawing(null);
@@ -176,13 +191,21 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
           >
             Monitorar só aqui
           </button>
+          <button
+            type="button"
+            onClick={() => setDrawKind('line')}
+            className={`seg-btn ${drawKind === 'line' ? 'active' : ''}`}
+            title="Linha que não deve ser atravessada"
+          >
+            Linha de perímetro
+          </button>
         </div>
 
         {drawing ? (
           <>
             <button type="button" onClick={finishDrawing} className="btn btn-primary btn-sm">
               <Check className="h-3.5 w-3.5" />
-              Fechar área ({drawing.length} pontos)
+              {drawKind === 'line' ? `Confirmar linha (${drawing.length}/2)` : `Fechar área (${drawing.length} pontos)`}
             </button>
             <button type="button" onClick={() => setDrawing(null)} className="btn btn-secondary btn-sm">
               Cancelar
@@ -228,7 +251,30 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
         )}
 
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
-          {zones.map((zone) => (
+          {/* A seta é o que torna o sentido COMPREENSÍVEL: "ab" e "ba" não
+              significam nada sozinhos — a ponta na tela mostra qual é qual. */}
+          <defs>
+            <marker id="seta-linha" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={ZONE_COLOR.line.stroke} />
+            </marker>
+          </defs>
+          {zones.map((zone) => (zone.kind === 'line' ? (
+            <g key={zone.id}>
+              <line
+                x1={zone.points[0][0] * 100} y1={zone.points[0][1] * 100}
+                x2={zone.points[1][0] * 100} y2={zone.points[1][1] * 100}
+                stroke={ZONE_COLOR.line.stroke}
+                strokeWidth={0.6}
+                vectorEffect="non-scaling-stroke"
+                markerEnd={zone.sentido === 'ab' ? 'url(#seta-linha)' : undefined}
+                markerStart={zone.sentido === 'ba' ? 'url(#seta-linha)' : undefined}
+              />
+              {zone.points.map(([x, y], i) => (
+                <circle key={i} cx={x * 100} cy={y * 100} r={0.9} fill={ZONE_COLOR.line.stroke} />
+              ))}
+            </g>
+          ) : (
             <polygon
               key={zone.id}
               points={polygonPoints(zone.points)}
@@ -237,7 +283,7 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
               strokeWidth={0.4}
               vectorEffect="non-scaling-stroke"
             />
-          ))}
+          )))}
           {drawing && drawing.length > 0 && (
             <>
               <polyline
@@ -257,7 +303,9 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
 
         {drawing && (
           <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded bg-black/70 px-2 py-1 text-[10px] text-white/80">
-            Clique para marcar os cantos da área · mínimo 3 pontos
+            {drawKind === 'line'
+              ? 'Clique no INÍCIO e no FIM da linha · 2 pontos'
+              : 'Clique para marcar os cantos da área · mínimo 3 pontos'}
           </div>
         )}
       </div>
@@ -276,9 +324,30 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
                 }}
                 className="min-w-0 flex-1 bg-transparent text-xs outline-none"
               />
-              <span className="text-[10px] text-[hsl(var(--muted-foreground))]">
-                {zone.kind === 'exclude' ? 'ignorada' : 'monitorada'} · {zone.points.length} pontos
-              </span>
+              {zone.kind === 'line' ? (
+                /* O sentido só faz sentido junto da seta no desenho acima —
+                   por isso os rótulos falam de "início" e "fim" da linha, não
+                   de "entrar" e "sair", que dependeriam de como ela foi
+                   desenhada. */
+                <select
+                  value={zone.sentido ?? 'ambos'}
+                  onChange={(event) => {
+                    const sentido = event.target.value as 'ambos' | 'ab' | 'ba';
+                    setZones((current) => current.map((z) => (z.id === zone.id ? { ...z, sentido } : z)));
+                    setDirty(true);
+                  }}
+                  className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px]"
+                  aria-label={`Sentido proibido da linha ${zone.name}`}
+                >
+                  <option value="ambos">Qualquer sentido</option>
+                  <option value="ab">Só do início para o fim →</option>
+                  <option value="ba">Só do fim para o início ←</option>
+                </select>
+              ) : (
+                <span className="text-[10px] text-[hsl(var(--muted-foreground))]">
+                  {zone.kind === 'exclude' ? 'ignorada' : 'monitorada'} · {zone.points.length} pontos
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => {
