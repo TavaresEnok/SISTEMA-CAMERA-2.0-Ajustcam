@@ -16,6 +16,12 @@ import {
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
 import { classesPermitidas, decidirObjetoDaCamera, explicarDecisao, normalizarModoDeObjeto, temLinhaDePerimetro } from './helpers/escopo-de-objeto.helper';
+import { devePularPorDeteccaoNativa, modoDaCamera } from './helpers/modo-por-camera.helper';
+
+/** A decisão de objeto, lida do source_info que buildAiSource já montou. */
+function rodaObjetoDe(info: Record<string, unknown>): boolean {
+  return (info?.objectDetection as { ativo?: boolean } | undefined)?.ativo === true;
+}
 import { envNumber } from '../common/config/env-number.helper';
 
 const AI_MODES = ['motion', 'face', 'general'] as const;
@@ -478,7 +484,12 @@ export class AiManagerService implements OnModuleInit {
       for (const cam of enabledCameras) {
         try {
           const source = await this.buildAiSource(cam);
-          await this.aiService.startAnalysisWithConfig(cam.id, source.rtspUrl, settings.mode, source.info);
+          // O modo é POR CÂMERA: mandar o global anulava a decisão de escopo
+          // (ou todas pagavam YOLO, ou nenhuma detectava objeto). A decisão já
+          // viaja em `info.objectDetection` — lê de lá em vez de duplicá-la
+          // nos três pontos de retorno de buildAiSource (um por tipo de origem).
+          const modo = modoDaCamera(settings.mode, rodaObjetoDe(source.info));
+          await this.aiService.startAnalysisWithConfig(cam.id, source.rtspUrl, modo, source.info);
           started += 1;
           this.logger.log(`IA ${runtimeMode} iniciada para câmera: ${cam.name}`);
         } catch (err: any) {
@@ -542,11 +553,21 @@ export class AiManagerService implements OnModuleInit {
     // usam o evento ONVIF (OnvifEventsService) e NÃO consomem nossa CPU.
     // allowCameraTrigger=true é o FALLBACK do OnvifEventsService: liga a MOG2
     // como reserva quando a detecção nativa está sem prova de vida.
-    if (settings.mode === 'motion' && (cam as any).motionTrigger !== 'SYSTEM' && !options?.allowCameraTrigger) {
+    const source = await this.buildAiSource(cam);
+    // O atalho da detecção nativa vale só quando NÃO há objeto a processar.
+    // Aplicá-lo cegamente deixaria de fora as 17 câmeras da frota que usam
+    // evento ONVIF: a linha desenhada nelas não detectaria nada, com a tela
+    // dizendo que estava ativo.
+    if (devePularPorDeteccaoNativa({
+      modoGlobal: settings.mode,
+      motionTrigger: (cam as any).motionTrigger,
+      rodaObjeto: rodaObjetoDe(source.info),
+      permitirGatilhoDaCamera: options?.allowCameraTrigger,
+    })) {
       return { status: 'camera_self_detection', cameraId };
     }
-    const source = await this.buildAiSource(cam);
-    return this.aiService.startAnalysisWithConfig(cameraId, source.rtspUrl, settings.mode, source.info);
+    const modo = modoDaCamera(settings.mode, rodaObjetoDe(source.info));
+    return this.aiService.startAnalysisWithConfig(cameraId, source.rtspUrl, modo, source.info);
   }
 
   async getSettings() {

@@ -150,8 +150,11 @@ test('startCamera: movimento PROIBIDO pela licença continua bloqueando', async 
   assert.equal((result as any).status, 'disabled');
 });
 
-test('startCamera: modo OBJETO sem aiAdvanced continua bloqueado (a IA pesada segue desligada)', async () => {
-  const { mgr, calls } = managerFake({ mode: 'object', allowed: { aiMotion: true, aiAdvanced: false } });
+test('startCamera: modo PESADO sem aiAdvanced continua bloqueado (a IA pesada segue desligada)', async () => {
+  // 'general' e não 'object': AI_MODES é motion|face|general, e `updateSettings`
+  // rejeita qualquer outro. A fixture usava um modo que não existe — o código
+  // antigo o repassava cru ao ai-service, o novo normaliza.
+  const { mgr, calls } = managerFake({ mode: 'general', allowed: { aiMotion: true, aiAdvanced: false } });
 
   const result = await mgr.startCamera('cam-1');
 
@@ -159,12 +162,12 @@ test('startCamera: modo OBJETO sem aiAdvanced continua bloqueado (a IA pesada se
   assert.equal((result as any).status, 'disabled');
 });
 
-test('startCamera: modo OBJETO COM aiAdvanced sobe normalmente', async () => {
-  const { mgr, calls } = managerFake({ mode: 'object', allowed: { aiMotion: true, aiAdvanced: true } });
+test('startCamera: modo PESADO COM aiAdvanced sobe normalmente', async () => {
+  const { mgr, calls } = managerFake({ mode: 'general', allowed: { aiMotion: true, aiAdvanced: true } });
 
   await mgr.startCamera('cam-1');
 
-  assert.deepEqual(calls, ['start:cam-1:object']);
+  assert.deepEqual(calls, ['start:cam-1:general']);
 });
 
 test('startCamera: falha ao consultar a política não pode derrubar o movimento', async () => {
@@ -284,12 +287,12 @@ test('liveAutoStart: modo AVANÇADO (objeto/face licenciado) segue permitido pel
   // No modo avançado o overlay é real (caixa de objeto/face); o gate é só do
   // modo movimento, onde IA de câmera desarmada não produz nada visível.
   const { mgr, calls } = managerFake({
-    mode: 'object',
+    mode: 'general',
     allowed: { aiMotion: true, aiAdvanced: true },
     camera: { recordingMode: 'manual' },
   });
   await mgr.startCamera('cam-1', { liveAutoStart: true });
-  assert.deepEqual(calls, ['start:cam-1:object']);
+  assert.deepEqual(calls, ['start:cam-1:general']);
 });
 
 test('start SEM origem live (watchdog/boot) não é afetado pelo gate', async () => {

@@ -9,7 +9,9 @@ from collections import deque
 from queue import Queue
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from detectors.base import Detection
 from detectors.motion import MotionDetector
+from detectors.tripwire import DetectorDeTravessia
 from model_registry import registry
 from runtime_profiles import MOTION_PROFILE, runtime_profile
 from reconnect_backoff import compute_reconnect_delay
@@ -136,6 +138,9 @@ class StreamProcessor:
         zones = (source_info or {}).get("detectionZones") if isinstance(source_info, dict) else None
         self.detection_zones = zones if isinstance(zones, list) else []
         self.motion_detector = MotionDetector(zones=self.detection_zones)
+        # Tripwire: as LINHAS viajam na mesma lista das zonas (kind: 'line').
+        # Fica inativo — e sem custo — quando não há nenhuma desenhada.
+        self.tripwire = DetectorDeTravessia(self.detection_zones)
         self.last_error = None
         self._snapshot_lock = threading.Lock()
         self._latest_detections = []
@@ -1064,6 +1069,38 @@ class StreamProcessor:
                         }
                     detections.extend(advanced_detections)
                     self.last_advanced_infer_at = current_time
+
+                    # ── CRUZAMENTO DE LINHA ──────────────────────────────
+                    #
+                    # Só aqui, e não no caminho semântico: este detector roda
+                    # com `context_key=self.camera_id`, ou seja, COM
+                    # rastreamento. Sem identidade entre quadros não existe
+                    # trajeto, e sem trajeto não há travessia — só se saberia
+                    # que "há alguém de cada lado", que é outra pergunta.
+                    if self.tripwire.ativo:
+                        try:
+                            for t in self.tripwire.avaliar(advanced_detections, advanced_width, advanced_height):
+                                if not t.get("proibido"):
+                                    continue  # travessia no sentido permitido: registrada, não alarmada
+                                detections.append(Detection(
+                                    label=t.get("label") or "objeto",
+                                    confidence=float(t.get("confidence") or 0.0),
+                                    bbox=[0, 0, 0, 0],
+                                    event_type="LINE_CROSSED",
+                                    extra={
+                                        "linhaId": t.get("linhaId"),
+                                        "linhaNome": t.get("linhaNome"),
+                                        "sentido": t.get("sentido"),
+                                        "trackId": t.get("trackId"),
+                                        "frameWidth": int(advanced_width),
+                                        "frameHeight": int(advanced_height),
+                                    },
+                                ))
+                        except Exception as exc:
+                            # Perímetro não pode derrubar a análise: falhar aqui
+                            # deixaria a câmera sem detecção NENHUMA.
+                            self.last_error = f"tripwire: {exc}"
+                            logger.warning("[%s] tripwire falhou: %s", self.camera_id, exc)
 
                 # Snapshot "ao vivo" para overlays (sem debounce de evento).
                 if self.advanced_analysis_type:
