@@ -316,12 +316,15 @@ test('sem storage provisionado nada novo sobe, mas os anteriores continuam legí
 // dizer, ele deixa de ser.
 
 function comEstado(estado: string, storages: any[], over: Record<string, unknown> = {}) {
+  // (sem lápides por padrão — os testes deste arquivo são sobre o fallback puro)
   const svc = makeResolver({ cloudConnector: { getCloudStorageConfig: async () => null, getCloudStorageState: async () => estado } });
   const desativados: string[] = [];
   const ativados: string[] = [];
   svc.prisma = {
     cloudStorage: {
       findFirst: async (args: any) => (args?.where?.isActive ? storages.find((s) => s.isActive) ?? null : storages[0] ?? null),
+      // O fallback passou a listar candidatos (para excluir quem tem lápide).
+      findMany: async () => [...storages],
       findUnique: async () => storages[0] ?? null,
       updateMany: async () => { desativados.push('todos'); return { count: 1 }; },
       update: async (args: any) => { ativados.push(args.where.id); return storages[0]; },

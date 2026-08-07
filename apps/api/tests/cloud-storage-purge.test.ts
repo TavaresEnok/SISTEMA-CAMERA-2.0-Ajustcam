@@ -19,12 +19,17 @@ type Chamada = { op: string; where?: any; data?: any };
 function montar(opcoes: {
   remocoes: Array<{ endpoint: string; bucket: string; prefix: string }>;
   storage: any | null;
+  /** O que a Central está provisionando AGORA (null = nada). */
+  provisionado?: any | null;
 }) {
   const chamadas: Chamada[] = [];
   const logs: string[] = [];
   const svc: any = Object.create(CloudStorageResolverService.prototype);
   svc.logger = { warn: (m: string) => logs.push(m), log: (m: string) => logs.push(m), error: () => {} };
-  svc.cloudConnector = { getCloudStorageRemovals: async () => opcoes.remocoes };
+  svc.cloudConnector = {
+    getCloudStorageRemovals: async () => opcoes.remocoes,
+    getCloudStorageConfig: async () => opcoes.provisionado ?? null,
+  };
   svc.prisma = {
     cloudStorage: {
       findFirst: async ({ where }: any) => {
@@ -72,11 +77,27 @@ test('ORDEM: gravações ANTES do storage — senão cloudStorageId vira null e 
   assert.ok(ordem.indexOf('limpaCampos') < ordem.indexOf('apagaStorage'), ordem.join(' → '));
 });
 
-test('storage ATIVO nunca é expurgado — a Central voltou a provisioná-lo', async () => {
-  const { svc, chamadas } = montar({ remocoes: [REMOCAO], storage: { ...STORAGE, isActive: true } });
+test('storage RE-PROVISIONADO nunca é expurgado — a exclusão foi desfeita', async () => {
+  // A REGRA MUDOU em 07/08/2026, e o motivo importa: o portão era `isActive`,
+  // mas a linha excluída FICAVA ativa — o fallback de semStorageProvisionado a
+  // promovia (era a mais recente da tabela) e o expurgo a pulava para sempre.
+  // O sinal verdadeiro de "exclusão desfeita" é a Central PROVISIONAR o mesmo
+  // endereço de novo — e é isso que o portão passa a checar.
+  const { svc, chamadas } = montar({
+    remocoes: [REMOCAO],
+    storage: { ...STORAGE, isActive: true },
+    provisionado: { enabled: true, endpoint: REMOCAO.endpoint, bucket: REMOCAO.bucket, prefix: REMOCAO.prefix },
+  });
   const feitos = await svc.expurgarStoragesRemovidos();
   assert.deepEqual(feitos, []);
   assert.ok(!chamadas.some((c) => c.op === 'apagaGravacoes'), 'expurgar o destino em uso destruiria o acervo vivo');
+});
+
+test('storage ativo mas SEM provisionamento É expurgado (o deadlock de 07/08)', async () => {
+  const { svc, chamadas } = montar({ remocoes: [REMOCAO], storage: { ...STORAGE, isActive: true }, provisionado: null });
+  const feitos = await svc.expurgarStoragesRemovidos();
+  assert.equal(feitos.length, 1, 'linha ativa órfã de provisionamento é exatamente o que precisa sair');
+  assert.ok(chamadas.some((c) => c.op === 'apagaStorage'));
 });
 
 test('lápide de storage que esta instalação nunca teve é ignorada', async () => {

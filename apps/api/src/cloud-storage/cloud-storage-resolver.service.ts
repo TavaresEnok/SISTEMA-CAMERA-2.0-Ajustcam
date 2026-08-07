@@ -149,9 +149,26 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
     // Excluído: o mais recente entre os que sobraram assume. Mais recente, e não
     // o mais antigo, porque numa sequência de trocas é o penúltimo fornecedor
     // que ainda tem contrato vivo — o primeiro provavelmente já foi cancelado.
-    const candidato = await this.prisma.cloudStorage
-      .findFirst({ orderBy: { createdAt: 'desc' } })
-      .catch(() => null);
+    //
+    // "Os que sobraram" EXCLUI quem tem lápide: o endereço excluído na Central
+    // não pode concorrer a destino — era a outra metade do deadlock acima (o
+    // próprio excluído era a linha mais recente e assumia o lugar de si mesmo).
+    let lapides = new Set<string>();
+    try {
+      const remocoes = await this.cloudConnector.getCloudStorageRemovals();
+      lapides = new Set(
+        (Array.isArray(remocoes) ? remocoes : []).map(
+          (r: { endpoint?: string; bucket?: string; prefix?: string }) =>
+            `${String(r?.endpoint ?? '').trim()}|${String(r?.bucket ?? '').trim()}|${String(r?.prefix ?? '').trim()}`,
+        ),
+      );
+    } catch { /* sem lápides legíveis, segue como antes */ }
+    const sobreviventes = await this.prisma.cloudStorage
+      .findMany({ orderBy: { createdAt: 'desc' }, take: 20 })
+      .catch(() => []);
+    const candidato = sobreviventes.find(
+      (c) => !lapides.has(`${c.endpoint}|${c.bucket}|${c.prefix ?? ''}`),
+    ) ?? null;
     if (!candidato) {
       if (ativo) {
         await this.prisma.cloudStorage
@@ -257,9 +274,21 @@ export class CloudStorageResolverService implements OnModuleInit, OnModuleDestro
       if (!endereco.endpoint || !endereco.bucket) continue;
       const linha = await this.prisma.cloudStorage.findFirst({ where: endereco }).catch(() => null);
       if (!linha) continue;
-      // Nunca expurga o que está RECEBENDO gravação agora: se a Central voltou
-      // a provisionar este mesmo endereço, a exclusão foi desfeita.
-      if (linha.isActive) continue;
+      // Nunca expurga o que a Central voltou a PROVISIONAR: aí a exclusão foi
+      // desfeita. O portão tem de ser o provisionamento, e NÃO `linha.isActive`
+      // — deadlock real de 07/08/2026: excluído o storage na Central, o
+      // fallback de `semStorageProvisionado` promovia o próprio excluído a
+      // ativo (ele ainda estava na tabela como linha mais recente), e o expurgo
+      // pulava linha ativa. O excluído se reelegia para sempre, e o offload
+      // seguia batendo na credencial morta a cada ciclo.
+      const provisionado = await this.legado().catch(() => null);
+      const aindaProvisionado = Boolean(
+        provisionado
+        && provisionado.endpoint === endereco.endpoint
+        && provisionado.bucket === endereco.bucket
+        && (provisionado.prefix ?? '') === endereco.prefix,
+      );
+      if (aindaProvisionado) continue;
 
       try {
         const semLastro = await this.prisma.recording.deleteMany({
