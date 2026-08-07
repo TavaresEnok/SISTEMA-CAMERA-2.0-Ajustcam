@@ -5,6 +5,11 @@ import { Search, Filter, CheckCheck, X, ChevronRight, ExternalLink, Shield, Cloc
 import { VMSEvent, useVmsDataStore } from '../store/vmsDataStore';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Link, useLocation } from 'wouter';
+import axios from 'axios';
+import { useAuthStore } from '../store/authStore';
+import { getApiBaseUrl } from '../lib/api-base';
+import { toast } from '../hooks/use-toast';
+import { getRequestErrorMessage } from '../lib/request-error';
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   motion_detected: 'Movimento Detectado',
@@ -50,6 +55,7 @@ export default function EventosPage() {
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [localAcknowledged, setLocalAcknowledged] = useState<Set<string>>(new Set());
+  const accessToken = useAuthStore((state) => state.accessToken);
   const [drawerEvent, setDrawerEvent] = useState<VMSEvent | null>(events[0] ?? null);
 
   const filtered = events.filter(evt => {
@@ -87,7 +93,16 @@ export default function EventosPage() {
 
   const isAcknowledged = (event?: VMSEvent | null) => Boolean(event?.acknowledged || (event && localAcknowledged.has(event.id)));
 
-  const acknowledgeEvents = (ids: string[]) => {
+  // ── RECONHECER DE VERDADE ─────────────────────────────────────────────
+  //
+  // Antes isto só gravava num `Set` local: o operador reconhecia 30 eventos,
+  // recarregava a página e todos voltavam a "Aberto". Numa sala de operação
+  // isso é trabalho perdido — e pior, dá a impressão contrária.
+  //
+  // O endpoint existe: POST /cameras/incidents/:id/ack (o mesmo que a tela de
+  // Alarmes usa). A marcação local vira otimista, com reversão em caso de
+  // falha, para a lista não "piscar" enquanto as requisições vão.
+  const acknowledgeEvents = async (ids: string[]) => {
     if (!ids.length) return;
     setLocalAcknowledged((current) => {
       const next = new Set(current);
@@ -95,6 +110,34 @@ export default function EventosPage() {
       return next;
     });
     setSelected(new Set());
+
+    const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined;
+    const falhas: string[] = [];
+    for (const id of ids) {
+      try {
+        await axios.post(`${getApiBaseUrl()}/cameras/incidents/${id}/ack`, {}, { headers, timeout: 15_000 });
+      } catch (erro) {
+        falhas.push(id);
+        if (falhas.length === 1) {
+          toast({
+            title: 'Não foi possível reconhecer',
+            description: getRequestErrorMessage(erro, 'Falha ao registrar o reconhecimento.'),
+            variant: 'destructive',
+          });
+        }
+      }
+    }
+    if (falhas.length) {
+      // Reverte só o que falhou: manter marcado o que não foi salvo repetiria
+      // o defeito original, agora com aparência de sucesso.
+      setLocalAcknowledged((current) => {
+        const next = new Set(current);
+        falhas.forEach((id) => next.delete(id));
+        return next;
+      });
+    } else {
+      toast({ title: ids.length > 1 ? `${ids.length} eventos reconhecidos` : 'Evento reconhecido' });
+    }
   };
 
   return (
@@ -265,25 +308,25 @@ export default function EventosPage() {
                   ))}
                 </div>
 
-                <div className="rounded-lg border border-border bg-background overflow-hidden">
-                  <div className="relative aspect-video bg-[hsl(220_20%_7%)] overflow-hidden">
-                    <div className="absolute inset-0 opacity-70" style={{ background: 'linear-gradient(180deg, hsl(220 20% 9% / 0.95), hsl(220 20% 6% / 1))' }} />
-                    <div className="absolute inset-0 opacity-25 bg-[linear-gradient(to_right,hsl(var(--border))_1px,transparent_1px),linear-gradient(to_bottom,hsl(var(--border))_1px,transparent_1px)] bg-[size:24px_24px]" />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="text-center">
-                        <Video className="w-9 h-9 mx-auto text-[hsl(var(--primary))] opacity-80" />
-                        <div className="mt-2 text-[11px] text-[hsl(var(--muted-foreground))]">Visualização da câmera</div>
-                        <div className="mt-1 text-[12px] font-semibold">{currentCamera?.code ?? 'CAM-000'}</div>
+                {/* HONESTO NO LUGAR DE FALSO. Aqui havia um "player" que era
+                    gradiente + ícone, com selos "REC" e "UTC+0" queimados: parecia
+                    vídeo e sugeria que a cena tinha sido revisada. Numa tela de
+                    eventos isso induz conclusão errada. O vídeo mora na
+                    Reprodução — então o caminho é levar até lá, no instante certo. */}
+                {current && (
+                  <Link
+                    href={`/playback?cameraId=${encodeURIComponent(current.cameraId)}&at=${encodeURIComponent(current.timestamp)}`}
+                    className="flex aspect-video items-center justify-center rounded-lg border border-dashed border-border bg-[hsl(var(--muted))] text-center transition-colors hover:border-[hsl(var(--primary)_/_0.5)] hover:bg-[hsl(var(--accent))]"
+                  >
+                    <div>
+                      <Video className="mx-auto h-8 w-8 text-[hsl(var(--primary))]" />
+                      <div className="mt-2 text-[12px] font-medium">Ver o vídeo deste evento</div>
+                      <div className="mt-0.5 text-[11px] text-[hsl(var(--muted-foreground))]">
+                        Abre a Reprodução em {format(new Date(current.timestamp), 'dd/MM HH:mm:ss')}
                       </div>
                     </div>
-                    <div className="absolute left-3 top-3 flex items-center gap-2 text-[9px] text-white/70">
-                      <span className="rounded bg-black/45 px-1.5 py-0.5">REC</span>
-                      <span className="rounded bg-black/45 px-1.5 py-0.5">UTC+0</span>
-                    </div>
-                    <div className="absolute left-3 bottom-3 text-[10px] text-white/60">{current?.cameraName ?? 'Sem câmera'}</div>
-                    <div className="absolute right-3 bottom-3 text-[10px] text-white/60">{current ? format(new Date(current.timestamp), 'HH:mm:ss') : '--:--:--'}</div>
-                  </div>
-                </div>
+                  </Link>
+                )}
 
                 <div className="grid grid-cols-3 gap-2">
                   {[
@@ -342,37 +385,38 @@ export default function EventosPage() {
                   </details>
                 </div>
 
-                <div className="rounded-lg border border-border overflow-hidden bg-[hsl(220_20%_7%)]">
-                  <div className="aspect-video relative">
-                    <div className="absolute inset-0 bg-[linear-gradient(to_bottom,hsl(220_20%_10%_/_0.15),hsl(220_20%_4%_/_0.75))]" />
-                    <div className="absolute inset-0 opacity-30 bg-[linear-gradient(to_right,hsl(var(--border))_1px,transparent_1px),linear-gradient(to_bottom,hsl(var(--border))_1px,transparent_1px)] bg-[size:28px_28px]" />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="text-center">
-                        <Shield className="w-10 h-10 mx-auto text-[hsl(var(--primary))] opacity-80" />
-                        <div className="mt-3 text-[11px] text-[hsl(var(--muted-foreground))]">Preview da câmera</div>
-                      </div>
-                    </div>
-                    <div className="absolute left-3 top-3 rounded bg-black/40 px-1.5 py-0.5 text-[9px] text-white/70">Ao vivo</div>
-                    <div className="absolute right-3 top-3 rounded bg-black/40 px-1.5 py-0.5 text-[9px] text-white/70">Gravando</div>
-                  </div>
-                </div>
+                {/* Removido o segundo "player" (gradiente + ícone com selos "Ao
+                    vivo" e "Gravando"): afirmava transmissão que não existia. Quem
+                    quer ver a câmera agora vai ao Ao Vivo. */}
+                {currentCamera && (
+                  <Link
+                    href="/live"
+                    className="flex items-center justify-center gap-2 rounded-lg border border-border px-3 py-2.5 text-[11px] transition-colors hover:bg-[hsl(var(--accent))]"
+                  >
+                    <Video className="h-3.5 w-3.5" /> Ver {currentCamera.name} ao vivo
+                  </Link>
+                )}
 
+                {/* A "linha do evento" era composta por três frases FIXAS no
+                    código, com aparência de histórico apurado. Passa a mostrar só
+                    o que se sabe de fato: o registro e o reconhecimento. */}
                 <div className="rounded-lg border border-border p-4">
                   <div className="flex items-center gap-2 mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-[hsl(var(--muted-foreground))]">
                     <Clock className="w-3.5 h-3.5" />
-                    Linha do evento
+                    Registro
                   </div>
-                  <div className="space-y-3">
-                    {[
-                      'Alerta capturado pelo analítico da câmera.',
-                      'Correlação automática com zona e severidade.',
-                      isAcknowledged(current) ? 'Evento já reconhecido pelo operador.' : 'Evento aguardando reconhecimento.',
-                    ].map((line, i) => (
-                      <div key={line} className="flex items-start gap-2">
-                        <span className="mt-1 w-1.5 h-1.5 rounded-full bg-[hsl(var(--primary))] shrink-0" />
-                        <div className="text-[11px] text-[hsl(var(--muted-foreground))]">{i === 0 ? `${current ? format(new Date(current.timestamp), 'HH:mm:ss') : '--:--:--'} — ` : ''}{line}</div>
+                  <div className="space-y-2 text-[11px] text-[hsl(var(--muted-foreground))]">
+                    <div className="flex items-start gap-2">
+                      <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--primary))]" />
+                      <div>
+                        {current ? format(new Date(current.timestamp), 'dd/MM/yyyy HH:mm:ss') : '--'} — evento registrado
+                        {current ? ` por ${current.cameraName}` : ''}.
                       </div>
-                    ))}
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${isAcknowledged(current) ? 'bg-[hsl(var(--status-online))]' : 'bg-[hsl(var(--muted-foreground))]'}`} />
+                      <div>{isAcknowledged(current) ? 'Reconhecido pelo operador.' : 'Aguardando reconhecimento.'}</div>
+                    </div>
                   </div>
                 </div>
 
@@ -382,7 +426,7 @@ export default function EventosPage() {
                     {isAcknowledged(current) ? 'Reconhecido' : 'Reconhecer'}
                   </button>
                   {current ? (
-                    <Link href={`/evidence?eventId=${current.id}`} className="flex-1 h-9 rounded-xl border border-border text-[11px] hover:bg-[hsl(var(--accent))] transition-colors flex items-center justify-center gap-2">
+                    <Link href="/evidence" className="flex-1 h-9 rounded-xl border border-border text-[11px] hover:bg-[hsl(var(--accent))] transition-colors flex items-center justify-center gap-2">
                       <Archive className="w-4 h-4" />
                       Evidência
                     </Link>

@@ -45,6 +45,8 @@ const NAV_SECTIONS: NavSection[] = [
       // foram corrigidos. /wall, /investigation, /events e /reports seguem
       // fora até deixarem de ser casca (ver plano, Fase 4b).
       { path: '/map',      label: 'Mapa / Planta',  icon: Map,       roles: ['admin', 'operator'] },
+      { path: '/wall',     label: 'Modo Mural',     icon: LayoutGrid },
+      { path: '/events',   label: 'Eventos',        icon: Bell,      roles: ['admin', 'operator'] },
     ],
   },
   {
@@ -62,6 +64,7 @@ const NAV_SECTIONS: NavSection[] = [
     icon: FileSearch,
     items: [
       { path: '/evidence', label: 'Evidências', icon: FileArchive, roles: ['admin', 'operator'] },
+      { path: '/reports',  label: 'Relatórios', icon: FileText,    roles: ['admin', 'operator'] },
     ],
   },
   {

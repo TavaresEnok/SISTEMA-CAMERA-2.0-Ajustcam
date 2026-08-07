@@ -11,20 +11,26 @@ test('marca visível usa AjustCam e não exibe versão fictícia', () => {
 });
 
 test('páginas incompletas não aparecem na navegação nem na paleta de comandos', () => {
-  // O MAPA SAIU DA LISTA (2026-08-07): responsividade, acesso por teclado,
-  // alvo de toque e rótulos em português foram corrigidos — ele mostra dados
-  // reais e agora está no menu.
+  // SAÍRAM DA LISTA (2026-08-07):
+  //   /map  — responsividade, teclado, alvo de toque e rótulos corrigidos;
+  //   /wall — deixou de ser maquete: a rota agora liga o modo mural REAL do
+  //           /live (players de verdade) em vez de desenhar retângulos pretos;
+  //   /events  — "Reconhecer" passou a chamar POST /cameras/incidents/:id/ack
+  //              (antes só marcava num Set local e sumia ao recarregar), e os
+  //              dois "players" de gradiente viraram links para Reprodução/Ao Vivo;
+  //   /reports — passou a exportar CSV de verdade, gerado no navegador a
+  //              partir dos mesmos dados da tela.
+  //
+  // Resta /investigation, cujo player e régua ainda são maquete com valores
+  // fixos — mostrar isso como pronto sugeriria que um vídeo foi revisado.
   //
   // Os que permanecem continuam sendo CASCA, e é isso que este teste protege:
-  //   /wall          — não renderiza vídeo nenhum (retângulos pretos);
   //   /investigation — player e régua são maquete com valores fixos;
-  //   /events        — "Reconhecer" não chama API (some ao recarregar);
-  //   /reports       — a exportação PDF/CSV não existe.
   // Todos estão roteados e alcançáveis por URL; o que não se faz é oferecê-los
   // ao operador como se estivessem prontos.
   const palette = read('src/components/CommandPalette.tsx');
   const sidebar = read('src/components/Sidebar.tsx');
-  for (const path of ['/wall', '/investigation', '/events', '/reports']) {
+  for (const path of ['/investigation']) {
     assert.doesNotMatch(palette, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
     assert.doesNotMatch(sidebar, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
   }
