@@ -19,10 +19,29 @@
 
 const AI_CAPABILITIES = Object.freeze(['motion', 'object', 'face']);
 
+// ── QUAIS OBJETOS ESTA INSTALAÇÃO PODE DETECTAR ─────────────────────────────
+//
+// Ligar "objeto" responde SE; isto responde O QUÊ. A decisão vive na Central,
+// e não na instalação, porque é de ESCOPO COMERCIAL: o cliente contratou
+// detecção de pessoa e veículo, não de cachorro. Deixar a lista na instalação
+// permitiria ao operador ampliar sozinho o que foi vendido — e cada classe
+// extra custa CPU no servidor do cliente.
+//
+// Os identificadores são os do modelo (COCO), não traduções: o ai-service os
+// usa cru, e traduzir aqui criaria um mapa a mais para desincronizar.
+const OBJECT_CLASSES = Object.freeze([
+  'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'dog', 'cat',
+]);
+
+// Pessoa e veículo: o que resolve praticamente todo caso de perímetro. Nasce
+// enxuto de propósito — cada classe a mais é custo de inferência sem pedido.
+const DEFAULT_OBJECT_CLASSES = Object.freeze(['person', 'car', 'motorcycle', 'bus']);
+
 const DEFAULT_AI_POLICY = Object.freeze({
   motion: true,
   object: false,
   face: false,
+  objectClasses: DEFAULT_OBJECT_CLASSES,
 });
 
 function readBool(value, fallback) {
@@ -45,6 +64,17 @@ function normalizeAiPolicy(input) {
   for (const cap of AI_CAPABILITIES) {
     out[cap] = readBool(source[cap], DEFAULT_AI_POLICY[cap]);
   }
+  // Classe desconhecida é DESCARTADA, não rejeitada: uma versão nova da Central
+  // pode conhecer classes que este código ainda não, e travar a política
+  // inteira por causa disso deixaria a instalação sem IA nenhuma.
+  const classes = Array.isArray(source.objectClasses)
+    ? [...new Set(source.objectClasses.map((c) => String(c ?? '').trim().toLowerCase()))].filter((c) => OBJECT_CLASSES.includes(c))
+    : null;
+  // Lista vazia por ENGANO (todas inválidas) cai no padrão; lista vazia
+  // DELIBERADA é indistinguível disso no JSON, e o lado seguro é ter alguma
+  // classe — "objeto ligado sem classe nenhuma" nunca detectaria nada e
+  // pareceria defeito.
+  out.objectClasses = classes && classes.length ? classes : [...DEFAULT_OBJECT_CLASSES];
   return out;
 }
 
@@ -59,11 +89,22 @@ function validateAiPolicy(input) {
     return { valid: false, errors: ['aiPolicy deve ser um objeto'] };
   }
   for (const key of Object.keys(input)) {
-    if (!AI_CAPABILITIES.includes(key)) errors.push(`chave desconhecida: ${key}`);
+    if (!AI_CAPABILITIES.includes(key) && key !== 'objectClasses') errors.push(`chave desconhecida: ${key}`);
   }
   for (const cap of AI_CAPABILITIES) {
     if (cap in input && typeof input[cap] !== 'boolean') {
       errors.push(`${cap} deve ser boolean`);
+    }
+  }
+  if ('objectClasses' in input) {
+    if (!Array.isArray(input.objectClasses)) {
+      errors.push('objectClasses deve ser uma lista');
+    } else {
+      // Aqui a classe desconhecida É rejeitada (ao contrário do normalize): o
+      // painel está enviando algo que o operador digitou/escolheu, e aceitar em
+      // silêncio faria a tela mostrar uma classe que nunca seria detectada.
+      const invalidas = input.objectClasses.filter((c) => !OBJECT_CLASSES.includes(String(c ?? '').trim().toLowerCase()));
+      if (invalidas.length) errors.push(`classe desconhecida: ${invalidas.join(', ')}`);
     }
   }
   return { valid: errors.length === 0, errors };
@@ -90,6 +131,10 @@ function applyAiPolicyToRestrictions(restrictions, policy) {
     // painel liberou alguma das pesadas. Instalação antiga que não entenda as
     // chaves novas continua obedecendo a este campo.
     aiAdvanced: advancedAllowed && (wanted.object || wanted.face),
+    // Viaja junto das capacidades: a instalação precisa saber O QUÊ detectar,
+    // não só que pode detectar. Vazio quando objeto está desligado, para não
+    // sugerir permissão que não existe.
+    aiObjectClasses: wanted.object && advancedAllowed ? wanted.objectClasses : [],
   };
 }
 
@@ -99,11 +144,14 @@ function describeAiPolicy(policy) {
   const ligadas = AI_CAPABILITIES.filter((cap) => p[cap]);
   if (!ligadas.length) return 'nenhuma';
   if (ligadas.length === 1 && ligadas[0] === 'motion') return 'somente movimento';
-  return ligadas.join(', ');
+  const classes = p.object && p.objectClasses?.length ? ` (${p.objectClasses.join('/')})` : '';
+  return `${ligadas.join(', ')}${classes}`;
 }
 
 module.exports = {
   AI_CAPABILITIES,
+  OBJECT_CLASSES,
+  DEFAULT_OBJECT_CLASSES,
   DEFAULT_AI_POLICY,
   normalizeAiPolicy,
   validateAiPolicy,

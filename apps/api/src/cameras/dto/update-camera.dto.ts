@@ -120,6 +120,16 @@ export class UpdateCameraDto {
   @IsBoolean()
   ptzCapable?: boolean | null;
 
+  /**
+   * Como esta câmera participa da detecção de OBJETO.
+   * `auto` (padrão) roda só com linha de perímetro desenhada — o custo segue a
+   * necessidade declarada em vez de uma lista paralela para manter.
+   */
+  @IsOptional()
+  @IsString()
+  @IsIn(['auto', 'sempre', 'nunca'])
+  objectMode?: 'auto' | 'sempre' | 'nunca';
+
   @IsOptional()
   @IsString()
   @IsIn(RECORDING_MODES)

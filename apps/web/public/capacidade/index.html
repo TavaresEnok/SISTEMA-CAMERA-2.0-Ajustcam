@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capacidade do servidor — AjustCam</title>
+  <meta name="description" content="Simule CPU, memória, armazenamento e banda de rede para projetos AjustCam de 50 a 1.000 câmeras.">
+  <meta name="robots" content="noindex">
+  <meta name="color-scheme" content="dark">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/capacidade/" aria-label="AjustCam — capacidade do servidor">
+        <svg class="brand-mark" viewBox="0 0 120 120" aria-hidden="true">
+          <circle cx="60" cy="60" r="31" fill="none" stroke="currentColor" stroke-width="7" opacity=".9"/>
+          <circle cx="60" cy="60" r="15" fill="currentColor"/>
+        </svg>
+        <span><strong>AjustCam</strong><small>Capacidade do servidor</small></span>
+      </a>
+      <nav class="top-links" aria-label="Links da página">
+        <a href="/armazenamento/">Armazenamento</a>
+        <a href="/ajuda/">Ajuda</a>
+        <button class="print-button" id="print-page" type="button">Salvar em PDF</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span>Planejamento de infraestrutura</p>
+        <h1>O servidor certo para cada projeto</h1>
+        <p class="lede">Estime <strong>processamento, memória, armazenamento e rede</strong> para operar de 50 a 1.000 câmeras. Ajuste o cenário e apresente ao cliente uma referência clara, com as premissas visíveis.</p>
+        <div class="hero-actions">
+          <a class="primary-action" href="#simulador">Simular projeto</a>
+          <a class="secondary-action" href="#comparativo">Comparar capacidades</a>
+        </div>
+      </div>
+      <aside class="evidence-card" aria-label="Base da estimativa">
+        <div class="evidence-head">
+          <span class="status-dot"></span>
+          <span>Base medida no AjustCam</span>
+        </div>
+        <div class="evidence-metric"><strong>2,1</strong><span>Mbps por câmera</span></div>
+        <div class="evidence-grid">
+          <div><strong>53 MB</strong><span>RAM por câmera</span></div>
+          <div><strong>22,6 GB</strong><span>por câmera/dia</span></div>
+          <div><strong>1,6%</strong><span>de 1 núcleo</span></div>
+          <div><strong>H.264</strong><span>720p · 15 FPS</span></div>
+        </div>
+        <p>Gravação em cópia, sem recomprimir o vídeo.</p>
+      </aside>
+    </section>
+
+    <section class="trust-strip" aria-label="Características da estimativa">
+      <div class="wrap trust-grid">
+        <div><span class="trust-icon">◎</span><p><strong>Medição reproduzível</strong><small>Base real do gravador</small></p></div>
+        <div><span class="trust-icon">+20%</span><p><strong>Reserva de disco</strong><small>Espaço livre protegido</small></p></div>
+        <div><span class="trust-icon">+30%</span><p><strong>Margem de rede</strong><small>Além do tráfego nominal</small></p></div>
+        <div><span class="trust-icon">1:1</span><p><strong>Qualidade preservada</strong><small>Vídeo gravado em cópia</small></p></div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="simulador">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Simulador</p>
+          <h2>Monte o cenário do cliente</h2>
+          <p>Os resultados são recalculados imediatamente. Para uma proposta definitiva, use o bitrate médio real das câmeras.</p>
+        </div>
+        <span class="reference-badge">Referência de engenharia</span>
+      </div>
+
+      <div class="calculator">
+        <form class="controls" id="capacity-form">
+          <fieldset>
+            <legend>Quantidade de câmeras</legend>
+            <div class="camera-presets" role="group" aria-label="Quantidades sugeridas">
+              <button type="button" data-cameras="50">50</button>
+              <button type="button" data-cameras="100" class="active">100</button>
+              <button type="button" data-cameras="300">300</button>
+              <button type="button" data-cameras="500">500</button>
+              <button type="button" data-cameras="1000">1.000</button>
+            </div>
+            <label class="input-label" for="camera-count">Ou informe outra quantidade</label>
+            <div class="input-suffix"><input id="camera-count" name="cameras" type="number" min="1" max="5000" step="1" value="100" inputmode="numeric"><span>câmeras</span></div>
+          </fieldset>
+
+          <fieldset>
+            <div class="legend-row"><legend>Bitrate médio por câmera</legend><output id="bitrate-value" for="bitrate">2,1 Mbps</output></div>
+            <input id="bitrate" name="bitrate" type="range" min="0.5" max="12" step="0.1" value="2.1">
+            <div class="range-labels"><span>0,5 Mbps</span><span>12 Mbps</span></div>
+            <p class="field-help">O bitrate é o fator que define a quantidade de vídeo gerada. Confirme-o na configuração da câmera.</p>
+          </fieldset>
+
+          <div class="control-columns">
+            <fieldset>
+              <legend>Retenção</legend>
+              <label class="select-wrap"><select id="retention" name="retention">
+                <option value="3" selected>3 dias</option>
+                <option value="7">7 dias</option>
+                <option value="15">15 dias</option>
+                <option value="30">30 dias</option>
+                <option value="60">60 dias</option>
+                <option value="90">90 dias</option>
+              </select></label>
+            </fieldset>
+            <fieldset>
+              <legend>Modo de gravação</legend>
+              <label class="select-wrap"><select id="recording-factor" name="recordingFactor">
+                <option value="1" selected>Contínua · 100%</option>
+                <option value="0.5">Movimento alto · 50%</option>
+                <option value="0.25">Movimento moderado · 25%</option>
+                <option value="0.1">Movimento baixo · 10%</option>
+              </select></label>
+            </fieldset>
+          </div>
+
+          <label class="switch-row" for="s3-enabled">
+            <span><strong>Armazenamento em nuvem S3</strong><small>Manter cache local e enviar as gravações para a nuvem</small></span>
+            <input id="s3-enabled" name="s3" type="checkbox">
+            <span class="switch" aria-hidden="true"></span>
+          </label>
+          <div class="local-days" id="local-days-wrap" hidden>
+            <label for="local-days">Dias mantidos no servidor</label>
+            <input id="local-days" name="localDays" type="number" min="1" max="30" value="1">
+          </div>
+        </form>
+
+        <div class="results" aria-live="polite">
+          <div class="results-head">
+            <div><span>Configuração recomendada</span><strong id="result-title">100 câmeras</strong></div>
+            <span class="confidence" id="confidence-badge">Projeção baseada em medição</span>
+          </div>
+
+          <div class="result-grid">
+            <article class="result-card cpu">
+              <div class="result-icon" aria-hidden="true">CPU</div>
+              <p>Processamento</p>
+              <strong id="cpu-result">4 <small>núcleos</small></strong>
+              <span>Gravação-base, sem IA pesada</span>
+            </article>
+            <article class="result-card ram">
+              <div class="result-icon" aria-hidden="true">RAM</div>
+              <p>Memória</p>
+              <strong id="ram-result">16 <small>GB</small></strong>
+              <span>Com margem para os serviços</span>
+            </article>
+            <article class="result-card storage">
+              <div class="result-icon" aria-hidden="true">SSD</div>
+              <p id="storage-label">Disco útil</p>
+              <strong id="storage-result">8,5 <small>TB</small></strong>
+              <span id="storage-note">3 dias e 20% livre</span>
+            </article>
+            <article class="result-card network">
+              <div class="result-icon" aria-hidden="true">NET</div>
+              <p>Banda planejada</p>
+              <strong id="network-result">273 <small>Mbps</small></strong>
+              <span id="network-note">NIC de 1 GbE</span>
+            </article>
+          </div>
+
+          <div class="result-details">
+            <div><span>Vídeo gerado por dia</span><strong id="daily-result">2,27 TB</strong></div>
+            <div><span>Escrita média em disco</span><strong id="write-result">26,3 MB/s</strong></div>
+            <div><span>Tráfego das câmeras</span><strong id="ingress-result">210 Mbps</strong></div>
+            <div id="s3-output-row" hidden><span>Upload médio para o S3</span><strong id="s3-output-result">210 Mbps</strong></div>
+          </div>
+
+          <div class="architecture-note" id="architecture-note">
+            <span class="architecture-icon">i</span>
+            <p><strong>Um servidor robusto ou VM dedicada.</strong> Faça a validação final no hardware que será entregue.</p>
+          </div>
+          <button class="copy-summary" id="copy-summary" type="button">Copiar resumo para a proposta</button>
+          <p class="copy-feedback" id="copy-feedback" role="status"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tinted" id="comparativo">
+      <div class="wrap">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Comparativo</p>
+            <h2>Capacidade por porte de instalação</h2>
+            <p>A tabela acompanha o bitrate, a retenção e o modo escolhidos no simulador.</p>
+          </div>
+          <div class="scenario-summary" id="scenario-summary">2,1 Mbps · 3 dias · contínua</div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <caption>CPU deriva do custo medido por câmera e mira até 70% de uso; RAM mantém 40% de folga. Disco é capacidade útil com 20% livre e não inclui a paridade do RAID.</caption>
+            <thead><tr><th>Câmeras</th><th>CPU</th><th>RAM</th><th>Banda planejada</th><th>Disco útil</th><th>Interface</th></tr></thead>
+            <tbody id="capacity-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="entenda">
+      <div class="section-heading narrow">
+        <div>
+          <p class="section-kicker">O que muda a conta</p>
+          <h2>Quatro decisões que definem a infraestrutura</h2>
+        </div>
+      </div>
+      <div class="explanation-grid">
+        <article><span class="card-number">01</span><h3>Gravação</h3><p>Em modo de cópia, o AjustCam preserva o vídeo original sem recodificação. Isso mantém o consumo de CPU baixo e torna disco e memória os principais limites.</p></article>
+        <article><span class="card-number">02</span><h3>Visualização ao vivo</h3><p>O Stream 2 em H.264 permite mosaicos leves. Converter H.265 para navegadores pode exigir um processo adicional por câmera visualizada e elevar muito a CPU.</p></article>
+        <article><span class="card-number">03</span><h3>Movimento e IA</h3><p>Gravar por movimento economiza disco, mas a análise precisa continuar observando a câmera. IA avançada e reconhecimento de objetos exigem dimensionamento separado.</p></article>
+        <article><span class="card-number">04</span><h3>Nuvem S3</h3><p>A nuvem reduz a retenção local, não os dados gerados. O link de internet precisa sustentar o envio, as visualizações e as recuperações de gravações.</p></article>
+      </div>
+    </section>
+
+    <section class="section wrap" id="arquitetura">
+      <div class="architecture-panel">
+        <div>
+          <p class="section-kicker">Arquitetura recomendada</p>
+          <h2>Crescer sem criar um único ponto de falha</h2>
+          <p>Até 100 câmeras, um servidor dedicado é uma referência razoável. Projetos maiores devem separar a carga em blocos operacionais e validar a arquitetura horizontal antes de assumir capacidade contratual.</p>
+        </div>
+        <div class="scale-track" aria-label="Recomendação de arquitetura por escala">
+          <div><span>50</span><strong>1 servidor</strong><small>Instalação compacta</small></div>
+          <div><span>100</span><strong>1 servidor robusto</strong><small>VM dedicada</small></div>
+          <div><span>300</span><strong>Múltiplos nós</strong><small>Segmentar carga</small></div>
+          <div><span>500+</span><strong>Arquitetura distribuída</strong><small>Rede e storage redundantes</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="limites">
+      <div class="method-grid">
+        <div>
+          <p class="section-kicker">Como calculamos</p>
+          <h2>Método transparente</h2>
+          <div class="formula-box">
+            <code>1 Mbps ≈ 10,8 GB por câmera/dia</code>
+            <code>CPU = (0,5 + câmeras × 0,016) ÷ 0,70</code>
+            <code>RAM = (1 GB + câmeras × 53 MB) ÷ 0,60</code>
+            <code>disco = câmeras × bitrate × dias</code>
+            <code>capacidade útil = dados ÷ 0,80</code>
+            <code>rede planejada = tráfego × 1,30</code>
+          </div>
+        </div>
+        <div class="limits-card">
+          <h3>Antes de apresentar como compromisso</h3>
+          <ul>
+            <li>Executar teste de carga no hardware que será vendido.</li>
+            <li>Usar streams e bitrates representativos das câmeras do cliente.</li>
+            <li>Testar visualizadores, MOG2, S3 e reconexão simultaneamente.</li>
+            <li>Confirmar RAID, velocidade sustentada e política de retenção.</li>
+            <li>Tratar 300 a 1.000 câmeras como projeção até a homologação.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap footer-inner">
+      <p><strong>AjustCam</strong><span>Dimensionamento claro para projetos de videomonitoramento.</span></p>
+      <p class="footer-note">Valores de referência. O resultado definitivo depende das câmeras, cena, codec, visualização, IA, redundância e política de retenção.</p>
+    </div>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

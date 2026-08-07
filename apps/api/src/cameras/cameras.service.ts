@@ -488,6 +488,7 @@ export class CamerasService {
         // PTZ manual: `undefined` não mexe; booleano marca origem 'manual' (e a
         // sonda passa a respeitar); `null` devolve o controle ao automático,
         // zerando também a data para a próxima varredura pegar a câmera.
+        ...(dto.objectMode !== undefined ? { objectMode: dto.objectMode } : {}),
         ...(dto.ptzCapable !== undefined
           ? dto.ptzCapable === null
             ? { ptzCapable: null, ptzCapableSource: null, ptzProbedAt: null }

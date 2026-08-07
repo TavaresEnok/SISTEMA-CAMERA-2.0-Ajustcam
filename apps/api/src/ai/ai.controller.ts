@@ -13,6 +13,8 @@ import { RequirePermission } from '../role-permissions/require-permission.decora
 type UpdateAiSettingsBody = {
   enabled?: boolean;
   mode?: string;
+  /** Desenhar a caixa do objeto sobre o vídeo ao vivo (preferência operacional). */
+  showObjectBox?: boolean;
 };
 
 type LiveViewLeaseBody = {
@@ -65,6 +67,19 @@ export class AiController {
   @Get('settings')
   async getSettings() {
     return this.aiManagerService.getSettings();
+  }
+
+  /**
+   * ONDE a detecção de objeto roda, e por quê.
+   *
+   * A tela precisa explicar cada decisão — "sem linha desenhada", "desligado
+   * pelo operador", "não liberado para esta instalação" pedem ações
+   * diferentes, e mostrar só um interruptor apagado não diria qual.
+   */
+  @Roles(UserRole.OPERATOR)
+  @Get('escopo-objeto')
+  async getEscopoDeObjeto() {
+    return this.aiManagerService.escopoDeObjeto();
   }
 
   @Roles(UserRole.OPERATOR)

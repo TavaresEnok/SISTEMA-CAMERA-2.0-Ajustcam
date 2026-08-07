@@ -15,6 +15,7 @@ import {
 } from '../cameras/helpers/rtsp-url.helper';
 import { MediamtxProxyService } from '../camera-stream/mediamtx-proxy.service';
 import { CommercialPolicyService } from '../commercial-policy/commercial-policy.service';
+import { classesPermitidas, decidirObjetoDaCamera, explicarDecisao, normalizarModoDeObjeto, temLinhaDePerimetro } from './helpers/escopo-de-objeto.helper';
 import { envNumber } from '../common/config/env-number.helper';
 
 const AI_MODES = ['motion', 'face', 'general'] as const;
@@ -556,9 +557,38 @@ export class AiManagerService implements OnModuleInit {
     });
   }
 
-  async updateSettings(input: { enabled?: boolean; mode?: string }) {
-    await this.commercialPolicy.assertFeature('aiAdvanced');
-    const data: { enabled?: boolean; mode?: AiMode } = {};
+  /** Escopo da detecção de objeto: o que a política libera e onde roda. */
+  async escopoDeObjeto() {
+    const politica = await this.commercialPolicy.getPolicy().catch(() => null);
+    const classes = classesPermitidas({ aiObjectClasses: politica?.aiObjectClasses });
+    const cameras = await this.prisma.camera.findMany({
+      select: { id: true, name: true, enabled: true, aiEnabled: true, objectMode: true, detectionZones: true },
+      orderBy: { name: 'asc' },
+    });
+    return {
+      classes,
+      cameras: cameras.map((cam) => {
+        const decisao = decidirObjetoDaCamera(cam as any, { politicaLiberaObjeto: classes.length > 0 });
+        return {
+          cameraId: cam.id,
+          nome: cam.name,
+          roda: decisao.roda,
+          explicacao: explicarDecisao(decisao),
+          objectMode: normalizarModoDeObjeto(cam.objectMode),
+          temLinha: temLinhaDePerimetro(cam.detectionZones),
+        };
+      }),
+    };
+  }
+
+  async updateSettings(input: { enabled?: boolean; mode?: string; showObjectBox?: boolean }) {
+    // "Mostrar a caixa" é preferência de TELA, não uso de IA avançada: exigir
+    // `aiAdvanced` para mudá-la deixaria o operador sem poder desligar uma
+    // marcação incômoda só porque o contrato mudou.
+    const soVisual = input.enabled === undefined && input.mode === undefined && typeof input.showObjectBox === 'boolean';
+    if (!soVisual) await this.commercialPolicy.assertFeature('aiAdvanced');
+    const data: { enabled?: boolean; mode?: AiMode; showObjectBox?: boolean } = {};
+    if (typeof input.showObjectBox === 'boolean') data.showObjectBox = input.showObjectBox;
     if (typeof input.enabled === 'boolean') data.enabled = input.enabled;
     if (input.mode !== undefined) {
       if (!AI_MODES.includes(input.mode as AiMode)) {
@@ -573,6 +603,7 @@ export class AiManagerService implements OnModuleInit {
         id: 'global',
         enabled: data.enabled ?? true,
         mode: data.mode ?? 'motion',
+        showObjectBox: data.showObjectBox ?? true,
       },
     });
     const sync = await this.restartAll();
@@ -1040,6 +1071,13 @@ export class AiManagerService implements OnModuleInit {
 
   private async buildAiSource(cam: any): Promise<{ rtspUrl: string; info: Record<string, unknown> }> {
     const password = this.cryptoService.decrypt(cam.passwordEncrypted);
+    // Escopo do objeto: a política da Central diz O QUE pode ser detectado e
+    // se pode; a regra por câmera diz ONDE vale a pena pagar por isso.
+    const politica = await this.commercialPolicy.getPolicy().catch(() => null);
+    const classesDeObjeto = classesPermitidas({ aiObjectClasses: politica?.aiObjectClasses });
+    const decisaoDeObjeto = decidirObjetoDaCamera(cam, {
+      politicaLiberaObjeto: classesDeObjeto.length > 0,
+    });
     const rawSubtype = String(process.env.AI_RTSP_SUBTYPE ?? '').trim().toLowerCase();
     const configuredSubtype = rawSubtype === '' || rawSubtype === 'auto'
       ? Number.NaN
@@ -1073,7 +1111,19 @@ export class AiManagerService implements OnModuleInit {
       configuredAnalyticsChannel: cam.analyticsChannel ?? null,
       // Zonas de detecção (polígonos normalizados) seguem para o ai-service, que
       // as converte em máscara na resolução de análise. Ver detectors/motion.py.
+      // As LINHAS de perímetro viajam na mesma lista (kind: 'line') e são
+      // usadas pelo tripwire — ver detectors/tripwire.py.
       detectionZones: Array.isArray(cam.detectionZones) ? cam.detectionZones : [],
+      // ── ESCOPO DA DETECÇÃO DE OBJETO ────────────────────────────────────
+      // Quem decide SE roda é a regra por câmera (auto = só com linha
+      // desenhada); quem decide O QUE detectar é a Central, via política
+      // comercial. Mandar os dois no source_info deixa o ai-service aplicar
+      // sem precisar consultar nada.
+      objectDetection: {
+        ativo: decisaoDeObjeto.roda,
+        motivo: decisaoDeObjeto.motivo,
+        classes: classesDeObjeto,
+      },
     };
 
     const rtspTransport = cam.preferredRtspTransport || process.env.FFMPEG_RTSP_TRANSPORT || 'tcp';

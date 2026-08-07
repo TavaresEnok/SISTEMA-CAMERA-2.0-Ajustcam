@@ -93,6 +93,17 @@ model Camera {
   // sobrescreve 'manual' — é a saída para equipamento que ela não sabe ler.
   ptzCapableSource       String?
   ptzProbedAt            DateTime?
+
+  /// COMO esta câmera participa da detecção de OBJETO (YOLO), que é cara.
+  ///   auto (padrão) — roda só se houver LINHA de perímetro desenhada. O
+  ///     desenho já é o pedido, e apagá-lo desliga o custo sozinho.
+  ///   sempre — roda mesmo sem linha (câmera crítica).
+  ///   nunca  — não roda nem com linha (cena movimentada que satura o servidor,
+  ///     sem obrigar a apagar a linha que o operador quer manter).
+  /// A política da Central é portão acima disto: sem `aiObject` liberado,
+  /// nenhuma câmera roda.
+  objectMode String @default("auto")
+
   channel                Int          @default(1)
   subtype                Int          @default(0)
   liveChannel            Int?
@@ -473,9 +484,18 @@ model NotificationMute {
 }
 
 model AiSettings {
-  id        String   @id @default("global")
-  enabled   Boolean  @default(true)
-  mode      String   @default("motion")
+  id      String  @id @default("global")
+  enabled Boolean @default(true)
+  mode    String  @default("motion")
+
+  /// Desenhar a caixa do objeto sobre o vídeo ao vivo.
+  ///
+  /// É preferência OPERACIONAL, não de escopo — por isso mora aqui e não na
+  /// Central: quem opera decide se quer ver a marcação na tela. Antes disto só
+  /// existia a variável de ambiente GENERAL_OVERLAY_MODE, igual para toda a
+  /// frota e só alterável recriando container.
+  showObjectBox Boolean @default(true)
+
   updatedAt DateTime @updatedAt
 }
 

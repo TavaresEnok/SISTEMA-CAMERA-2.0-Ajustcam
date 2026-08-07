@@ -3,6 +3,7 @@ import axios from 'axios';
 import { AlertTriangle, LoaderCircle, VideoOff, Volume2, VolumeX } from 'lucide-react';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
+import { useAiPreferencesStore } from '../store/aiPreferencesStore';
 import { streamUrlsCache } from '../lib/stream-urls-cache';
 import { liveDetectionsPoller } from '../lib/live-detections-poller';
 
@@ -369,7 +370,12 @@ export function LiveStreamPlayer({
   startDelayMs = 0,
   onStatusChange,
 }: LiveStreamPlayerProps) {
-  const aiOverlayEnabled = showOverlay && aiEnabled;
+  // "Mostrar quadrado no objeto" (tela de IA). Só afeta o DESENHO — a detecção
+  // continua rodando e os eventos seguem sendo registrados.
+  const mostrarCaixa = useAiPreferencesStore((state) => state.showObjectBox);
+  const carregarPrefsDeIa = useAiPreferencesStore((state) => state.carregar);
+  useEffect(() => { void carregarPrefsDeIa(); }, [carregarPrefsDeIa]);
+  const aiOverlayEnabled = showOverlay && aiEnabled && mostrarCaixa;
   const accessToken = useAuthStore((state) => state.accessToken);
   const authUserId = useAuthStore((state) => state.user?.id ?? 'anonymous');
   const containerRef = useRef<HTMLDivElement | null>(null);

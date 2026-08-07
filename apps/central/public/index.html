@@ -2720,7 +2720,15 @@
         // detalhe é repintado — a guarda instalada no elemento antigo vai embora
         // junto com ele. Reaplicar é barato e não empilha.
         ignorarRepinturaIgual(body);
-        const pol = item.aiPolicy || { motion: true, object: false, face: false };
+        const pol = item.aiPolicy || { motion: true, object: false, face: false, objectClasses: [] };
+        // Espelha OBJECT_CLASSES de src/ai-policy.js; o servidor valida de
+        // novo, então um desencontro aqui vira erro claro, não classe fantasma.
+        const OBJECT_CLASSES = [
+          { id: 'person', nome: 'Pessoa' }, { id: 'car', nome: 'Carro' },
+          { id: 'motorcycle', nome: 'Moto' }, { id: 'bus', nome: 'Ônibus' },
+          { id: 'truck', nome: 'Caminhão' }, { id: 'bicycle', nome: 'Bicicleta' },
+          { id: 'dog', nome: 'Cachorro' }, { id: 'cat', nome: 'Gato' },
+        ];
         const avancadaBloqueada = item.restrictions && item.restrictions.aiAdvanced === false;
         body.innerHTML = `
           ${avancadaBloqueada ? '<div class="alert-item" style="margin-bottom:12px;border-color:var(--amber-line);background:var(--amber-soft)"><span class="badge warn">Contrato</span><div style="margin-top:6px">O contrato desta instalação não permite IA avançada; objeto e face ficam indisponíveis mesmo se marcados.</div></div>' : ''}
@@ -2734,11 +2742,40 @@
                 </span>
               </label>`).join('')}
           </div>
+          ${pol.object ? `
+          <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+            <strong style="font-weight:500;font-size:12.5px">Quais objetos detectar</strong>
+            <!-- A lista vive AQUI e não na instalação porque é decisão de
+                 escopo comercial: o cliente contratou pessoa e veículo, não
+                 cachorro. E cada classe extra custa CPU no servidor dele. -->
+            <div class="subtext" style="margin-top:3px;margin-bottom:9px">
+              Cada classe a mais custa processamento no servidor do cliente. A instalação não pode ampliar esta lista.
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:7px">
+              ${OBJECT_CLASSES.map((c) => `
+                <label class="chip-classe" style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:5px 11px;cursor:pointer;font-size:12px">
+                  <input type="checkbox" class="ai-classe" data-classe="${escapeHtml(c.id)}" ${(pol.objectClasses || []).includes(c.id) ? 'checked' : ''} ${avancadaBloqueada ? 'disabled' : ''} />
+                  ${escapeHtml(c.nome)}
+                </label>`).join('')}
+            </div>
+          </div>` : ''}
           <div class="license-actions" style="margin-top:13px">
             <button id="ai-only-motion" class="primary">Somente movimento</button>
             <button id="ai-none" class="ghost">Desativar todas</button>
             <span class="subtext" style="margin:0">Aplicado na instalação no próximo sinal (até 60s).</span>
           </div>`;
+
+        body.querySelectorAll('.ai-classe').forEach((el) => el.addEventListener('change', async () => {
+          const marcadas = [...body.querySelectorAll('.ai-classe')].filter((x) => x.checked).map((x) => x.getAttribute('data-classe'));
+          if (!marcadas.length) {
+            // "Objeto ligado sem classe nenhuma" nunca detectaria nada e
+            // pareceria defeito do sistema — melhor barrar aqui.
+            showToast('Escolha ao menos um objeto, ou desligue a detecção de objeto.');
+            el.checked = true;
+            return;
+          }
+          await aiPolicyRequest(item.id, { objectClasses: marcadas });
+        }));
         body.querySelectorAll('.ai-toggle').forEach((el) => el.addEventListener('change', async () => {
           const cap = el.getAttribute('data-cap');
           if (cap === 'motion' && !el.checked

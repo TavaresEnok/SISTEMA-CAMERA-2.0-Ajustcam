@@ -31,6 +31,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/profile':       'Minha conta',
   '/events':        'Eventos',
   '/performance':   'Desempenho',
+  '/ia':            'Inteligência artificial',
   '/audit-logs':    'Auditoria',
 };
 

@@ -1,0 +1,11 @@
+-- Escopo da detecção de OBJETO por câmera.
+--
+-- O YOLO é caro: ligá-lo nas 27 câmeras da frota custaria CPU o dia inteiro
+-- para responder a uma pergunta que ninguém faz na maioria delas — e o
+-- incidente de 07/08/2026 mostrou o que acontece quando o servidor satura
+-- (vídeo ao vivo a 0 fps, sistema aparentemente morto).
+--
+-- 'auto' amarra o custo à NECESSIDADE DECLARADA: roda só onde há linha de
+-- perímetro desenhada. Desenhar a linha já é o pedido; apagá-la desliga o
+-- custo sem uma segunda configuração para lembrar de reverter.
+ALTER TABLE "Camera" ADD COLUMN "objectMode" TEXT NOT NULL DEFAULT 'auto';

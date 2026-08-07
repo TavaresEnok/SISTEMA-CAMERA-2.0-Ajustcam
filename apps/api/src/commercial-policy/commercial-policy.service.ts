@@ -7,7 +7,13 @@ import { type AuthUser } from '../common/types/auth-user.type';
 // (MOG2), que arma a gravação por movimento e é tratada à parte de propósito:
 // confundir as duas derrubava o MOG2 sempre que objeto/face estavam desligados,
 // que é o estado normal e desejado.
-export type CommercialFeature = 'localLive' | 'localRecording' | 'localPlayback' | 'addCameras' | 'aiAdvanced' | 'aiMotion' | 'exports';
+// `aiObject` e `aiFace` são o desdobramento GRANULAR do antigo `aiAdvanced`.
+// A Central já os enviava desde sempre; a instalação os DESCARTAVA em
+// `parseRestrictions` (a lista de chaves conhecidas não os continha), então
+// ligar "objeto" no painel mestre não tinha efeito nenhum aqui — só o
+// legado `aiAdvanced`, que acende objeto e face juntos. `aiAdvanced` continua
+// existindo como TETO dos dois, para não quebrar instalação antiga.
+export type CommercialFeature = 'localLive' | 'localRecording' | 'localPlayback' | 'addCameras' | 'aiAdvanced' | 'aiMotion' | 'aiObject' | 'aiFace' | 'exports';
 export type CommercialLicenseStatus = 'UNKNOWN' | 'ACTIVE' | 'GRACE' | 'RESTRICTED' | 'SUSPENDED';
 
 type RestrictionMap = Record<CommercialFeature | 'adminAccess' | 'cloudSupport' | 'updates', boolean>;
@@ -19,6 +25,8 @@ const DEFAULT_RESTRICTIONS: RestrictionMap = {
   addCameras: true,
   aiAdvanced: true,
   aiMotion: true,
+  aiObject: true,
+  aiFace: true,
   exports: true,
   adminAccess: true,
   cloudSupport: true,
@@ -53,6 +61,8 @@ const GENERIC_FEATURE_MESSAGES: Record<CommercialFeature, string> = {
   addCameras: 'Cadastro de novas câmeras temporariamente indisponível. Entre em contato com o administrador do sistema.',
   aiAdvanced: 'Análise inteligente temporariamente indisponível. Entre em contato com o administrador do sistema.',
   aiMotion: 'Detecção de movimento temporariamente indisponível. Entre em contato com o administrador do sistema.',
+  aiObject: 'Detecção de objetos temporariamente indisponível. Entre em contato com o administrador do sistema.',
+  aiFace: 'Reconhecimento facial temporariamente indisponível. Entre em contato com o administrador do sistema.',
   exports: 'Exportação temporariamente indisponível. Entre em contato com o administrador do sistema.',
 };
 
@@ -84,7 +94,33 @@ export class CommercialPolicyService {
       lastSyncAt: settings['cloud.lastSyncAt'] || null,
       lastError: settings['cloud.lastError'] || null,
       restrictions: mergedRestrictions,
+      // Fora de `restrictions` de propósito: aquele mapa é de BOOLEANOS, e o
+      // filtro que o protege (`parseRestrictions`) descartaria uma lista.
+      // Estas são as classes de objeto que a Central liberou — o "o quê" da
+      // detecção, complementando o "se" que vive em `aiObject`.
+      aiObjectClasses: mergedRestrictions.aiObject === false
+        ? []
+        : this.parseObjectClasses(settings['cloud.restrictions']),
     };
+  }
+
+  /**
+   * Classes de objeto liberadas pela Central.
+   *
+   * Lista ausente/ilegível devolve VAZIO, nunca um catálogo padrão: passar a
+   * detectar tudo justamente quando a permissão não chegou seria o pior erro
+   * possível aqui — ampliaria sozinho o escopo do que foi vendido.
+   */
+  private parseObjectClasses(value: string | undefined): string[] {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      const bruto = parsed?.aiObjectClasses;
+      if (!Array.isArray(bruto)) return [];
+      return [...new Set(bruto.map((c: unknown) => String(c ?? '').trim().toLowerCase()).filter(Boolean))];
+    } catch {
+      return [];
+    }
   }
 
   async isAllowed(feature: CommercialFeature) {
