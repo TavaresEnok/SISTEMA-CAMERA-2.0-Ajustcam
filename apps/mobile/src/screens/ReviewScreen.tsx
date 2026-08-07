@@ -28,6 +28,7 @@ export type ReviewPlayback = { url: string; posterUri: string | null; offsetSeco
 interface ReviewScreenProps {
   items: ReviewItem[];
   total: number;
+  temMais?: boolean;
   unseenCount: number;
   loading: boolean;
   refreshing: boolean;
@@ -72,7 +73,7 @@ function EventThumb({ apiUrl, token, item, onError }: { apiUrl: string; token: s
 }
 
 export function ReviewScreen({
-  items, total, unseenCount, loading, refreshing, loadingMore, onLoadMore, error, filters, cameras, apiUrl, token, canPlayback,
+  items, total, temMais, unseenCount, loading, refreshing, loadingMore, onLoadMore, error, filters, cameras, apiUrl, token, canPlayback,
   reviewPlayback, onChangeFilters, onRefresh, onOpenItem, onCloseReviewPlayback, onMarkSeen,
 }: ReviewScreenProps) {
   const { theme } = useTheme();
@@ -96,7 +97,7 @@ export function ReviewScreen({
           <Text style={[styles.title, { color: theme.bgText }]}>Revisão</Text>
           <Text style={[styles.subtitle, { color: theme.textSub }]}>
             {unseenCount > 0 ? `${unseenCount} não revisado(s)` : 'Tudo revisado'}
-            {total > 0 ? ` · ${total} evento(s)` : ''}
+            {items.length > 0 ? ` · ${items.length} carregado(s)${temMais ? '+' : ''}` : ''}
           </Text>
         </View>
         <Pressable
@@ -195,7 +196,10 @@ export function ReviewScreen({
         onEndReached={() => {
           // Só pede mais se ainda há o que buscar e não há carga em voo (senão o
           // FlatList dispara em rajada durante a rolagem).
-          if (onLoadMore && !loadingMore && !loading && !refreshing && items.length < total) onLoadMore();
+          // `temMais` é a resposta honesta do backend; `total` só sobrevive para
+          // não quebrar build antigo, e vale "pelo menos isto".
+          const ha = temMais ?? (items.length < total);
+          if (onLoadMore && !loadingMore && !loading && !refreshing && ha) onLoadMore();
         }}
         renderItem={({ item }) => {
           const confidence = formatConfidence(item);

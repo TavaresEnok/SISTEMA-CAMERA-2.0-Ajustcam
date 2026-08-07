@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewService } from '../src/review/review.service';
+import { criarQueryRaw } from './review-raw-fake';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // D6/D4 (2.6): "visto" é POR USUÁRIO. Marcar visto por um operador NÃO pode
@@ -11,15 +12,25 @@ const events = [
   { id: 'E1', cameraId: 'cam-1', occurredAt: new Date(2026, 6, 24, 10, 0, 0), metadata: {}, camera: { name: 'Cam 1' }, type: 'MOTION_DETECTED', severity: 'INFO' },
 ];
 
+// A fila só lista evento COM gravação (07/08/2026). Sem esta cobertura o feed
+// voltaria vazio e o teste de "visto por usuário" passaria sem testar nada.
+const gravacoes = [
+  { id: 'R1', cameraId: 'cam-1', startedAt: new Date(2026, 6, 24, 9, 59, 0), endedAt: new Date(2026, 6, 24, 10, 5, 0) },
+];
+
 function makeService() {
   const reviews = new Set<string>(); // `${userId}:${eventId}`
   const prisma = {
     cameraEvent: {
-      findMany: async () => events,
+      findMany: async ({ where }: any) => {
+        const ids: string[] = where?.id?.in ?? [];
+        return ids.length ? events.filter((e) => ids.includes(e.id)) : events;
+      },
       count: async () => events.length,
       findUnique: async ({ where }: any) => events.find((e) => e.id === where.id) ?? null,
     },
-    recording: { findMany: async () => [] },
+    recording: { findMany: async () => gravacoes },
+    $queryRaw: criarQueryRaw(events, gravacoes),
     userEventReview: {
       findMany: async ({ where }: any) => {
         const uid = where.userId;

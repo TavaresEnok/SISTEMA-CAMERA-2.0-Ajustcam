@@ -23,7 +23,12 @@ export type ReviewItem = {
 
 export type ReviewFeedResponse = {
   items: ReviewItem[];
+  /** COMPATIBILIDADE com builds antigos: "pelo menos isto", não o total real.
+   *  O backend deixou de contar (custava até 15 s). Use `temMais`. */
   total: number;
+  temMais?: boolean;
+  /** Há detecção neste filtro cuja gravação já não existe — a fila as omite. */
+  haEventoSemVideo?: boolean;
   limit: number;
   offset: number;
 };

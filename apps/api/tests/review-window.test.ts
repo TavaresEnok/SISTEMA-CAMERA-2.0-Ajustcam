@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewService } from '../src/review/review.service';
+import { criarQueryRaw } from './review-raw-fake';
 
 // A query em lote que matou o N+1 buscava TODOS os segmentos entre o evento mais
 // antigo e o mais novo da página. Numa página esparsa (site quieto, filtro raro,
@@ -15,9 +16,19 @@ function makeService(eventDates: Date[]) {
     id: `E${i}`, cameraId: 'cam-1', occurredAt, metadata: {},
     camera: { name: 'Cam 1' }, type: 'MOTION_DETECTED', severity: 'INFO', reviewedAt: null,
   }));
+  // Uma gravação por evento (mesmo instante): mantém TODOS revisáveis, para o
+  // teste continuar medindo o recorte em janelas e não o filtro novo.
+  const gravacoes = events.map((e, i) => ({
+    id: `R${i}`, cameraId: e.cameraId,
+    startedAt: new Date(e.occurredAt.getTime() - 1000),
+    endedAt: new Date(e.occurredAt.getTime() + 1000),
+  }));
   const prisma = {
     cameraEvent: {
-      findMany: async () => events,
+      findMany: async ({ where }: any) => {
+        const ids: string[] = where?.id?.in ?? [];
+        return ids.length ? events.filter((e) => ids.includes(e.id)) : events;
+      },
       count: async ({ where }: any) => { captured.countWhere = where; return events.length; },
     },
     recording: {
@@ -25,6 +36,7 @@ function makeService(eventDates: Date[]) {
       findFirst: async () => null,
     },
     userEventReview: { findMany: async () => [] },
+    $queryRaw: criarQueryRaw(events, gravacoes),
   };
   const access = { getAccessibleCameraIds: async () => ['cam-1'] };
   const svc = new ReviewService(prisma as any, access as any, {} as any);

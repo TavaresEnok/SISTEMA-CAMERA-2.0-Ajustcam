@@ -75,7 +75,10 @@ export default function ReviewPage() {
   const [label, setLabel] = useState('__all__');
   const [onlyConfirmed, setOnlyConfirmed] = useState(true);
   const [unseenOnly, setUnseenOnly] = useState(false);
-  const [total, setTotal] = useState(0);
+  // `temMais` vem do backend (ele pede limit+1). Contagem exata saiu de
+  // propósito: custava até 15 s nesta base. Ver review.service.ts.
+  const [temMais, setTemMais] = useState(false);
+  const [haEventoSemVideo, setHaEventoSemVideo] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const busy = useRef(false);
@@ -95,9 +98,10 @@ export default function ReviewPage() {
     busy.current = true;
     setLoading(true);
     try {
-      const { data } = await client.get<{ items: ReviewItem[]; total: number }>('/review/feed', { params: buildParams(0) });
+      const { data } = await client.get<{ items: ReviewItem[]; total: number; temMais?: boolean; haEventoSemVideo?: boolean }>('/review/feed', { params: buildParams(0) });
       setItems(Array.isArray(data.items) ? data.items : []);
-      setTotal(Number(data.total) || 0);
+      setTemMais(Boolean(data.temMais));
+      setHaEventoSemVideo(Boolean(data.haEventoSemVideo));
       setLoadError(null);
     } catch {
       // NÃO zerar a lista aqui: com `setItems([])` a tela caía no estado vazio
@@ -118,7 +122,7 @@ export default function ReviewPage() {
     busy.current = true;
     setLoadingMore(true);
     try {
-      const { data } = await client.get<{ items: ReviewItem[]; total: number }>(
+      const { data } = await client.get<{ items: ReviewItem[]; total: number; temMais?: boolean; haEventoSemVideo?: boolean }>(
         '/review/feed',
         { params: buildParams(items.length) },
       );
@@ -127,7 +131,7 @@ export default function ReviewPage() {
         const known = new Set(cur.map((it) => it.id));
         return [...cur, ...next.filter((it) => !known.has(it.id))];
       });
-      if (Number.isFinite(data.total)) setTotal(Number(data.total) || 0);
+      setTemMais(Boolean(data.temMais));
     } catch {
       // Falha ao paginar não derruba o que já está na tela.
     } finally {
@@ -156,7 +160,10 @@ export default function ReviewPage() {
       <div className="page-hdr">
         <div>
           <h1 className="page-title">Revisão</h1>
-          <p className="page-sub">Eventos detectados com prévia — revise sem abrir o vídeo. {total > 0 ? `${total} evento(s).` : ''}</p>
+          <p className="page-sub">
+            Eventos detectados com prévia — revise sem abrir o vídeo.
+            {items.length > 0 ? ` ${items.length} carregado(s)${temMais ? '+' : ''}.` : ''}
+          </p>
         </div>
         <button type="button" onClick={() => void load()} className="btn btn-secondary btn-sm" title="Atualizar">
           <RefreshCw className="h-3.5 w-3.5" /> Atualizar
@@ -207,10 +214,21 @@ export default function ReviewPage() {
             </button>
           </div>
         ) : !items.length ? (
-          <div className="flex h-40 flex-col items-center justify-center text-center text-[hsl(var(--muted-foreground))]">
+          <div className="flex h-40 flex-col items-center justify-center px-6 text-center text-[hsl(var(--muted-foreground))]">
             <Eye className="mb-2 h-8 w-8 opacity-30" />
             <div className="text-sm">Nenhum evento para revisar</div>
-            <div className="text-xs opacity-70">Ajuste os filtros ou aguarde novas detecções.</div>
+            {/* A fila só mostra evento que AINDA TEM VÍDEO. Sem esta frase, o
+                operador cujo acervo foi apagado pela retenção via "nenhum
+                evento" e ia mexer em filtro — quando a causa era outra. */}
+            {haEventoSemVideo ? (
+              <div className="mt-1 max-w-md text-xs opacity-70">
+                Houve detecções neste filtro, mas a gravação delas não existe mais —
+                foi apagada pela retenção ou por falta de espaço. A fila só lista
+                eventos cujo vídeo ainda pode ser aberto.
+              </div>
+            ) : (
+              <div className="text-xs opacity-70">Ajuste os filtros ou aguarde novas detecções.</div>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
@@ -253,7 +271,7 @@ export default function ReviewPage() {
         )}
 
         {/* Sem isto, os eventos além do primeiro lote eram INATINGÍVEIS na tela. */}
-        {items.length > 0 && items.length < total && (
+        {items.length > 0 && temMais && (
           <div className="flex justify-center py-4">
             <button
               type="button"
@@ -263,7 +281,7 @@ export default function ReviewPage() {
             >
               {loadingMore
                 ? <><LoaderCircle className="h-3.5 w-3.5 animate-spin" /> Carregando…</>
-                : `Carregar mais (${items.length} de ${total})`}
+                : `Carregar mais (${items.length} carregados)`}
             </button>
           </div>
         )}

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewService } from '../src/review/review.service';
+import { criarQueryRaw } from './review-raw-fake';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // D4: a fila de Revisão enriquece cada evento com a gravação que cobre o instante
@@ -47,7 +48,15 @@ function filterRecs(where: any) {
 function makeService() {
   const calls = { findFirst: 0, findMany: 0 };
   const prisma = {
-    cameraEvent: { findMany: async () => events, count: async () => events.length },
+    cameraEvent: {
+      // O serviço passou a buscar por id (a seleção acontece no SQL).
+      findMany: async ({ where }: any) => {
+        const ids: string[] = where?.id?.in ?? [];
+        return ids.length ? events.filter((e) => ids.includes(e.id)) : events;
+      },
+      count: async () => events.length,
+    },
+    $queryRaw: criarQueryRaw(events, recordingsDb),
     recording: {
       findFirst: async ({ where }: any) => { calls.findFirst++; return filterRecs(where)[0] ?? null; },
       findMany: async ({ where }: any) => { calls.findMany++; return filterRecs(where); },
@@ -70,8 +79,29 @@ test('D4 review feed: mapeia cada evento à gravação que cobre o instante + of
   assert.equal(byId.E2.offsetSeconds, 60);
   assert.equal(byId.E3.recordingId, 'R3');
   assert.equal(byId.E3.offsetSeconds, 480);
-  assert.equal(byId.E4.recordingId, null, 'evento antes de qualquer gravação não aponta para nada');
-  assert.equal(byId.E4.offsetSeconds, null);
+  // MUDOU EM 07/08/2026: antes o E4 vinha na lista com recordingId null e
+  // virava um card morto na grade ("sem gravação", clique levando a uma
+  // reprodução vazia). Agora ele é filtrado NO SQL e não chega ao operador.
+  assert.equal(byId.E4, undefined, 'evento sem gravação que o cubra não entra na fila');
+  assert.equal(items.length, 3, 'só os três eventos com vídeo');
+});
+
+test('feed avisa que existem detecções cujo vídeo já não existe', async () => {
+  const { svc } = makeService();
+  const resposta: any = await svc.feed({ id: 'u1' } as any, { limit: 40 });
+  // E4 está fora da lista, mas o operador precisa saber POR QUE a fila pode
+  // parecer menor do que o esperado — senão vai mexer em filtro à toa.
+  assert.equal(resposta.haEventoSemVideo, true);
+});
+
+test('feed informa se há mais páginas sem contar o acervo inteiro', async () => {
+  const { svc } = makeService();
+  const primeira: any = await svc.feed({ id: 'u1' } as any, { limit: 2 });
+  assert.equal(primeira.items.length, 2);
+  assert.equal(primeira.temMais, true, 'há 3 revisáveis e a página pediu 2');
+
+  const segunda: any = await svc.feed({ id: 'u1' } as any, { limit: 40 });
+  assert.equal(segunda.temMais, false, 'a página cobriu tudo');
 });
 
 test('D4 review feed: NÃO faz uma query de gravação por evento (sem N+1)', async () => {
