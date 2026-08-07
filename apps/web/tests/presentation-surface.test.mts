@@ -10,29 +10,37 @@ test('marca visível usa AjustCam e não exibe versão fictícia', () => {
   assert.match(read('src/lib/product-brand.ts'), /PRODUCT_NAME = 'AjustCam'/);
 });
 
-test('páginas incompletas não aparecem na navegação nem na paleta de comandos', () => {
-  // SAÍRAM DA LISTA (2026-08-07):
-  //   /map  — responsividade, teclado, alvo de toque e rótulos corrigidos;
-  //   /wall — deixou de ser maquete: a rota agora liga o modo mural REAL do
-  //           /live (players de verdade) em vez de desenhar retângulos pretos;
-  //   /events  — "Reconhecer" passou a chamar POST /cameras/incidents/:id/ack
-  //              (antes só marcava num Set local e sumia ao recarregar), e os
-  //              dois "players" de gradiente viraram links para Reprodução/Ao Vivo;
-  //   /reports — passou a exportar CSV de verdade, gerado no navegador a
-  //              partir dos mesmos dados da tela.
+test('nenhuma tela oferecida ao operador finge ter conteúdo que não tem', () => {
+  // Este teste começou como uma lista de páginas a esconder do menu, porque
+  // eram casca. Todas foram corrigidas (2026-08-07):
+  //   /map           — responsividade, teclado, alvo de toque e rótulos;
+  //   /wall          — a rota passou a ligar o modo mural REAL do /live, em vez
+  //                    de desenhar 16 retângulos pretos sem player nenhum;
+  //   /events        — "Reconhecer" passou a chamar POST /cameras/incidents/:id/ack
+  //                    (antes só marcava num Set local e sumia ao recarregar);
+  //   /reports       — passou a exportar CSV de verdade, gerado no navegador;
+  //   /investigation — os "players" (grade de fundo, relógio parado, barra fixa
+  //                    em 72%) e a régua de blocos codificados viraram links
+  //                    para a Reprodução no instante em análise e uma régua
+  //                    desenhada com os eventos reais.
   //
-  // Resta /investigation, cujo player e régua ainda são maquete com valores
-  // fixos — mostrar isso como pronto sugeriria que um vídeo foi revisado.
-  //
-  // Os que permanecem continuam sendo CASCA, e é isso que este teste protege:
-  //   /investigation — player e régua são maquete com valores fixos;
-  // Todos estão roteados e alcançáveis por URL; o que não se faz é oferecê-los
-  // ao operador como se estivessem prontos.
-  const palette = read('src/components/CommandPalette.tsx');
-  const sidebar = read('src/components/Sidebar.tsx');
-  for (const path of ['/investigation']) {
-    assert.doesNotMatch(palette, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
-    assert.doesNotMatch(sidebar, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
+  // Agora todas estão no menu, e o que o teste protege é a REGRA que as trouxe
+  // até aqui: tela oferecida ao operador não simula conteúdo. Numa interface de
+  // VMS, um quadro que parece vídeo ou uma régua que parece cobertura levam
+  // alguém a concluir que reviu uma cena que nunca foi exibida.
+  const simulacoes: Array<[string, RegExp, string]> = [
+    ['src/pages/InvestigationPage.tsx', /width:\s*'72%'/, 'barra de progresso fixa'],
+    ['src/pages/InvestigationPage.tsx', /left-\[\d+%\]\s+right-\[\d+%\]/, 'bloco de régua em posição codificada'],
+    ['src/pages/EventsPage.tsx', /Visualização da câmera|Preview da câmera/, 'player simulado'],
+    ['src/pages/WallModePage.tsx', /aspect-video|statusDot/, 'maquete de mural'],
+  ];
+  // Comentários citam os padrões antigos para explicar a correção — o que
+  // importa é que não estejam mais no CÓDIGO.
+  const semComentarios = (texto: string) => texto
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((linha) => !linha.trim().startsWith('//')).join('\n');
+  for (const [arquivo, padrao, oque] of simulacoes) {
+    assert.doesNotMatch(semComentarios(read(arquivo)), padrao, `${arquivo}: ${oque}`);
   }
 });
 

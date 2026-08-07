@@ -63,6 +63,7 @@ const NAV_SECTIONS: NavSection[] = [
     label: 'Investigação',
     icon: FileSearch,
     items: [
+      { path: '/investigation', label: 'Investigação', icon: FileSearch, roles: ['admin', 'operator'] },
       { path: '/evidence', label: 'Evidências', icon: FileArchive, roles: ['admin', 'operator'] },
       { path: '/reports',  label: 'Relatórios', icon: FileText,    roles: ['admin', 'operator'] },
     ],

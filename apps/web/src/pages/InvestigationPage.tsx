@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { addMinutes, format, subHours } from 'date-fns';
-import { Camera, Clock, Edit, FileText, LoaderCircle, Plus, Save, Search, ShieldAlert, Trash2, X } from 'lucide-react';
-import { useLocation } from 'wouter';
+import { Camera, Clock, Edit, FileText, LoaderCircle, Plus, Save, Search, ShieldAlert, SkipBack, SkipForward, Trash2, X } from 'lucide-react';
+import { Link, useLocation } from 'wouter';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { toast } from '../hooks/use-toast';
@@ -93,6 +93,8 @@ export default function InvestigationPage() {
   const [saving, setSaving] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [query, setQuery] = useState('');
+  // Estado do legal hold JÁ PERSISTIDO, para poder mostrar "não salvo".
+  const [legalHoldSalvo, setLegalHoldSalvo] = useState(false);
   const [notes, setNotes] = useState<InvestigationNote[]>([]);
   const [activity, setActivity] = useState<InvestigationActivity[]>([]);
   const [newNote, setNewNote] = useState('');
@@ -191,9 +193,11 @@ export default function InvestigationPage() {
     }).catch(() => setActivity([]));
     void client.get<{ enabled: boolean; reason: string | null }>(`/investigations/${investigationId}/legal-hold`).then(({ data }) => {
       setLegalHoldEnabled(Boolean(data.enabled));
+      setLegalHoldSalvo(Boolean(data.enabled));
       setLegalHoldReason(data.reason ?? '');
     }).catch(() => {
       setLegalHoldEnabled(false);
+      setLegalHoldSalvo(false);
       setLegalHoldReason('');
     });
     void client.get<{ items: CustodyEntry[] }>(`/investigations/${investigationId}/custody`).then(({ data }) => {
@@ -242,12 +246,20 @@ export default function InvestigationPage() {
   const trackEvents = useMemo(() => trackEventsTotal.slice(0, 40), [trackEventsTotal]);
 
   const totalMs = new Date(timeEnd).getTime() - new Date(timeStart).getTime();
+  // BASE ÚNICA DE TEMPO. `activeTrackTime` é minutos desde `timeStart`; a régua
+  // dividia por 24h e os rótulos vinham da janela — clicar num evento das 14h35
+  // punha o cursor em ~61% e o relógio anunciava 01:35 do dia seguinte.
+  const totalMinutos = Math.max(1, totalMs / 60_000);
 
-  const saveWorkspace = useCallback(async () => {
-    if (!accessToken) return;
+  // Devolve o id do caso salvo. Sem isso, quem chamava logo depois lia
+  // `investigations[0]?.id` de um array OBSOLETO (closure anterior ao await) e
+  // anexava a evidência a OUTRA investigação — contaminação de acervo, com
+  // aviso de sucesso.
+  const saveWorkspace = useCallback(async (): Promise<string | null> => {
+    if (!accessToken) return null;
     if (!selectedCams.length) {
       toast({ title: 'Selecione câmeras', description: 'A área de trabalho precisa de pelo menos uma câmera.', variant: 'destructive' });
-      return;
+      return null;
     }
 
     setSaving(true);
@@ -261,30 +273,35 @@ export default function InvestigationPage() {
     };
 
     try {
+      let salvo: Investigation;
       if (investigationId) {
         const { data } = await client.patch<Investigation>(`/investigations/${investigationId}`, payload);
         setInvestigations((items) => items.map((item) => (item.id === data.id ? data : item)));
         hydrate(data);
+        salvo = data;
       } else {
         const { data } = await client.post<Investigation>('/investigations', payload);
         setInvestigations((items) => [data, ...items]);
         hydrate(data);
         setLocation(`/investigation?id=${encodeURIComponent(data.id)}`);
+        salvo = data;
       }
       toast({ title: 'Área de trabalho salva', description: 'A investigação foi persistida no backend.' });
+      return salvo.id;
     } catch (error) {
       toast({ title: 'Falha ao salvar', description: error instanceof Error ? error.message : 'Não foi possível salvar a área de trabalho.', variant: 'destructive' });
+      return null;
     } finally {
       setSaving(false);
     }
   }, [accessToken, activeTrackTime, client, hydrate, investigationId, investigationName, playbackSpeed, selectedCams, setLocation, timeEnd, timeStart]);
 
   const addEvidenceFromEvent = useCallback(async (event: (typeof events)[number]) => {
-    if (!investigationId) {
-      await saveWorkspace();
-    }
-
-    const targetId = investigationId || investigations[0]?.id;
+    // O id do caso RECÉM-CRIADO vem do próprio saveWorkspace. Antes, depois do
+    // await, `investigationId` ainda era '' (closure antiga) e o código caía em
+    // `investigations[0]?.id` — o primeiro caso da lista ANTERIOR, de outra
+    // pessoa ou outro assunto.
+    const targetId = investigationId || (await saveWorkspace());
     if (!targetId) return;
 
     try {
@@ -396,7 +413,7 @@ export default function InvestigationPage() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[hsl(222_18%_7%)]">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex items-center justify-between gap-4 border-b border-border bg-card px-5 py-3 shrink-0">
         <div className="flex min-w-0 items-center gap-3">
           <ShieldAlert className="h-4 w-4 text-[hsl(var(--primary))] shrink-0" />
@@ -587,7 +604,17 @@ export default function InvestigationPage() {
         {investigationId && (
           <div className="mt-3 flex items-center gap-2">
             <label className="flex items-center gap-2 text-xs">
+              {/* O interruptor mudava só o estado local; persistir exigia clicar
+                  em "Salvar preservação". O investigador ligava a chave, via a
+                  chave ligada, fechava a aba — e a retenção nunca era bloqueada,
+                  então o material vencia e era APAGADO pela rotina. Agora o
+                  estado não-salvo é declarado ao lado. */}
               <Switch checked={legalHoldEnabled} onCheckedChange={setLegalHoldEnabled} />
+              {legalHoldEnabled !== legalHoldSalvo && (
+                <span className="rounded border border-[hsl(var(--status-warning)_/_0.4)] bg-[hsl(var(--status-warning)_/_0.1)] px-1.5 py-0.5 text-[10px] text-[hsl(var(--status-warning))]">
+                  não salvo
+                </span>
+              )}
               Preservação legal ativa
             </label>
             <input value={legalHoldReason} onChange={(event) => setLegalHoldReason(event.target.value)} className="h-8 w-56 rounded border border-border bg-background px-2 text-xs" placeholder="Motivo da preservação" />
@@ -597,6 +624,7 @@ export default function InvestigationPage() {
                 setSavingLegalHold(true);
                 try {
                   await client.post(`/investigations/${investigationId}/legal-hold`, { enabled: legalHoldEnabled, reason: legalHoldReason });
+                  setLegalHoldSalvo(legalHoldEnabled);
                   toast({ title: 'Preservação legal atualizada' });
                 } catch (error) {
                   toast({ title: 'Falha na preservação legal', description: error instanceof Error ? error.message : 'Erro ao atualizar', variant: 'destructive' });
@@ -653,59 +681,121 @@ export default function InvestigationPage() {
 
                 return (
                   <div key={camId} className="relative overflow-hidden rounded-xl border border-border bg-black/90 shadow-sm">
+                    {/* SEM SELO FALSO DE "GRAVAÇÃO": ele era fixo, aparecia em toda
+                        câmera e sugeria captura em curso. E `text-white/75` a 10px
+                        reprova em contraste. */}
                     <div className="flex items-start justify-between px-3 py-2 text-[10px]">
                       <div>
-                        <div className="text-white/80">{camera.code}</div>
-                        <div className="text-white/55">{camera.name}</div>
+                        <div className="text-white/90">{camera.code}</div>
+                        <div className="text-white/70">{camera.name}</div>
                       </div>
-                      <div className="flex items-center gap-2 text-white/55">
-                        <span className="rounded border border-[hsl(var(--destructive)_/_0.3)] bg-[hsl(var(--destructive)_/_0.1)] px-1.5 py-0.5 text-[hsl(var(--destructive))]">Gravação</span>
-                        <span>{camera.ptzCapable ? 'PTZ' : 'Fixa'}</span>
-                      </div>
+                      <div className="text-white/70">{camera.ptzCapable ? 'PTZ' : 'Fixa'}</div>
                     </div>
-                    <div className="relative h-44 border-y border-white/10 bg-black/30">
-                      <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px)', backgroundSize: '28px 28px' }} />
-                      <div className="absolute inset-0 flex items-center justify-center"><Camera className="h-10 w-10 text-white/10" /></div>
-                      <div className="absolute inset-x-0 top-0 flex justify-between px-3 py-2 text-[10px] text-white/70">
-                        <span>{camera.code} · {camera.name}</span>
-                        <span>{format(new Date(), 'HH:mm:ss')}</span>
+                    {/* O que havia aqui era MAQUETE com aparência de prova: grade
+                        de fundo simulando imagem, relógio que parecia contar (era
+                        `new Date()` no render) e uma barra de progresso FIXA em
+                        72%. Numa tela de investigação, com cadeia de custódia ao
+                        lado, isso sugere que um vídeo foi revisado — o pior erro
+                        possível aqui. Passa a ser um caminho honesto para o vídeo
+                        de verdade, no instante em análise. */}
+                    <Link
+                      href={`/playback?cameraId=${encodeURIComponent(camId)}&at=${encodeURIComponent(new Date(new Date(timeStart).getTime() + activeTrackTime * 60_000).toISOString())}`}
+                      className="relative flex h-44 items-center justify-center border-y border-white/10 bg-black/30 transition-colors hover:bg-black/20"
+                    >
+                      <div className="text-center">
+                        <Camera className="mx-auto h-8 w-8 text-white/40" />
+                        <div className="mt-2 text-[11px] text-white/90">Abrir na Reprodução</div>
+                        <div className="mt-0.5 font-mono text-[10px] text-white/60">
+                          {format(addMinutes(new Date(timeStart), activeTrackTime), 'dd/MM HH:mm:ss')}
+                        </div>
                       </div>
-                      <div className="absolute inset-x-0 bottom-0 h-1 bg-white/5"><div className="h-full" style={{ width: '72%', background: color }} /></div>
                       {cameraEvents.map((event) => {
                         const eventMs = new Date(event.timestamp).getTime() - new Date(timeStart).getTime();
                         const pct = Math.max(0, Math.min(100, totalMs > 0 ? (eventMs / totalMs) * 100 : 0));
                         return <div key={event.id} className="absolute bottom-2 h-5 w-1 rounded" style={{ left: `${pct}%`, background: event.severity === 'critical' ? 'hsl(354 52% 52%)' : event.severity === 'warning' ? 'hsl(35 95% 55%)' : color }} />;
                       })}
-                    </div>
+                    </Link>
                   </div>
                 );
               })}
             </div>
 
             <div className="mt-4 rounded-xl border border-border bg-card p-4 shadow-sm">
-              <div className="flex items-center gap-2">
-                <button className="h-8 rounded border border-border px-3 text-xs hover:bg-[hsl(var(--accent))]" onClick={() => setActiveTrackTime((value) => Math.max(0, value - 5))}>⟲</button>
-                <button className="h-8 rounded bg-[hsl(var(--primary))] px-4 text-xs font-semibold text-[hsl(var(--primary-foreground))]">▶</button>
-                <button className="h-8 rounded border border-border px-3 text-xs hover:bg-[hsl(var(--accent))]" onClick={() => setActiveTrackTime((value) => value + 5)}>⟳</button>
-                <div className="ml-3 font-mono text-xs text-[hsl(var(--muted-foreground))]">{format(addMinutes(new Date(timeStart), activeTrackTime), 'HH:mm:ss')}</div>
-                <div className="ml-4 flex items-center gap-1">
-                  {['0.25x', '0.5x', '1x', '2x', '4x'].map((speed) => (
-                    <button key={speed} onClick={() => setPlaybackSpeed(speed)} className={`rounded px-2 py-1 text-[10px] ${playbackSpeed === speed ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'border border-border hover:bg-[hsl(var(--accent))]'}`}>
-                      {speed}
-                    </button>
-                  ))}
+              {/* O ▶ NÃO TINHA `onClick`: um botão de play que não tocava nada,
+                  ao lado de botões de velocidade que só trocavam um rótulo. Como
+                  o vídeo vive na Reprodução, o transporte passa a ser o que de
+                  fato existe — mover o instante em análise e abrir lá. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="h-8 rounded border border-border px-3 text-xs hover:bg-[hsl(var(--accent))]"
+                  onClick={() => setActiveTrackTime((value) => Math.max(0, value - 5))}
+                  aria-label="Voltar 5 minutos"
+                >
+                  <SkipBack className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  className="h-8 rounded border border-border px-3 text-xs hover:bg-[hsl(var(--accent))]"
+                  onClick={() => setActiveTrackTime((value) => Math.min(totalMinutos, value + 5))}
+                  aria-label="Avançar 5 minutos"
+                >
+                  <SkipForward className="h-3.5 w-3.5" />
+                </button>
+                <div className="ml-1 font-mono text-xs tabular-nums text-[hsl(var(--muted-foreground))]">
+                  {format(addMinutes(new Date(timeStart), activeTrackTime), 'dd/MM HH:mm:ss')}
                 </div>
+                {selectedCams[0] && (
+                  <Link
+                    href={`/playback?cameraId=${encodeURIComponent(selectedCams[0])}&at=${encodeURIComponent(new Date(new Date(timeStart).getTime() + activeTrackTime * 60_000).toISOString())}`}
+                    className="btn btn-primary btn-sm ml-auto"
+                  >
+                    Abrir na Reprodução
+                  </Link>
+                )}
               </div>
 
               <div className="mt-4 overflow-hidden rounded-lg border border-border">
                 <div className="flex h-8 items-center bg-[hsl(var(--muted))] text-[10px] font-mono text-[hsl(var(--muted-foreground))]">
-                  {Array.from({ length: 12 }, (_, index) => <div key={index} className="flex-1 border-r border-border/50 px-2">{format(addMinutes(new Date(timeStart), index * 5), 'HH:mm')}</div>)}
+                  {Array.from({ length: 12 }, (_, index) => (
+                    <div key={index} className="flex-1 border-r border-border/50 px-2">
+                      {format(addMinutes(new Date(timeStart), (totalMinutos / 12) * index), 'HH:mm')}
+                    </div>
+                  ))}
                 </div>
-                <div className="relative h-10 bg-[hsl(222_18%_10%)]">
-                  <div className="absolute inset-y-2 left-0 right-0 bg-[hsl(213_68%_57%_/_0.18)]" />
-                  <div className="absolute inset-y-2 left-[32%] right-[54%] bg-[hsl(35_95%_55%_/_0.28)]" />
-                  <div className="absolute inset-y-2 left-[58%] right-[36%] bg-[hsl(354_52%_52%_/_0.35)]" />
-                  <div className="absolute inset-y-0 w-0.5 bg-[hsl(var(--primary))]" style={{ left: `${Math.min(100, (activeTrackTime / (24 * 60)) * 100)}%` }} />
+                {/* Os três blocos coloridos ficavam em posições FIXAS no código
+                    (`left-[32%] right-[54%]`…), com cara de cobertura real de
+                    gravação/movimento/alarme. Substituídos pelos eventos de
+                    verdade, na mesma base de tempo do cursor. */}
+                <div
+                  className="relative h-10 cursor-pointer bg-[hsl(var(--muted))]"
+                  onClick={(evento) => {
+                    const rect = evento.currentTarget.getBoundingClientRect();
+                    const fracao = (evento.clientX - rect.left) / Math.max(1, rect.width);
+                    setActiveTrackTime(Math.max(0, Math.min(totalMinutos, fracao * totalMinutos)));
+                  }}
+                >
+                  {trackEventsTotal.map((evento) => {
+                    const minuto = (new Date(evento.timestamp).getTime() - new Date(timeStart).getTime()) / 60_000;
+                    if (minuto < 0 || minuto > totalMinutos) return null;
+                    return (
+                      <div
+                        key={evento.id}
+                        title={`${evento.cameraName} · ${format(new Date(evento.timestamp), 'HH:mm:ss')}`}
+                        className="absolute inset-y-2 w-[3px] rounded-sm"
+                        style={{
+                          left: `${(minuto / totalMinutos) * 100}%`,
+                          background: evento.severity === 'critical'
+                            ? 'hsl(var(--destructive))'
+                            : evento.severity === 'warning'
+                              ? 'hsl(var(--status-warning))'
+                              : 'hsl(var(--primary))',
+                        }}
+                      />
+                    );
+                  })}
+                  <div
+                    className="absolute inset-y-0 w-0.5 bg-[hsl(var(--primary))]"
+                    style={{ left: `${Math.min(100, (activeTrackTime / totalMinutos) * 100)}%` }}
+                  />
                 </div>
               </div>
             </div>
