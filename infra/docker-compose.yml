@@ -184,7 +184,14 @@ services:
       - APP_BUILDER_AGENT_URL=${APP_BUILDER_AGENT_URL:-http://host.docker.internal:8780}
       - APP_BUILDER_AGENT_TOKEN=${APP_BUILDER_AGENT_TOKEN:-}
       - APP_BUILDER_AGENT_TIMEOUT_MS=${APP_BUILDER_AGENT_TIMEOUT_MS:-15000}
-      - APK_SOURCE_BASE=http://web
+      # PORTA 8080, NÃO 80. O nginx do container `web` roda como usuário sem
+      # privilégio e por isso escuta em 8080 (apps/web/nginx.conf: `listen 8080`).
+      # Sem a porta, a Central batia na 80, levava ECONNREFUSED e devolvia
+      # "Servidor de arquivos temporariamente indisponível" — mensagem que sugere
+      # falha passageira quando na verdade nunca ia funcionar. As duas coisas
+      # foram escritas no MESMO commit (79f68ba, 28/07) e nasceram divergentes:
+      # o download de APK/AAB pela Central esteve quebrado desde então.
+      - APK_SOURCE_BASE=http://web:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
