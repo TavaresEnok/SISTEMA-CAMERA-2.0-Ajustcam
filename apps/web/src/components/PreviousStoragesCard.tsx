@@ -55,6 +55,7 @@ function periodo(de: string | null, ate: string | null): string {
 export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; accessToken: string | null }) {
   const [storages, setStorages] = useState<Storage[] | null>(null);
   const [carregando, setCarregando] = useState(true);
+  const [falhaConsulta, setFalhaConsulta] = useState(false);
   // Qual storage está com a confirmação aberta, e para qual das duas operações.
   const [confirmando, setConfirmando] = useState<{ id: string; acao: 'esvaziar' | 'remover' } | null>(null);
   const [digitado, setDigitado] = useState('');
@@ -68,10 +69,13 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
     try {
       const { data } = await axios.get<Storage[]>(`${apiUrl}/cloud-storage/storages`, { headers });
       setStorages(data);
-    } catch {
-      // API antiga ou sem permissão: a seção some, em vez de virar erro no meio
-      // da página de armazenamento.
+    } catch (erro) {
+      // SÓ 404/403 fazem a seção sumir (API antiga/sem permissão). Em qualquer
+      // outra falha a lista sumia sem deixar rastro — e com ela o contrato
+      // antigo que ainda se paga e o acervo que só existe lá.
+      const codigo = axios.isAxiosError(erro) ? erro.response?.status : undefined;
       setStorages(null);
+      setFalhaConsulta(!(codigo === 404 || codigo === 403));
     } finally {
       setCarregando(false);
     }
@@ -135,6 +139,21 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
     }
   };
 
+  if (falhaConsulta) {
+    return (
+      <div className="p-5 text-sm">
+        <div className="font-medium text-[hsl(var(--destructive))]">
+          Não foi possível listar os armazenamentos anteriores
+        </div>
+        <p className="mt-1 text-muted-foreground">
+          Eles continuam cadastrados — o sistema só não conseguiu consultar agora.
+        </p>
+        <button type="button" onClick={() => void carregar()} className="btn btn-secondary btn-sm mt-3">
+          Tentar novamente
+        </button>
+      </div>
+    );
+  }
   if (carregando || !storages) return null;
 
   // O ativo entra na lista também, sem os botões destrutivos: ver para onde as
@@ -176,7 +195,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
                 <div className="mt-1 text-xs text-muted-foreground">
                   {s.gravacoes > 0
                     ? <>{s.gravacoes} gravações · {tamanho(s.bytes)} · {periodo(s.maisAntiga, s.maisRecente)}</>
-                    : 'Nenhuma gravação do DRAC aponta para este storage.'}
+                    : 'Nenhuma gravação do AjustCam aponta para este storage.'}
                 </div>
                 {!s.credencialLegivel && (
                   <div className="mt-1.5 flex items-center gap-1.5 text-xs text-[hsl(var(--status-warning))]">
@@ -258,7 +277,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
               <div className="mt-3 rounded border border-border bg-background/55 p-3">
                 <div className="text-sm font-medium">Remover o cadastro de {s.bucket}</div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Nenhum arquivo é apagado no fornecedor — só o DRAC deixa de conhecer este storage.
+                  Nenhum arquivo é apagado no fornecedor — só o AjustCam deixa de conhecer este storage.
                 </p>
                 {s.gravacoes > 0 && (
                   <p className="mt-2 text-xs text-[hsl(var(--status-warning))]">

@@ -41,6 +41,12 @@ const ZONE_COLOR = {
  * - Incluir: havendo ao menos uma, só o interior delas é monitorado.
  */
 export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSaved }: Props) {
+  // BASE do "Desfazer alterações": o último estado CONFIRMADO pelo servidor.
+  // Antes o botão revertia para `initialZones`, que vem do pai e não é
+  // recarregado após salvar — desenhar 3 zonas, salvar e clicar em "Desfazer"
+  // devolvia a tela a zero e desabilitava o Salvar, enquanto o servidor seguia
+  // com as 3 zonas. O operador saía convencido de que havia revertido.
+  const baseRef = useRef<DetectionZone[]>(initialZones ?? []);
   const accessToken = useAuthStore((state) => state.accessToken);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [zones, setZones] = useState<DetectionZone[]>(initialZones ?? []);
@@ -52,6 +58,7 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
 
   useEffect(() => {
     setZones(initialZones ?? []);
+    baseRef.current = initialZones ?? [];
     setDirty(false);
   }, [initialZones, cameraId]);
 
@@ -125,6 +132,8 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       setDirty(false);
+      // O que acabou de ser gravado passa a ser a base do desfazer.
+      baseRef.current = zones;
       onSaved?.(zones);
       toast({
         title: 'Zonas salvas',
@@ -287,6 +296,7 @@ export function DetectionZonesEditor({ cameraId, cameraName, initialZones, onSav
             type="button"
             onClick={() => {
               setZones(initialZones ?? []);
+    baseRef.current = initialZones ?? [];
               setDrawing(null);
               setDirty(false);
             }}

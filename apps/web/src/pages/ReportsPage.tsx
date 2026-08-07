@@ -103,7 +103,7 @@ export default function ReportsPage() {
             </p>
             <div className="mt-4 rounded-md border border-border bg-background/60 p-3 text-xs">
               <div className="font-semibold text-foreground">Fonte</div>
-              <div className="mt-1 text-muted-foreground">Store operacional do DRAC + métricas do backend.</div>
+              <div className="mt-1 text-muted-foreground">Dados operacionais do AjustCam e métricas do servidor.</div>
             </div>
           </section>
         </div>

@@ -48,6 +48,7 @@ export function CloudStorageCard({ apiUrl, accessToken }: { apiUrl: string; acce
   const [status, setStatus] = useState<CloudStatus | null>(null);
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [carregando, setCarregando] = useState(true);
+  const [falhaConsulta, setFalhaConsulta] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [enviando, setEnviando] = useState(false);
 
@@ -63,11 +64,18 @@ export function CloudStorageCard({ apiUrl, accessToken }: { apiUrl: string; acce
       ]);
       setStatus(s.data);
       setPolicy(p.data);
-    } catch {
-      // Instalação sem o módulo (API antiga) ou sem permissão: a seção
-      // simplesmente não aparece, em vez de virar tela de erro no meio da
-      // página de armazenamento.
+      setFalhaConsulta(false);
+    } catch (erro) {
+      // SÓ 404/403 significam "não instalado" (API antiga ou sem permissão) —
+      // aí a seção some, que é o comportamento desejado. Qualquer OUTRO erro
+      // (500, timeout, rede) é "não consegui perguntar", e afirmar "Nenhum
+      // armazenamento em nuvem instalado" nesse caso é a mensagem mais
+      // perigosa possível numa instalação que já perdeu acervo para um
+      // fornecedor.
+      const codigo = axios.isAxiosError(erro) ? erro.response?.status : undefined;
+      const naoInstalado = codigo === 404 || codigo === 403;
       setStatus(null);
+      setFalhaConsulta(!naoInstalado);
     } finally {
       setCarregando(false);
     }
@@ -112,6 +120,29 @@ export function CloudStorageCard({ apiUrl, accessToken }: { apiUrl: string; acce
     return <div className="p-5 text-sm text-muted-foreground">Carregando armazenamento em nuvem…</div>;
   }
 
+  // Falhou a CONSULTA (não é "não instalado"): dizer isso, com saída. Afirmar
+  // "nenhum armazenamento instalado" quando não se conseguiu perguntar levaria
+  // o operador a concluir que o acervo na nuvem não existe.
+  if (falhaConsulta) {
+    return (
+      <div className="flex items-start gap-3 p-5">
+        <CloudOff className="mt-0.5 h-5 w-5 text-[hsl(var(--destructive))]" />
+        <div className="text-sm">
+          <div className="font-medium text-[hsl(var(--destructive))]">
+            Não foi possível consultar o armazenamento em nuvem
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            Isto NÃO quer dizer que não há nuvem configurada — o sistema só não conseguiu falar com a
+            API agora. As gravações já enviadas continuam onde estão.
+          </p>
+          <button type="button" onClick={() => void carregar()} className="btn btn-secondary btn-sm mt-3">
+            Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Sem storage provisionado pela Central: explica o caminho em vez de sumir.
   if (!status || status.enabled === false) {
     return (
@@ -120,7 +151,7 @@ export function CloudStorageCard({ apiUrl, accessToken }: { apiUrl: string; acce
         <div className="text-sm">
           <div className="font-medium">Nenhum armazenamento em nuvem instalado</div>
           <p className="mt-1 text-muted-foreground">
-            O bucket é provisionado pelo painel central (DRAC Central), na aba
+            O bucket é provisionado pela Central AjustCam, na aba
             <span className="font-medium"> Armazenamento em nuvem</span> desta instalação.
             Depois de instalado, os controles de envio aparecem aqui.
           </p>

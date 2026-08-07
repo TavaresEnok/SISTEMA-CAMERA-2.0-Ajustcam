@@ -5,6 +5,7 @@ import axios from 'axios';
 import { useAuthStore } from '../store/authStore';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useBrandingStore } from '../store/brandingStore';
+import { PRODUCT_NAME } from '../lib/product-brand';
 
 function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
   const [email, setEmail] = useState('');
@@ -77,13 +78,14 @@ function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function LogoDrac({ size = 30 }: { size?: number }) {
+function LogoAjustCam({ size = 30 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none" style={{ color: 'var(--acc)', flexShrink: 0 }}>
-      <path d="M6 5 L6 27 L15.5 27 Q27 27 27 16 Q27 5 15.5 5 Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" opacity="0.7" />
-      <circle cx="17.5" cy="16" r="5.5" stroke="currentColor" strokeWidth="1" opacity="0.5" />
-      <circle cx="17.5" cy="16" r="2.5" fill="currentColor" opacity="0.95" />
-      <circle cx="19.1" cy="14.4" r="0.8" fill="white" opacity="0.4" />
+      <rect x="4.5" y="7" width="23" height="18" rx="5" stroke="currentColor" strokeWidth="1.5" opacity="0.75" />
+      <circle cx="16" cy="16" r="6" stroke="currentColor" strokeWidth="1.25" opacity="0.7" />
+      <circle cx="16" cy="16" r="3" fill="currentColor" opacity="0.95" />
+      <circle cx="17.2" cy="14.8" r="0.8" fill="white" opacity="0.45" />
+      <path d="M9 7V5.5h5L15.5 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.75" />
     </svg>
   );
 }
@@ -177,11 +179,11 @@ export default function LoginPage() {
               className="relative flex h-full w-full items-center justify-center overflow-hidden"
               style={{ borderRadius: 17, background: 'linear-gradient(150deg, var(--acc-dim), transparent)', border: '1px solid var(--acc-bdr)' }}
             >
-              {logoDataUrl ? <img src={logoDataUrl} alt={facilityName} className="h-[30px] w-[30px] object-contain" /> : <LogoDrac size={30} />}
+              {logoDataUrl ? <img src={logoDataUrl} alt={facilityName} className="h-[30px] w-[30px] object-contain" /> : <LogoAjustCam size={30} />}
             </div>
           </div>
           <h1 className="text-[23px] font-bold" style={{ color: 'var(--tx)', letterSpacing: '-0.01em' }}>{facilityName}</h1>
-          <p className="mt-1 font-mono text-[9px] uppercase" style={{ color: 'var(--tx-4)', letterSpacing: '0.22em' }}>DRAC VMS · Command Center</p>
+          <p className="mt-1 font-mono text-[9px] uppercase" style={{ color: 'var(--tx-4)', letterSpacing: '0.22em' }}>{PRODUCT_NAME} · Central de Monitoramento</p>
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
@@ -271,7 +273,7 @@ export default function LoginPage() {
             <ShieldCheck size={12} style={{ color: 'var(--s-online)' }} />
             Conexão local segura
           </span>
-          <span className="font-mono text-[9px]" style={{ color: 'var(--tx-4)' }}>v2.4 · Local</span>
+          <span className="font-mono text-[9px]" style={{ color: 'var(--tx-4)' }}>{PRODUCT_NAME}</span>
         </div>
       </div>
 

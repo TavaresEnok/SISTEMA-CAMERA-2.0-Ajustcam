@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { useLocation } from 'wouter';
-import { Check, Filter, LoaderCircle, User, Car, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { Check, Filter, LoaderCircle, User, Car, Eye, EyeOff, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
@@ -76,6 +76,7 @@ export default function ReviewPage() {
   const [onlyConfirmed, setOnlyConfirmed] = useState(true);
   const [unseenOnly, setUnseenOnly] = useState(false);
   const [total, setTotal] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const busy = useRef(false);
 
@@ -97,8 +98,13 @@ export default function ReviewPage() {
       const { data } = await client.get<{ items: ReviewItem[]; total: number }>('/review/feed', { params: buildParams(0) });
       setItems(Array.isArray(data.items) ? data.items : []);
       setTotal(Number(data.total) || 0);
+      setLoadError(null);
     } catch {
-      setItems([]);
+      // NÃO zerar a lista aqui: com `setItems([])` a tela caía no estado vazio
+      // ("Nenhum evento para revisar / ajuste os filtros") e o operador ficava
+      // mexendo em filtro achando que não havia ocorrência — quando na verdade
+      // a API estava fora.
+      setLoadError('Não foi possível carregar os eventos.');
     } finally {
       setLoading(false);
       busy.current = false;
@@ -188,6 +194,17 @@ export default function ReviewPage() {
         {loading && !items.length ? (
           <div className="flex h-40 items-center justify-center text-[hsl(var(--muted-foreground))]">
             <LoaderCircle className="mr-2 h-5 w-5 animate-spin" /> Carregando eventos…
+          </div>
+        ) : loadError && !items.length ? (
+          <div className="flex h-40 flex-col items-center justify-center text-center">
+            <TriangleAlert className="mb-2 h-8 w-8 text-[hsl(var(--destructive))]" />
+            <div className="text-sm text-[hsl(var(--destructive))]">{loadError}</div>
+            <div className="text-xs text-[hsl(var(--muted-foreground))]">
+              Isto é falha de comunicação — não significa que não há eventos.
+            </div>
+            <button type="button" onClick={() => void load()} className="btn btn-secondary btn-sm mt-3">
+              Tentar novamente
+            </button>
           </div>
         ) : !items.length ? (
           <div className="flex h-40 flex-col items-center justify-center text-center text-[hsl(var(--muted-foreground))]">

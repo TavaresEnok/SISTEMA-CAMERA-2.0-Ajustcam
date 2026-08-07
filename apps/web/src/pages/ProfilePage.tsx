@@ -20,6 +20,7 @@ type Group = {
 
 type MyPermission = {
   id: string;
+  userId?: string | null;
   groupId: string | null;
   level: PermissionLevel;
   group?: { id: string; name: string } | null;
@@ -71,6 +72,7 @@ export default function ProfilePage() {
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '' });
   const [changingPassword, setChangingPassword] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Grupos onde o usuário corrente é administrador
   const adminPerms    = myPerms.filter((p) => p.groupId && p.level === 'ADMIN');
@@ -83,15 +85,23 @@ export default function ProfilePage() {
     setLoading(true);
     const client = apiClient(accessToken);
     try {
+      // `userId` é OBRIGATÓRIO aqui. Sem ele o endpoint devolve, para quem tem
+      // privilégio, as permissões de TODO MUNDO — e esta tela as exibia como
+      // "meus grupos": o admin via os grupos alheios como se fossem dele, e o
+      // visualizador comum (que não recebe nada nesse modo) lia "Nenhum grupo
+      // atribuído" tendo acesso a dezenas de câmeras.
       const [groupsRes, permsRes] = await Promise.all([
         client.get<Group[]>('/camera-groups'),
-        client.get<MyPermission[]>('/camera-permissions'),
+        client.get<MyPermission[]>('/camera-permissions', {
+          params: currentUser?.id ? { userId: currentUser.id } : undefined,
+        }),
       ]);
 
       const loadedGroups = Array.isArray(groupsRes.data) ? groupsRes.data : [];
       const allPerms     = Array.isArray(permsRes.data)  ? permsRes.data  : [];
-      // Filtra apenas as permissões do usuário atual
-      const mine = allPerms.filter((p) => p.groupId);
+      // Cinto e suspensório: mesmo com o userId no pedido, só entram as
+      // permissões DESTE usuário que tenham grupo.
+      const mine = allPerms.filter((p) => p.groupId && (!p.userId || p.userId === currentUser?.id));
       setGroups(loadedGroups);
       setMyPerms(mine);
 
@@ -103,8 +113,11 @@ export default function ProfilePage() {
       } else {
         setGroupUsers([]);
       }
+      setLoadError(null);
     } catch {
-      // silently ignore — página ainda mostra info do usuário
+      // Falha de rede NÃO é "você não tem grupo": a tela afirmava isso de forma
+      // categórica e o usuário ligava para o suporte achando que perdeu acesso.
+      setLoadError('Não foi possível carregar seus grupos e acessos.');
     } finally {
       setLoading(false);
     }
@@ -242,6 +255,16 @@ export default function ProfilePage() {
           <h2 className="text-sm font-semibold mb-3">Meus grupos</h2>
           {loading ? (
             <div className="text-xs text-muted-foreground px-1">Carregando...</div>
+          ) : loadError ? (
+            <div className="rounded-xl border border-[hsl(var(--destructive)_/_0.35)] bg-[hsl(var(--destructive)_/_0.08)] p-4 text-xs">
+              <div className="text-[hsl(var(--destructive))]">{loadError}</div>
+              <div className="mt-1 text-muted-foreground">
+                Isto NÃO significa que você perdeu acesso — o sistema só não conseguiu consultar agora.
+              </div>
+              <button type="button" onClick={() => void load()} className="btn btn-secondary btn-sm mt-3">
+                Tentar novamente
+              </button>
+            </div>
           ) : myPerms.length === 0 ? (
             <div className="rounded-xl border border-border bg-card p-4 text-xs text-muted-foreground">
               Nenhum grupo atribuído. Entre em contato com o administrador do sistema.

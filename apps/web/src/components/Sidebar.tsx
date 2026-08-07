@@ -15,6 +15,7 @@ import { useAuthStore } from '../store/authStore';
 import { useThemeStore } from '../store/themeStore';
 import { useIsMobile } from '../hooks/use-mobile';
 import { useBrandingStore } from '../store/brandingStore';
+import { PRODUCT_NAME } from '../lib/product-brand';
 
 type NavItem = {
   path: string;
@@ -122,7 +123,7 @@ export function Sidebar({
               className="min-w-0"
             >
               <div className="max-w-[150px] truncate text-[13px] font-semibold text-sidebar-foreground leading-tight tracking-tight" title={facilityName}>{facilityName}</div>
-              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">DRAC VMS</div>
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">{PRODUCT_NAME}</div>
             </motion.div>
           )}
         </div>

@@ -24,8 +24,8 @@ export const RECORDING_MODE_COPY: Record<RecordingMode, { label: string; detail:
     className: 'border-[hsl(var(--primary)_/_0.35)] bg-[hsl(var(--primary)_/_0.1)] text-[hsl(var(--primary))]',
   },
   schedule: {
-    label: 'Agenda',
-    detail: 'Segue janela de agenda configurada.',
+    label: 'Agenda indisponível',
+    detail: 'Configuração legada sem executor de horários. Selecione outro modo.',
     className: 'border-[hsl(var(--chart-5)_/_0.35)] bg-[hsl(var(--chart-5)_/_0.1)] text-[hsl(var(--chart-5))]',
   },
 };

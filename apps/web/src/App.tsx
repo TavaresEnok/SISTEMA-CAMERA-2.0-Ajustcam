@@ -11,6 +11,7 @@ import { useAuthStore } from './store/authStore';
 import { useThemeStore } from './store/themeStore';
 import { useVmsDataStore } from './store/vmsDataStore';
 import { useBrandingStore } from './store/brandingStore';
+import { productPageTitle, PRODUCT_NAME } from './lib/product-brand';
 
 const queryClient = new QueryClient();
 
@@ -67,7 +68,7 @@ const NotFound        = lazyWithReload(() => import('./pages/not-found'));
 function AppFallback() {
   return (
     <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-      Carregando DRAC VMS...
+      Carregando {PRODUCT_NAME}...
     </div>
   );
 }
@@ -190,7 +191,7 @@ function BrandingSync() {
   }, [loadBranding]);
 
   useEffect(() => {
-    document.title = facilityName === 'DRAC VMS' ? facilityName : `${facilityName} · DRAC VMS`;
+    document.title = productPageTitle(facilityName);
   }, [facilityName]);
 
   return null;

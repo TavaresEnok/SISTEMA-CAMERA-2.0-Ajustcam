@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'wouter';
 import axios from 'axios';
 import { Plus, Users, Camera, Settings, Trash2, Check, ChevronRight, Pencil, HardDrive } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -78,6 +79,7 @@ export default function GroupsPage() {
   const [groups, setGroups] = useState<AccessGroup[]>([]);
   const [permissions, setPermissions] = useState<UserPermission[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selGroupId, setSelGroupId] = useState<string | null>(null);
   const [tab, setTab] = useState<'cameras' | 'users' | 'permissions'>('cameras');
 
@@ -120,6 +122,7 @@ export default function GroupsPage() {
   const groupAlarmsOn = groupLiveCams.length > 0 && groupLiveCams.every((c) => c.alarmsEnabled);
 
   const load = async () => {
+    try {
     if (!accessToken) return;
     setLoading(true);
     try {
@@ -134,6 +137,13 @@ export default function GroupsPage() {
       if (!selGroupId && loadedGroups[0]) setSelGroupId(loadedGroups[0].id);
     } finally {
       setLoading(false);
+    }
+      setLoadError(null);
+    } catch {
+      // Sem este catch a promessa rejeitava em silêncio e a tela mostrava o
+      // estado vazio "Crie ou selecione um grupo" — o admin concluía que tinha
+      // PERDIDO os grupos.
+      setLoadError('Não foi possível carregar os grupos.');
     }
   };
 
@@ -359,7 +369,18 @@ export default function GroupsPage() {
       </aside>
 
       {/* ── Detail ── */}
-      {!selGroup ? (
+      {loadError && !groups.length ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center space-y-2">
+            <Users className="w-10 h-10 opacity-20 mx-auto text-[hsl(var(--destructive))]" />
+            <p className="text-sm text-[hsl(var(--destructive))]">{loadError}</p>
+            <p className="text-xs text-muted-foreground">Falha de comunicação — os grupos não foram perdidos.</p>
+            <button type="button" onClick={() => void load()} className="btn btn-secondary btn-sm mt-1">
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      ) : !selGroup ? (
         <div className="flex-1 flex items-center justify-center text-muted-foreground">
           <div className="text-center space-y-2">
             <Users className="w-10 h-10 opacity-20 mx-auto" />
@@ -533,18 +554,26 @@ export default function GroupsPage() {
                   Permissões aplicadas a <strong>todos os usuários</strong> deste grupo.
                   Itens com cadeado são impostos pelo sistema e garantem isolamento entre clientes.
                 </p>
+                {/* ── SOMENTE LEITURA, E AGORA DECLARADO ────────────────────
+                    Estes itens eram `<Switch>` SEM `onCheckedChange`, sobre uma
+                    lista fixa no código: pareciam editáveis, não mudavam nem
+                    visualmente ao clicar, e nada era salvo. O admin configurava
+                    "Controle PTZ" e saía convencido de que tinha aplicado.
+                    Não existe endpoint de capacidades por grupo — o que existe
+                    é a matriz por FUNÇÃO, em /roles. Então a tela passa a
+                    descrever o que vale, e aponta onde se muda. */}
                 <div className="bg-card border border-border rounded-xl overflow-hidden">
                   {[
-                    { label: 'Acesso ao Live View',                allowed: true,  locked: true },
-                    { label: 'Playback das câmeras do grupo',       allowed: true,  locked: true },
-                    { label: 'Controle PTZ',                        allowed: true,  locked: false },
-                    { label: 'Reconhecer alarmes',                  allowed: true,  locked: false },
-                    { label: 'Exportar evidências',                 allowed: true,  locked: false },
-                    { label: 'Criar usuários no próprio grupo',     allowed: false, locked: false },
-                    { label: 'Ver câmeras de outros grupos',        allowed: false, locked: true },
-                    { label: 'Configurações globais do sistema',    allowed: false, locked: true },
-                    { label: 'Logs do sistema (provedor)',          allowed: false, locked: true },
-                    { label: 'Usuários de outros grupos',          allowed: false, locked: true },
+                    { label: 'Acesso ao ao vivo',                 allowed: true },
+                    { label: 'Reprodução das câmeras do grupo',   allowed: true },
+                    { label: 'Controle PTZ',                      allowed: true },
+                    { label: 'Reconhecer alarmes',                allowed: true },
+                    { label: 'Exportar evidências',               allowed: true },
+                    { label: 'Criar usuários no próprio grupo',   allowed: false },
+                    { label: 'Ver câmeras de outros grupos',      allowed: false },
+                    { label: 'Configurações globais do sistema',  allowed: false },
+                    { label: 'Ver registros do sistema',          allowed: false },
+                    { label: 'Ver usuários de outros grupos',     allowed: false },
                   ].map((p, i, arr) => (
                     <div key={p.label}
                       className={cn(
@@ -552,16 +581,16 @@ export default function GroupsPage() {
                         i < arr.length - 1 && 'border-b border-border/60'
                       )}>
                       <div className="flex-1 text-[12px] text-foreground">{p.label}</div>
-                      {p.locked ? (
-                        <div className="flex items-center gap-1.5 text-[10px] font-mono text-muted-foreground/70">
-                          {p.allowed ? 'Sempre' : 'Nunca'}
-                        </div>
-                      ) : (
-                        <Switch checked={p.allowed} disabled={!isAdmin} />
-                      )}
+                      <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+                        {p.allowed ? 'Permitido' : 'Não permitido'}
+                      </div>
                     </div>
                   ))}
                 </div>
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  Esta lista é informativa: descreve o que um acesso de grupo permite. Para mudar o que
+                  cada função pode fazer, use <Link href="/roles" className="underline underline-offset-2 hover:text-foreground">Funções e Permissões</Link>.
+                </p>
               </div>
             )}
 

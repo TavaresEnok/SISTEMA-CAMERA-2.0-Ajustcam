@@ -2,6 +2,7 @@ import axios from 'axios';
 import { create } from 'zustand';
 import { getApiBaseUrl } from '../lib/api-base';
 import { buildBrandColorCss } from '../lib/brand-colors';
+import { normalizeFacilityName, PRODUCT_NAME } from '../lib/product-brand';
 
 type PublicBranding = {
   facilityName?: string;
@@ -75,14 +76,14 @@ function applyBrandColors(data: PublicBranding) {
 }
 
 export const useBrandingStore = create<BrandingState>((set) => ({
-  facilityName: 'DRAC VMS',
+  facilityName: PRODUCT_NAME,
   logoDataUrl: '',
   loaded: false,
   load: async () => {
     try {
       const { data } = await axios.get<PublicBranding>(`${getApiBaseUrl()}/settings/branding`, { timeout: 8_000 });
       set({
-        facilityName: data.facilityName?.trim() || 'DRAC VMS',
+        facilityName: normalizeFacilityName(data.facilityName),
         logoDataUrl: data.brandLogoDataUrl?.trim() || '',
         loaded: true,
       });

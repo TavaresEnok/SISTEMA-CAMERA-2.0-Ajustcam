@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { format } from 'date-fns';
 import { useLocation } from 'wouter';
 import { Camera, Bell, ArrowLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -11,9 +12,31 @@ const layouts = [
   { label: '2x2', cols: 2, count: 4 },
 ];
 
+/**
+ * Relógio da barra e dos quadros.
+ *
+ * Antes era `new Date().toISOString()` avaliado no render: (a) UTC, três horas
+ * adiantado no Brasil, e (b) SEM `setInterval`, ou seja, congelado na hora em
+ * que a página abriu. Num mural, um relógio parado é pior que nenhum — ele
+ * afirma um horário.
+ */
+function useRelogio() {
+  const [agora, setAgora] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setAgora(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return agora;
+}
+
 const statusDot = (s: string) => {
-  if (s === 'online' || s === 'recording' || s === 'motion') return 'bg-[hsl(var(--destructive))] rec-pulse';
+  // VERMELHO PULSANTE É SÓ ALARME. Antes `online`, `recording` e `motion`
+  // recebiam o MESMO tratamento do alarme: num mural de 16 câmeras saudáveis,
+  // 16 pontos vermelhos piscavam e o alarme real sumia por saturação.
   if (s === 'alarm') return 'bg-[hsl(var(--destructive))] rec-pulse';
+  if (s === 'recording') return 'bg-[hsl(var(--status-rec))]';
+  if (s === 'motion') return 'bg-[hsl(var(--status-motion))]';
+  if (s === 'online') return 'bg-[hsl(var(--status-online))]';
   if (s === 'offline' || s === 'no_signal') return 'bg-white/25';
   return 'bg-[hsl(var(--status-warning))]';
 };
@@ -25,6 +48,7 @@ const statusOverlay = (s: string) => {
 };
 
 export default function WallModePage() {
+  const agora = useRelogio();
   const [, setLocation] = useLocation();
   const allCameras = useVmsDataStore((state) => state.cameras);
   const cameras = useMemo(() => allCameras.filter((camera) => camera.enabled !== false), [allCameras]);
@@ -72,7 +96,7 @@ export default function WallModePage() {
               </div>
             )}
             <span className="text-xs font-mono text-white/40">
-              {new Date().toISOString().replace('T', ' ').substring(0, 19)}
+              {format(agora, 'dd/MM/yyyy HH:mm:ss')}
             </span>
             <button
               onClick={() => setShowBar(false)}
@@ -122,7 +146,7 @@ export default function WallModePage() {
               <div className="absolute bottom-1 left-1 right-1 flex justify-between items-center z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                 <span className="max-w-[160px] truncate rounded bg-black/70 px-1 text-[8px] text-white/60">{cam.zone}</span>
                 <span className="text-[8px] font-mono text-white/40 bg-black/70 px-1 rounded">
-                  {new Date().toISOString().substring(11, 19)}
+                  {format(agora, 'HH:mm:ss')}
                 </span>
               </div>
             </div>

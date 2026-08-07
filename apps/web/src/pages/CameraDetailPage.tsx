@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { format } from 'date-fns';
 import { useCallback, useEffect, useMemo, useRef, useState, type InputHTMLAttributes, type MouseEvent, type ReactNode, type SelectHTMLAttributes, type WheelEvent as ReactWheelEvent } from 'react';
 import { Link, useLocation, useParams } from 'wouter';
 import {
@@ -483,7 +484,11 @@ function LiveClock({ className }: { className?: string }) {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  return <span className={className}>{now.toISOString().replace('T', ' ').substring(0, 19)}</span>;
+  // HORA LOCAL, não UTC. `toISOString()` é UTC por definição e mostrava 3h a
+  // mais no Brasil — sobre imagem de câmera, hora errada contamina qualquer
+  // conferência de evento. (O horário QUEIMADO no vídeo pelo equipamento é
+  // outro relógio, configurado na câmera, e não passa por aqui.)
+  return <span className={className}>{format(now, 'dd/MM/yyyy HH:mm:ss')}</span>;
 }
 
 function PtzButton({
@@ -910,6 +915,14 @@ export default function CameraDetailPage() {
 
   const saveSettings = async () => {
     if (!cam?.id || !accessToken) return;
+    if (form.recordingMode === 'schedule') {
+      toast({
+        title: 'Agenda ainda não está disponível',
+        description: 'Escolha gravação contínua, por movimento ou manual antes de salvar.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setConfigSaving(true);
 
     try {
@@ -1681,7 +1694,7 @@ export default function CameraDetailPage() {
                 .slice(0, 8)
                 .map((event) => (
                   <div key={event.id} className="flex items-center gap-3 rounded border border-border bg-card/40 px-4 py-2 text-xs">
-                    <span className="font-mono text-muted-foreground">{new Date(event.timestamp).toISOString().substring(11, 19)}</span>
+                    <span className="font-mono text-muted-foreground">{format(new Date(event.timestamp), 'HH:mm:ss')}</span>
                     <Badge variant="outline" className="border-border bg-muted text-[10px] text-muted-foreground">
                       {event.type}
                     </Badge>
@@ -1796,7 +1809,7 @@ export default function CameraDetailPage() {
 
                 {/* Grid principal */}
                 <div className="grid items-start gap-5 xl:grid-cols-2">
-                  <SettingsCard icon={KeyRound} title="Identificação e acesso" description="Como o DRAC encontra e autentica nesta câmera.">
+                  <SettingsCard icon={KeyRound} title="Identificação e acesso" description="Como o AjustCam encontra e autentica nesta câmera.">
                     <div className="grid gap-3 md:grid-cols-2">
                       <SettingsField label="Nome da câmera" wide>
                         <SettingsInput value={form.name} onChange={(event) => updateField('name', event.target.value)} />
@@ -1886,10 +1899,15 @@ export default function CameraDetailPage() {
                         <SettingsSelect value={form.recordingMode} onChange={(event) => updateField('recordingMode', event.target.value as CameraConfig['recordingMode'])}>
                           <option value="continuous">Contínua</option>
                           <option value="motion">Movimento</option>
-                          <option value="schedule">Agenda</option>
+                          {form.recordingMode === 'schedule' ? <option value="schedule" disabled>Agenda (indisponível)</option> : null}
                           <option value="manual">Manual</option>
                         </SettingsSelect>
                       </SettingsField>
+                      {form.recordingMode === 'schedule' ? (
+                        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-600 dark:text-amber-400 md:col-span-2">
+                          Esta configuração antiga não possui executor de horários. Escolha um modo disponível antes de salvar.
+                        </div>
+                      ) : null}
                       <SettingsSwitch
                         checked={form.retentionFollowsGroup}
                         onChange={(value) => updateField('retentionFollowsGroup', value)}

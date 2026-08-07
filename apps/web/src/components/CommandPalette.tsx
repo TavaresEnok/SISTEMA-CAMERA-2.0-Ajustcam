@@ -5,13 +5,14 @@ import {
   Camera, Settings,
   LogOut, Sun, Moon, Shield, Clock, Users, FolderKey, ShieldCheck,
   Bell, Crosshair, HardDrive, UserCircle,
-  Map as MapIcon, Search, LayoutGrid, type LucideIcon,
+  type LucideIcon,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { useAuthStore } from '../store/authStore';
 import { useThemeStore } from '../store/themeStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
+import { PRODUCT_NAME } from '../lib/product-brand';
 
 type PalettePage = {
   label: string;
@@ -31,9 +32,6 @@ const PAGES: PalettePage[] = [
   { label: 'Alertas',       path: '/alarms',     icon: Bell,        description: 'Tratamento e regras de alarme',       roles: ['admin', 'operator'] },
   { label: 'Câmeras',       path: '/cameras',    icon: Camera,      description: 'Gestão e configuração de câmeras',    roles: ['admin', 'operator'] },
   { label: 'Armazenamento', path: '/storage',    icon: HardDrive,   description: 'Disco, retenção e saúde operacional', roles: ['admin', 'operator'] },
-  { label: 'Mapa / Planta', path: '/map',        icon: MapIcon,     description: 'Localização das câmeras por ambiente',roles: ['admin', 'operator'] },
-  { label: 'Modo Mural',    path: '/wall',       icon: LayoutGrid,  description: 'Visualização de parede operacional',  roles: ['admin', 'operator'] },
-  { label: 'Investigação',  path: '/investigation', icon: Search,   description: 'Casos, evidências e linha de trabalho', roles: ['admin', 'operator'] },
   { label: 'Usuários',      path: '/users',      icon: Users,       description: 'Gestão de usuários',                 roles: ['admin', 'operator'] },
   // admin only
   { label: 'Grupos',        path: '/groups',     icon: FolderKey,   description: 'Câmeras e acessos por grupo',         roles: ['admin'] },
@@ -147,7 +145,7 @@ export function CommandPalette({ open, onClose }: Props) {
               <span className="font-mono text-[hsl(var(--muted-foreground))]">↵ selecionar</span>
               <span className="font-mono text-[hsl(var(--muted-foreground))]">esc fechar</span>
               <span className="ml-auto font-mono text-[hsl(var(--muted-foreground))]">
-                <Shield className="w-3 h-3 inline mr-1" />DRAC VMS
+                <Shield className="w-3 h-3 inline mr-1" />{PRODUCT_NAME}
               </span>
             </div>
           </Command>

@@ -46,7 +46,6 @@ type Form = {
 const RECORDING_MODES = [
   { value: 'continuous', label: 'Contínua', desc: '24 h ininterrupto' },
   { value: 'motion', label: 'Por movimento', desc: 'Ativa ao detectar movimento' },
-  { value: 'schedule', label: 'Agendada', desc: 'Segue janela configurada' },
   { value: 'manual', label: 'Manual', desc: 'Operador inicia / para' },
 ] as const;
 
@@ -246,6 +245,14 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
 
   const handleSave = async () => {
     if (!accessToken || !form) return;
+    if (form.recordingMode === 'schedule') {
+      toast({
+        title: 'Agenda ainda não está disponível',
+        description: 'Escolha gravação contínua, por movimento ou manual antes de salvar.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setSaving(true);
     try {
       await axios.patch(
@@ -553,7 +560,7 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                     </FormField>
                   </div>
                   <div className="rounded-lg border border-border bg-background/70 px-3 py-2 text-[11px] text-muted-foreground">
-                    Grid padronizado em até 720p / 20 FPS. Ao abrir a câmera sozinha, o DRAC usa a resolução original do perfil live.
+                    Grid padronizado em até 720p / 20 FPS. Ao abrir a câmera sozinha, o AjustCam usa a resolução original do perfil live.
                   </div>
                   <Separator />
                   <ToggleRow label="Áudio" desc="Captura de áudio da câmera" value={form.audioEnabled} onChange={(v) => upd('audioEnabled', v)} />
@@ -562,6 +569,11 @@ export function CameraEditSheet({ camera, open, onClose, onDeleted }: CameraEdit
                 {/* GRAVAÇÃO */}
                 <TabsContent value="gravacao" className="px-5 py-4 space-y-4 mt-0">
                   <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Modo de gravação</p>
+                  {form.recordingMode === 'schedule' && (
+                    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                      Esta câmera usa uma configuração antiga de agenda, mas o executor de horários ainda não existe. Escolha um modo disponível antes de salvar.
+                    </div>
+                  )}
                   <div className="space-y-2">
                     {RECORDING_MODES.map((m) => (
                       <button key={m.value} onClick={() => upd('recordingMode', m.value)}

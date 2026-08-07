@@ -6,7 +6,7 @@ import { Link, useLocation } from 'wouter';
 import {
   Bell, BellOff, CheckCheck, ChevronUp, ChevronDown,
   AlertTriangle, Flame, DoorOpen, Shield, MapPin,
-  Volume2, VolumeX, ArrowRight, X, Clock, Settings2, Plus, Play, Pencil, Trash2,
+  Volume2, VolumeX, ArrowRight, X, Clock, Settings2, Plus, Play, Pencil, Trash2, TriangleAlert, Filter,
   ChevronRight, MessageSquare
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as ReTooltip, ResponsiveContainer } from 'recharts';
@@ -319,6 +319,10 @@ export default function AlertasPage() {
   const [noteDraft, setNoteDraft] = useState('');
   const [alarmItems, setAlarmItems] = useState<Alarm[]>([]);
   const [alarmsLoading, setAlarmsLoading] = useState(false);
+  // "Atualizado às" + aviso de dado velho: sem isto a lista podia ficar
+  // estagnada por horas sem nenhum sinal de que estava morta.
+  const [ultimaAtualizacao, setUltimaAtualizacao] = useState<Date | null>(null);
+  const [falhaDeFundo, setFalhaDeFundo] = useState(false);
   const [alarmsError, setAlarmsError] = useState<string | null>(null);
   const [cameraFilter, setCameraFilter] = useState('all');
   const [zoneFilter, setZoneFilter] = useState('all');
@@ -330,6 +334,17 @@ export default function AlertasPage() {
   const [fromFilter, setFromFilter] = useState('');
   const [toFilter, setToFilter] = useState('');
   const [searchFilter, setSearchFilter] = useState('');
+
+  // Quantos filtros do modo avançado continuam valendo (eles sobrevivem à
+  // volta para o modo Operação, onde não havia nem indicador nem como limpar).
+  const filtrosAtivosCount = [
+    cameraFilter !== 'all', zoneFilter !== 'all', priorityFilter !== 'all',
+    sourceFilter !== 'all', Boolean(fromFilter), Boolean(toFilter), Boolean(searchFilter.trim()),
+  ].filter(Boolean).length;
+  const limparFiltros = () => {
+    setCameraFilter('all'); setZoneFilter('all'); setPriorityFilter('all');
+    setSourceFilter('all'); setFromFilter(''); setToFilter(''); setSearchFilter('');
+  };
   const [rules, setRules] = useState<AlarmRule[]>([]);
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesError, setRulesError] = useState<string | null>(null);
@@ -390,7 +405,12 @@ export default function AlertasPage() {
       const { data } = await client.get<{ items: AlarmApiItem[] }>('/cameras/alarms', { params });
       const mapped = (Array.isArray(data?.items) ? data.items : []).map(mapApiAlarm);
       setAlarmItems(mapped);
+      setUltimaAtualizacao(new Date());
+      setFalhaDeFundo(false);
     } catch (error) {
+      // O refresh de 5s engolia o erro: a lista ficava estagnada com dados
+      // antigos por tempo indeterminado, sem nada na tela dizendo isso.
+      if (background) setFalhaDeFundo(true);
       const msg = axios.isAxiosError(error) ? (error.response?.data?.message || error.message) : 'Falha ao carregar alarmes.';
       if (!background) setAlarmsError(Array.isArray(msg) ? msg.join(' | ') : String(msg));
     } finally {
@@ -650,7 +670,35 @@ export default function AlertasPage() {
 
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="px-3 sm:px-6 py-3 border-b border-border shrink-0 flex items-center justify-end gap-2">
+        <div className="px-3 sm:px-6 py-3 border-b border-border shrink-0 flex items-center gap-2">
+          {/* FRESCOR DO DADO. A lista se atualiza a cada 5s em segundo plano;
+              sem este carimbo, uma falha silenciosa deixava o operador olhando
+              um retrato morto sem nenhuma forma de perceber. */}
+          <div className="mr-auto flex items-center gap-2 text-[11px]">
+            {falhaDeFundo ? (
+              <span className="inline-flex items-center gap-1.5 rounded border border-[hsl(var(--destructive)_/_0.35)] bg-[hsl(var(--destructive)_/_0.08)] px-2 py-1 text-[hsl(var(--destructive))]">
+                <TriangleAlert className="h-3 w-3" />
+                Sem contato com o servidor — dados de {ultimaAtualizacao ? format(ultimaAtualizacao, 'HH:mm:ss') : 'antes'}
+              </span>
+            ) : ultimaAtualizacao ? (
+              <span className="font-mono tabular-nums text-muted-foreground">
+                atualizado às {format(ultimaAtualizacao, 'HH:mm:ss')}
+              </span>
+            ) : null}
+          </div>
+          {/* FILTROS ATIVOS: continuavam valendo ao voltar do modo avançado,
+              sem indicador nem forma de limpar — o operador passava o turno
+              vendo tela vazia achando que não havia ocorrência. */}
+          {filtrosAtivosCount > 0 && (
+            <button
+              onClick={limparFiltros}
+              className="btn btn-secondary btn-sm"
+              title="Remover todos os filtros aplicados no modo avançado"
+            >
+              <Filter className="h-3.5 w-3.5" />
+              {filtrosAtivosCount} filtro(s) ativo(s) · limpar
+            </button>
+          )}
           <button
             onClick={() => setWorkspaceMode('advanced')}
             className="btn btn-secondary btn-sm"
@@ -688,7 +736,25 @@ export default function AlertasPage() {
               {alarmsLoading && !visibleAlarms.length && (
                 <div className="p-5 text-center text-xs text-muted-foreground">Carregando alarmes...</div>
               )}
-              {!alarmsLoading && !visibleAlarms.length && (
+              {/* ERRO ≠ VAZIO. Antes, com a API fora, o operador lia "Nenhum
+                  alarme neste status" às 2h da manhã e concluía que a noite
+                  estava tranquila — o erro só era mostrado num acordeão
+                  recolhido da OUTRA tela. */}
+              {!alarmsLoading && !visibleAlarms.length && (alarmsError || falhaDeFundo) && (
+                <div className="flex h-36 flex-col items-center justify-center gap-2 px-4 text-center">
+                  <TriangleAlert className="h-6 w-6 text-[hsl(var(--destructive))]" />
+                  <p className="text-xs text-[hsl(var(--destructive))]">
+                    Não foi possível carregar os alarmes
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Isto é falha de comunicação — não quer dizer que não há alarmes.
+                  </p>
+                  <button type="button" onClick={() => void loadAlarmsList(false)} className="btn btn-secondary btn-sm mt-1">
+                    Tentar novamente
+                  </button>
+                </div>
+              )}
+              {!alarmsLoading && !visibleAlarms.length && !alarmsError && !falhaDeFundo && (
                 <div className="flex h-36 flex-col items-center justify-center gap-2 text-muted-foreground">
                   <BellOff className="h-6 w-6 opacity-30" />
                   <p className="text-xs">Nenhum alarme neste status</p>
@@ -1013,7 +1079,7 @@ export default function AlertasPage() {
         {ackAlertas.length > 0 && (
           <div className="space-y-2">
             <div className="text-[11px] font-semibold text-[hsl(var(--muted-foreground))] flex items-center gap-2">
-              <CheckCheck className="w-3 h-3" />Reconhecidos ({ackAlertas.length})
+              <CheckCheck className="w-3 h-3" />Reconhecidos ({ackAlertas.length > 5 ? `mostrando 5 de ${ackAlertas.length}` : ackAlertas.length})
             </div>
             {ackAlertas.slice(0, 5).map((alarm) => (
               <AlarmCard key={alarm.id} alarm={alarm} onAck={() => void handleAcknowledgeAlarm(alarm.id)} onResolve={() => void handleResolveAlarm(alarm.id)} onAddNote={(note) => void handleAddAlarmNote(alarm.id, note)} />
@@ -1023,12 +1089,15 @@ export default function AlertasPage() {
 
         {resolvedAlertas.length > 0 && (
           <div className="space-y-2">
-            <div className="text-[11px] font-semibold text-[hsl(var(--muted-foreground))]">Resolvidos ({resolvedAlertas.length})</div>
+            <div className="text-[11px] font-semibold text-[hsl(var(--muted-foreground))]">Resolvidos ({resolvedAlertas.length > 10 ? `mostrando 10 de ${resolvedAlertas.length}` : resolvedAlertas.length})</div>
             <div className="bg-card border border-border rounded-xl overflow-hidden">
               <table className="w-full text-[11px]">
                 <thead>
                   <tr className="border-b border-border">
-                    {['Prioridade', 'Nome', 'Zona', 'Resolvido por', 'Disparado em'].map((h) => (
+                    {/* "Reconhecido por": a célula é alimentada por `acknowledgedBy`, não por
+                        quem resolveu — atribuir a resolução à pessoa errada é problema
+                        real em auditoria de plantão. */}
+                    {['Prioridade', 'Nome', 'Zona', 'Reconhecido por', 'Disparado em'].map((h) => (
                       <th key={h} className="px-4 py-2.5 text-left font-medium text-[hsl(var(--muted-foreground))]">{h}</th>
                     ))}
                   </tr>

@@ -26,6 +26,14 @@ import { useVmsDataStore } from '../store/vmsDataStore';
 
 type CommandState = 'idle' | 'sending' | 'ok' | 'error';
 const API_URL = getApiBaseUrl();
+const DIRECTION_LABEL: Record<PTZDirection, string> = {
+  Up: 'cima',
+  Down: 'baixo',
+  Left: 'esquerda',
+  Right: 'direita',
+  ZoomIn: 'aproximar',
+  ZoomOut: 'afastar',
+};
 type PtzDiagnostics = {
   cameraId: string;
   ip: string;
@@ -102,8 +110,14 @@ function ControlButton({
 export default function PTZPage() {
   const [location, setLocation] = useLocation();
   const accessToken = useAuthStore((state) => state.accessToken);
+  const userRole = useAuthStore((state) => state.user?.role ?? 'viewer');
   const cameras = useVmsDataStore((state) => state.cameras);
-  const ptzCameras = useMemo(() => cameras.filter((camera) => camera.ptzCapable), [cameras]);
+  const ptzCameras = useMemo(
+    () => cameras
+      .filter((camera) => camera.enabled && camera.ptzCapable)
+      .sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || a.name.localeCompare(b.name, 'pt-BR')),
+    [cameras],
+  );
   const [selectedCamId, setSelectedCamId] = useState('');
   const [speed, setSpeed] = useState(5);
   const [activeDirection, setActiveDirection] = useState<PTZDirection | null>(null);
@@ -137,6 +151,9 @@ export default function PTZPage() {
 
   const selectedCam = ptzCameras.find((camera) => camera.id === selectedCamId) ?? null;
   const controlsDisabled = !selectedCam || !selectedCam.isOnline;
+  const requestedCameraUnavailable = Boolean(
+    requestedCameraId && !ptzCameras.some((camera) => camera.id === requestedCameraId),
+  );
   const ptzRejectedByDevice = Boolean(lastError && lastError.includes('Nenhum endpoint PTZ aceitou o comando'));
 
   const startMove = useCallback(
@@ -147,14 +164,14 @@ export default function PTZPage() {
       setActiveDirection(direction);
       setCommandState('sending');
       setLastError(null);
-      setLastCommand(`Enviando ${direction} para ${selectedCam.name}`);
+      setLastCommand(`Enviando comando para ${DIRECTION_LABEL[direction]} em ${selectedCam.name}`);
 
       try {
         movement.startPromise = sendPtzCommand(selectedCam.id, { action: 'start', direction, speed });
         await movement.startPromise;
         if (activeMovementRef.current === movement) {
           setCommandState('ok');
-          setLastCommand(`Movimento ${direction} ativo em ${selectedCam.name}`);
+          setLastCommand(`Movimento para ${DIRECTION_LABEL[direction]} ativo em ${selectedCam.name}`);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Falha ao iniciar comando PTZ.';
@@ -164,7 +181,7 @@ export default function PTZPage() {
         }
         setCommandState('error');
         setLastError(message);
-        setLastCommand(`Falha em ${direction} para ${selectedCam.name}`);
+        setLastCommand(`Falha ao mover para ${DIRECTION_LABEL[direction]} em ${selectedCam.name}`);
         toast({
           title: 'Falha no PTZ',
           description: message,
@@ -188,12 +205,12 @@ export default function PTZPage() {
       await sendPtzCommand(movement.cameraId, { action: 'stop', direction: currentDirection });
       setCommandState('ok');
       setLastError(null);
-      setLastCommand(`Movimento ${currentDirection} finalizado em ${movement.cameraName}`);
+      setLastCommand(`Movimento para ${DIRECTION_LABEL[currentDirection]} finalizado em ${movement.cameraName}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Falha ao parar movimento PTZ.';
       setCommandState('error');
       setLastError(message);
-      setLastCommand(`Falha ao parar ${currentDirection} em ${movement.cameraName}`);
+      setLastCommand(`Falha ao parar movimento para ${DIRECTION_LABEL[currentDirection]} em ${movement.cameraName}`);
       toast({
         title: 'Falha ao parar PTZ',
         description: message,
@@ -263,14 +280,32 @@ export default function PTZPage() {
   if (!ptzCameras.length) {
     return (
       <div className="flex h-full items-center justify-center p-6">
-        <div className="w-full max-w-xl rounded-lg border border-border bg-card/80 p-8 text-center shadow-sm">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-[hsl(var(--muted))]">
-            <Crosshair className="h-6 w-6 text-[hsl(var(--muted-foreground))]" />
+        <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-card/85 text-center shadow-lg">
+          <div className="border-b border-border bg-[radial-gradient(circle_at_top,hsl(var(--primary)_/_0.16),transparent_68%)] px-8 py-9">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.10)] shadow-[0_12px_32px_hsl(var(--primary)_/_0.12)]">
+              <Crosshair className="h-7 w-7 text-[hsl(var(--primary))]" />
+            </div>
+            <h2 className="text-lg font-semibold">Nenhuma câmera compatível com PTZ</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">
+              O controle aparece somente para câmeras ativas configuradas com perfil ONVIF de movimentação.
+            </p>
           </div>
-          <h2 className="text-lg font-semibold">Nenhuma câmera PTZ disponível</h2>
-          <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
-            Nenhuma camera com controle externo foi encontrada.
-          </p>
+          <div className="grid gap-3 px-8 py-6 text-left sm:grid-cols-2">
+            <div className="rounded-xl border border-border bg-background/55 p-4">
+              <div className="text-xs font-semibold">Já possui uma câmera PTZ?</div>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Confirme ONVIF, perfil e credenciais no cadastro da câmera.</p>
+            </div>
+            <div className="rounded-xl border border-border bg-background/55 p-4">
+              <div className="text-xs font-semibold">Câmeras fixas continuam normais</div>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Ao Vivo e gravação não dependem do suporte a PTZ.</p>
+            </div>
+          </div>
+          <div className="flex justify-center gap-2 border-t border-border px-8 py-4">
+            <button type="button" onClick={() => setLocation('/live')} className="btn btn-secondary btn-sm">Voltar ao Ao Vivo</button>
+            {userRole !== 'viewer' && (
+              <button type="button" onClick={() => setLocation('/cameras')} className="btn btn-primary btn-sm">Ver câmeras</button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -279,18 +314,21 @@ export default function PTZPage() {
   return (
       <div className="flex h-full min-h-0 flex-col">
       <div className="toolbar flex-wrap">
-        <Select value={selectedCamId} onValueChange={setSelectedCamId}>
-          <SelectTrigger className="h-10 w-[min(100%,340px)] text-xs">
-            <SelectValue placeholder="Selecione uma câmera PTZ" />
-          </SelectTrigger>
-          <SelectContent>
-            {ptzCameras.map((camera) => (
-              <SelectItem key={camera.id} value={camera.id} className="text-xs font-mono">
-                {camera.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="w-[min(100%,340px)]">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Câmera compatível</div>
+          <Select value={selectedCamId} onValueChange={setSelectedCamId}>
+            <SelectTrigger className="h-10 w-full text-xs">
+              <SelectValue placeholder="Selecione uma câmera PTZ" />
+            </SelectTrigger>
+            <SelectContent>
+              {ptzCameras.map((camera) => (
+                <SelectItem key={camera.id} value={camera.id} className="text-xs">
+                  {camera.name} · {camera.isOnline ? 'online' : 'offline'}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
         <div className="w-full max-w-52 rounded-xl border border-border bg-background/65 px-3 py-2 sm:w-52">
           <div className="mb-2 flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.18em] text-[hsl(var(--muted-foreground))]">
@@ -320,6 +358,12 @@ export default function PTZPage() {
           Verificar
         </button>
       </div>
+
+      {requestedCameraUnavailable && (
+        <div className="mx-4 mt-4 rounded-lg border border-[hsl(var(--status-warning)_/_0.35)] bg-[hsl(var(--status-warning)_/_0.10)] px-4 py-3 text-xs text-[hsl(var(--status-warning))] md:mx-5">
+          A câmera aberta anteriormente não está configurada para PTZ. Selecionamos uma câmera compatível disponível.
+        </div>
+      )}
 
       <div className="grid flex-1 min-h-0 gap-4 p-4 md:p-5 xl:grid-cols-[minmax(0,1.35fr)_420px]">
         <div className="flex min-h-0 flex-col gap-4">
@@ -385,7 +429,7 @@ export default function PTZPage() {
 
               <div className="rounded-xl border border-white/10 bg-black/45 px-3 py-2 text-right font-mono text-[10px] text-white/72 backdrop-blur-sm">
                 <div>{selectedCam?.zone}</div>
-                <div className="mt-1 text-white/45">Speed {speed}/10</div>
+                <div className="mt-1 text-white/45">Velocidade {speed}/10</div>
               </div>
             </div>
           </div>
@@ -435,7 +479,7 @@ export default function PTZPage() {
                 className="inline-flex h-9 items-center gap-2 rounded-xl border border-border px-3 text-xs text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                Stop
+                Parar
               </button>
               <button
                 type="button"
@@ -446,26 +490,26 @@ export default function PTZPage() {
                   try {
                     await sendPtzCommand(selectedCam.id, { action: 'home' });
                     setCommandState('ok');
-                    setLastCommand(`Home position executada em ${selectedCam.name}`);
+                    setLastCommand(`Posição inicial executada em ${selectedCam.name}`);
                   } catch (error) {
-                    const message = error instanceof Error ? error.message : 'Falha ao enviar home position.';
+                    const message = error instanceof Error ? error.message : 'Falha ao enviar a posição inicial.';
                     setCommandState('error');
                     setLastError(message);
-                    setLastCommand(`Falha no home em ${selectedCam.name}`);
+                    setLastCommand(`Falha na posição inicial em ${selectedCam.name}`);
                   }
                 }}
                 disabled={controlsDisabled}
                 className="inline-flex h-9 items-center gap-2 rounded-xl border border-border px-3 text-xs text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--accent))] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <Camera className="h-3.5 w-3.5" />
-                Home
+                Posição inicial
               </button>
             </div>
 
             <div className="mx-auto grid w-fit grid-cols-3 gap-2">
               <div />
               <ControlButton
-                label="Up"
+                label="Mover para cima"
                 icon={<ArrowUp className="h-4 w-4" />}
                 active={activeDirection === 'Up'}
                 disabled={controlsDisabled}
@@ -474,7 +518,7 @@ export default function PTZPage() {
               />
               <div />
               <ControlButton
-                label="Left"
+                label="Mover para a esquerda"
                 icon={<ArrowLeft className="h-4 w-4" />}
                 active={activeDirection === 'Left'}
                 disabled={controlsDisabled}
@@ -491,7 +535,7 @@ export default function PTZPage() {
                 <Crosshair className="h-4 w-4" />
               </button>
               <ControlButton
-                label="Right"
+                label="Mover para a direita"
                 icon={<ArrowRight className="h-4 w-4" />}
                 active={activeDirection === 'Right'}
                 disabled={controlsDisabled}
@@ -500,7 +544,7 @@ export default function PTZPage() {
               />
               <div />
               <ControlButton
-                label="Down"
+                label="Mover para baixo"
                 icon={<ArrowDown className="h-4 w-4" />}
                 active={activeDirection === 'Down'}
                 disabled={controlsDisabled}
@@ -512,7 +556,7 @@ export default function PTZPage() {
 
             <div className="mt-5 grid grid-cols-2 gap-2">
               <ControlButton
-                label="Zoom In"
+                label="Aproximar zoom"
                 icon={<ZoomIn className="h-4 w-4" />}
                 active={activeDirection === 'ZoomIn'}
                 disabled={controlsDisabled}
@@ -520,7 +564,7 @@ export default function PTZPage() {
                 onStop={() => void stopMove()}
               />
               <ControlButton
-                label="Zoom Out"
+                label="Afastar zoom"
                 icon={<ZoomOut className="h-4 w-4" />}
                 active={activeDirection === 'ZoomOut'}
                 disabled={controlsDisabled}

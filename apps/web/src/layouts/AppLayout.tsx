@@ -10,6 +10,7 @@ import { Kbd } from '@/components/ui/kbd';
 import { useThemeStore } from '../store/themeStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
 import { useAuthStore } from '../store/authStore';
+import { PRODUCT_NAME } from '../lib/product-brand';
 
 const PAGE_TITLES: Record<string, string> = {
   '/live':          'Ao Vivo',
@@ -32,7 +33,7 @@ function resolvePageTitle(location: string) {
   if (PAGE_TITLES[location]) return PAGE_TITLES[location];
   if (location.startsWith('/cameras/')) return 'Detalhe da Câmera';
   const base = '/' + (location.split('/')[1] ?? '');
-  return PAGE_TITLES[base] ?? 'DRAC VMS';
+  return PAGE_TITLES[base] ?? PRODUCT_NAME;
 }
 
 type ShortcutRole = 'viewer' | 'operator' | 'admin';

@@ -694,7 +694,7 @@ export default function ConfiguracoesPage() {
 
                 {activeSection === 'branding' && (
                   <>
-                    <SectionTitle eyebrow="Aparência" title="Identidade visual do aplicativo" description="Configure aqui a marca exclusiva do aplicativo móvel. O painel web mantém a identidade visual própria do DRAC." />
+                    <SectionTitle eyebrow="Aparência" title="Identidade visual do aplicativo" description="Configure aqui a marca exclusiva do aplicativo móvel. O painel web mantém a identidade visual do AjustCam." />
                     <Card className="overflow-hidden">
                       <SettingRow label="Logo do app" description="PNG, JPG ou SVG até 400 KB. Aparece no login e na identidade do aplicativo; não altera o painel web.">
                         <div className="flex items-center gap-3 md:justify-end">

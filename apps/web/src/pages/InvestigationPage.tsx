@@ -206,7 +206,11 @@ export default function InvestigationPage() {
 
   const currentInvestigation = investigations.find((item) => item.id === investigationId) ?? null;
 
-  const trackEvents = useMemo(() => {
+  // O TOTAL é separado do que está na tela. O cabeçalho anunciava o
+  // comprimento JÁ CORTADO por slice(40) como se fosse o total: "40
+  // ocorrências encontradas" com 900 existentes é afirmação factualmente
+  // errada — e numa investigação isso pode ir a juízo.
+  const trackEventsTotal = useMemo(() => {
     const q = query.trim().toLowerCase();
     return events
       .filter((event) => selectedCams.includes(event.cameraId))
@@ -215,9 +219,10 @@ export default function InvestigationPage() {
         if (ts < new Date(timeStart).getTime() || ts > new Date(timeEnd).getTime()) return false;
         if (!q) return true;
         return event.cameraName.toLowerCase().includes(q) || event.type.toLowerCase().includes(q) || event.description.toLowerCase().includes(q);
-      })
-      .slice(0, 40);
+      });
   }, [events, query, selectedCams, timeEnd, timeStart]);
+
+  const trackEvents = useMemo(() => trackEventsTotal.slice(0, 40), [trackEventsTotal]);
 
   const totalMs = new Date(timeEnd).getTime() - new Date(timeStart).getTime();
 
@@ -611,7 +616,9 @@ export default function InvestigationPage() {
         <div className="w-72 shrink-0 border-r border-border bg-card">
           <div className="border-b border-border px-4 py-3">
             <div className="text-xs font-semibold">Eventos no intervalo</div>
-            <div className="mt-0.5 text-[10px] text-[hsl(var(--muted-foreground))]">{trackEvents.length} ocorrências encontradas</div>
+            <div className="mt-0.5 text-[10px] text-[hsl(var(--muted-foreground))]">{trackEventsTotal.length > trackEvents.length
+                ? `mostrando ${trackEvents.length} de ${trackEventsTotal.length} ocorrências`
+                : `${trackEventsTotal.length} ocorrências encontradas`}</div>
           </div>
           <div className="divide-y divide-border overflow-y-auto">
             {trackEvents.map((event) => (

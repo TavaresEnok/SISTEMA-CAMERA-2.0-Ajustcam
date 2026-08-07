@@ -5,10 +5,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { cn } from '@/lib/utils';
 import { useVmsDataStore } from '../store/vmsDataStore';
 
-function resultTone() {
-  return 'border-[hsl(var(--status-online)_/_0.3)] bg-[hsl(var(--status-online)_/_0.12)] text-[hsl(var(--status-online))]';
-}
-
 function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -100,7 +96,11 @@ export default function AuditLogsPage() {
           <table className="w-full text-sm">
             <thead className="bg-background/70">
               <tr>
-                {['Data/hora', 'Usuário', 'Ação', 'Recurso', 'IP', 'Resultado'].map((heading) => (
+                {/* Sem coluna "Resultado": o modelo AuditLog do banco não guarda
+                    resultado nenhum, e a tela carimbava o literal "Sucesso" em
+                    TODA linha — auditoria que afirma sucesso numa ação que
+                    falhou é pior que auditoria nenhuma. */}
+                {['Data/hora', 'Usuário', 'Ação', 'Recurso', 'IP'].map((heading) => (
                   <th key={heading} className="px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                     {heading}
                   </th>
@@ -117,14 +117,11 @@ export default function AuditLogsPage() {
                     {log.entityType}{log.entityId ? ` / ${log.entityId}` : ''}
                   </td>
                   <td className="px-4 py-3 font-mono text-[11px] text-muted-foreground">{log.ipAddress ?? '-'}</td>
-                  <td className="px-4 py-3">
-                    <Badge variant="outline" className={cn('text-[10px]', resultTone())}>Sucesso</Badge>
-                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                  <td colSpan={5} className="px-4 py-12 text-center text-sm text-muted-foreground">
                     Nenhum registro corresponde aos filtros atuais.
                   </td>
                 </tr>
