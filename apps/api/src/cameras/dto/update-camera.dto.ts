@@ -2,7 +2,7 @@ import { ArrayMaxSize, IsArray, IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsStri
 import { Type } from 'class-transformer';
 import { DetectionZoneDto } from './detection-zone.dto';
 
-const RECORDING_MODES = ['continuous', 'motion', 'schedule', 'manual'] as const;
+const RECORDING_MODES = ['continuous', 'motion', 'manual'] as const;
 const VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
 const STREAM_VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
 const RTSP_TRANSPORTS = ['tcp', 'udp'] as const;

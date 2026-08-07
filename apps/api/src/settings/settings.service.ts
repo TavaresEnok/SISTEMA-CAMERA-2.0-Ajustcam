@@ -57,7 +57,7 @@ const BRANDING_KEYS = [
 // Apenas configurações que produzem efeito real no sistema são expostas aqui.
 // Cada chave abaixo é lida por algum subsistema (ver SettingsService.* getters).
 const SETTING_SPECS: Record<string, SettingSpec> = {
-  facilityName: { type: 'string', default: 'DRAC VMS' },
+  facilityName: { type: 'string', default: 'AjustCam' },
   defaultRetentionDays: { type: 'number', default: 7, min: 1, max: 365 },
   autoCleanupEnabled: { type: 'boolean', default: true },
   sessionTimeoutMinutes: { type: 'number', default: 480, min: 5, max: 1440 },

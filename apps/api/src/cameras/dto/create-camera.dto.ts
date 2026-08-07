@@ -1,7 +1,10 @@
 import { IsBoolean, IsIP, IsIn, IsInt, IsOptional, IsString, Max, Min, ValidateIf } from 'class-validator';
 
 const SOURCE_MODES = ['rtsp_pull', 'rtmp_push'] as const;
-const RECORDING_MODES = ['continuous', 'motion', 'schedule', 'manual'] as const;
+// Agenda não é aceita enquanto não houver persistência de janelas, fuso e
+// executor de start/stop. Aceitar apenas o rótulo criava câmeras que pareciam
+// configuradas, mas nunca eram iniciadas por nenhum processo.
+const RECORDING_MODES = ['continuous', 'motion', 'manual'] as const;
 const VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
 const STREAM_VIDEO_CODECS = ['original', 'h264', 'h265', 'hevc', 'mjpeg'] as const;
 const RTSP_TRANSPORTS = ['tcp', 'udp'] as const;

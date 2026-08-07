@@ -13,6 +13,8 @@ import { Prisma, RecordingSource, type Camera } from '@prisma/client';
 import { type Queue } from 'bullmq';
 import { execFile, spawnSync, type ChildProcessByStdio } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { planejarRotacao } from './helpers/rotacao-por-camera.helper';
+import { ensureFileUnderRoot } from './helpers/safe-file.helper';
 import { open, rename, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { type Readable } from 'stream';
@@ -359,10 +361,41 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
       if (!critical) return;
 
       const activeCameraIds = [...this.active.keys()];
+
+      // ── ROTACIONAR ANTES DE PARAR ─────────────────────────────────────────
+      //
+      // Parar de gravar era a PRIMEIRA reação a disco cheio, e o guardião que
+      // libera espaço só roda de HORA em hora: entre um e outro havia uma
+      // janela em que a instalação simplesmente não registrava nada. Medido em
+      // produção: 100 paradas em 2 horas, com ZERO câmeras gravando.
+      //
+      // Câmera de segurança é um ANEL: quando falta espaço, a gravação nova
+      // sobrescreve a MAIS ANTIGA DA MESMA CÂMERA — e segue gravando. Parar só
+      // se sobrar câmera sem absolutamente nada próprio para rotacionar.
+      const liberou = await this.rotacionarParaLiberarEspaco(activeCameraIds, freeBytes).catch((error) => {
+        this.logger.error(`Falha na rotação por câmera: ${(error as Error).message}`);
+        return 0;
+      });
+
+      if (liberou > 0) {
+        const depois = await this.getStorageUsage();
+        const aindaCritico =
+          depois.freeBytes < this.minFreeBytes ||
+          depois.freePercent < this.minFreePercent ||
+          (Number.isFinite(maxUsedPercent) && depois.usedPercent >= maxUsedPercent);
+        this.logger.warn(
+          `Rotação por câmera liberou ${Math.round(liberou / (1024 * 1024))}MB — gravação CONTINUA `
+          + `(uso ${usedPercent.toFixed(1)}% → ${depois.usedPercent.toFixed(1)}%).`,
+        );
+        if (!aindaCritico) return;
+      }
+
+      // A rotação não deu conta (câmera sem histórico próprio, ou o espaço é de
+      // outra coisa que não gravação). Aí sim, suspender é o menor dos danos.
       this.logger.error(
         `Guarda de disco parou ${activeCameraIds.length} gravacao(oes): usado=${usedPercent.toFixed(2)}%, livre=${Math.round(
           freeBytes / (1024 * 1024),
-        )}MB.`,
+        )}MB. A rotação por câmera não encontrou o que liberar.`,
       );
 
       for (const cameraId of activeCameraIds) {
@@ -373,6 +406,72 @@ export class RecordingProcessManagerService implements OnModuleInit, OnApplicati
     } catch (error) {
       this.logger.warn(`Falha ao executar guarda de disco de gravacao: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Libera espaço rotacionando o histórico de CADA câmera.
+   *
+   * Regra do anel: a gravação nova sobrescreve a mais antiga DA MESMA CÂMERA.
+   * Nenhuma perde histórico por causa da vizinha — antes o guardião apagava a
+   * mais antiga do sistema inteiro, então a câmera movimentada empurrava para
+   * fora a imagem de quem grava pouco.
+   *
+   * Devolve os bytes efetivamente liberados. Gravação com hold de investigação
+   * e a que só existe na nuvem nunca entram (apagar a segunda não libera disco
+   * nenhum e destruiria a única cópia).
+   */
+  private async rotacionarParaLiberarEspaco(camerasAtivas: string[], freeBytes: number): Promise<number> {
+    // Meta: voltar para a folga mínima com uma margem, para não ficar
+    // rotacionando a cada ciclo por causa de alguns megabytes.
+    const alvo = Math.max(this.minFreeBytes * 1.25, 512 * 1024 * 1024);
+    const faltam = Math.max(0, alvo - freeBytes);
+    if (faltam <= 0) return 0;
+
+    const holds = await this.prisma.investigationItem
+      .findMany({ where: { recordingId: { not: null } }, select: { recordingId: true } })
+      .catch(() => [] as Array<{ recordingId: string | null }>);
+    const protegidas = new Set(holds.map((h) => h.recordingId).filter((id): id is string => Boolean(id)));
+
+    // Só o que ocupa disco AGORA: `localDeletedAt: null`.
+    const candidatas = await this.prisma.recording.findMany({
+      where: { localDeletedAt: null, endedAt: { not: null } },
+      select: { id: true, cameraId: true, startedAt: true, sizeBytes: true, filePath: true },
+      orderBy: { startedAt: 'asc' },
+      take: 5000,
+    });
+    if (!candidatas.length) return 0;
+
+    const plano = planejarRotacao(
+      candidatas.map((c) => ({ ...c, protegida: protegidas.has(c.id) })),
+      faltam,
+      camerasAtivas,
+    );
+    if (!plano.aApagar.length) return 0;
+
+    let liberados = 0;
+    for (const alvoDaVez of plano.aApagar) {
+      const original = candidatas.find((c) => c.id === alvoDaVez.id);
+      if (!original) continue;
+      try {
+        const caminho = ensureFileUnderRoot(this.recordingsRoot, original.filePath);
+        let tamanho = 0;
+        if (existsSync(caminho)) {
+          tamanho = statSync(caminho).size;
+          await unlink(caminho);
+        }
+        await this.prisma.recording.delete({ where: { id: original.id } }).catch(() => undefined);
+        liberados += tamanho;
+      } catch (error) {
+        this.logger.warn(`Rotação: falha ao apagar recording=${original.id}: ${(error as Error).message}`);
+      }
+    }
+
+    if (plano.camerasSemFolga.length) {
+      this.logger.warn(
+        `Rotação: ${plano.camerasSemFolga.length} câmera(s) gravando sem histórico próprio para rotacionar.`,
+      );
+    }
+    return liberados;
   }
 
   /**
