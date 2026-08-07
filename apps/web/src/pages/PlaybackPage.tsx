@@ -4,6 +4,7 @@ import { useLocation } from 'wouter';
 import { Camera as CameraIcon, ChevronLeft, ChevronRight, Download, FastForward, FolderArchive, LoaderCircle, Maximize2, Minimize2, Pause, Play, Scissors, SkipBack, SkipForward, StepBack, StepForward, VideoOff, Volume2, VolumeX } from 'lucide-react';
 import { addMinutes, format, startOfDay } from 'date-fns';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { SeletorDeCamera } from '../components/SeletorDeCamera';
 import {
   Dialog,
   DialogContent,
@@ -2949,18 +2950,14 @@ export default function PlaybackPage() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto xl:overflow-hidden">
       <div className="toolbar">
-        <Select value={selectedCamId} onValueChange={setSelectedCamId}>
-          <SelectTrigger className="h-9 w-[min(100%,300px)] text-xs">
-            <SelectValue placeholder="Selecione uma câmera" />
-          </SelectTrigger>
-          <SelectContent className="max-h-64">
-            {cameras.map((camera) => (
-              <SelectItem key={camera.id} value={camera.id} className="text-xs">
-                {camera.code} — {camera.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <SeletorDeCamera
+          cameras={cameras}
+          value={selectedCamId}
+          onChange={setSelectedCamId}
+          placeholder="Selecione uma câmera"
+          className="w-[min(100%,300px)]"
+          vazio="Nenhuma câmera disponível para reprodução."
+        />
 
         <input
           type="date"

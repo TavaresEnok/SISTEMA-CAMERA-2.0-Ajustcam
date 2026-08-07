@@ -20,6 +20,11 @@ export interface Camera {
   storage: string;
   lastEvent?: string;
   ptzCapable: boolean;
+  /** Estado BRUTO da sonda: true/false = respondido, null = ainda não sondada
+   *  (câmera offline, tipicamente). `ptzCapable` colapsa null em false para
+   *  não oferecer controle incerto; este campo preserva a diferença, que é o
+   *  que permite explicar ao operador por que a lista está vazia. */
+  ptzDetectado: boolean | null;
   hasAudio: boolean;
   aiEnabled: boolean;
   alarmsEnabled: boolean;
@@ -312,6 +317,7 @@ function mapCameraItems(
       // oferecer controle que talvez não exista é melhor que oferecer e falhar.
       // A varredura resolve o null sozinha no próximo ciclo de saúde.
       ptzCapable: camera.ptzCapable === true,
+      ptzDetectado: camera.ptzCapable === true ? true : camera.ptzCapable === false ? false : null,
       hasAudio: Boolean(camera.audioEnabled),
       aiEnabled: camera.aiEnabled !== false,
       alarmsEnabled: camera.alarmsEnabled !== false,

@@ -15,7 +15,7 @@ import {
   ZoomOut,
   ExternalLink,
 } from 'lucide-react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { SeletorDeCamera } from '../components/SeletorDeCamera';
 import { Slider } from '@/components/ui/slider';
 import { toast } from '../hooks/use-toast';
 import { LiveStreamPlayer } from '../components/LiveStreamPlayer';
@@ -116,6 +116,15 @@ export default function PTZPage() {
     () => cameras
       .filter((camera) => camera.enabled && camera.ptzCapable)
       .sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || a.name.localeCompare(b.name, 'pt-BR')),
+    [cameras],
+  );
+  // Câmeras que o sistema AINDA NÃO conseguiu perguntar — quase sempre porque
+  // estavam offline quando a varredura passou. Elas NÃO são "sem PTZ": a sonda
+  // se recusa a carimbar isso por falta de resposta, e volta a tentar quando a
+  // câmera reaparecer. Sem dizer isto na tela, quem tem uma PTZ fora do ar vê
+  // "nenhuma câmera compatível" e conclui que o sistema não a reconhece.
+  const aguardandoDeteccao = useMemo(
+    () => cameras.filter((camera) => camera.enabled && camera.ptzDetectado === null),
     [cameras],
   );
   const [selectedCamId, setSelectedCamId] = useState('');
@@ -285,10 +294,21 @@ export default function PTZPage() {
             <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.10)] shadow-[0_12px_32px_hsl(var(--primary)_/_0.12)]">
               <Crosshair className="h-7 w-7 text-[hsl(var(--primary))]" />
             </div>
-            <h2 className="text-lg font-semibold">Nenhuma câmera compatível com PTZ</h2>
+            <h2 className="text-lg font-semibold">Nenhuma câmera com PTZ detectado</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">
-              O controle aparece somente para câmeras ativas configuradas com perfil ONVIF de movimentação.
+              O sistema pergunta a cada câmera se ela aceita comandos de movimento e guarda a resposta.
+              Só aparecem aqui as que responderam que sim.
             </p>
+            {aguardandoDeteccao.length > 0 && (
+              <p className="mx-auto mt-3 max-w-md rounded-xl border border-border bg-background/55 px-4 py-3 text-[12px] leading-relaxed text-[hsl(var(--muted-foreground))]">
+                <strong className="font-medium text-foreground">
+                  {aguardandoDeteccao.length} câmera(s) ainda não puderam ser verificadas
+                </strong>{' '}
+                porque estão fora do ar: {aguardandoDeteccao.slice(0, 4).map((c) => c.name).join(', ')}
+                {aguardandoDeteccao.length > 4 ? ` e mais ${aguardandoDeteccao.length - 4}` : ''}.
+                A detecção acontece sozinha assim que elas voltarem.
+              </p>
+            )}
           </div>
           <div className="grid gap-3 px-8 py-6 text-left sm:grid-cols-2">
             <div className="rounded-xl border border-border bg-background/55 p-4">
@@ -316,18 +336,14 @@ export default function PTZPage() {
       <div className="toolbar flex-wrap">
         <div className="w-[min(100%,340px)]">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Câmera compatível</div>
-          <Select value={selectedCamId} onValueChange={setSelectedCamId}>
-            <SelectTrigger className="h-10 w-full text-xs">
-              <SelectValue placeholder="Selecione uma câmera PTZ" />
-            </SelectTrigger>
-            <SelectContent>
-              {ptzCameras.map((camera) => (
-                <SelectItem key={camera.id} value={camera.id} className="text-xs">
-                  {camera.name} · {camera.isOnline ? 'online' : 'offline'}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SeletorDeCamera
+            cameras={ptzCameras}
+            value={selectedCamId}
+            onChange={setSelectedCamId}
+            placeholder="Selecione uma câmera PTZ"
+            className="h-10 w-full"
+            vazio="Nenhuma câmera com PTZ detectado."
+          />
         </div>
 
         <div className="w-full max-w-52 rounded-xl border border-border bg-background/65 px-3 py-2 sm:w-52">

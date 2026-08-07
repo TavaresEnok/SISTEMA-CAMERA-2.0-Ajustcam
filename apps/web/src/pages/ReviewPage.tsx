@@ -3,6 +3,7 @@ import axios from 'axios';
 import { useLocation } from 'wouter';
 import { Check, Filter, LoaderCircle, User, Car, Eye, EyeOff, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { SeletorDeCamera } from '../components/SeletorDeCamera';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
 import { useVmsDataStore } from '../store/vmsDataStore';
@@ -172,13 +173,14 @@ export default function ReviewPage() {
 
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
         <Filter className="h-3.5 w-3.5 text-[hsl(var(--muted-foreground))]" />
-        <Select value={cameraId} onValueChange={setCameraId}>
-          <SelectTrigger className="h-8 w-[min(100%,220px)] text-xs"><SelectValue placeholder="Câmera" /></SelectTrigger>
-          <SelectContent className="max-h-64">
-            <SelectItem value="__all__" className="text-xs">Todas as câmeras</SelectItem>
-            {cameras.map((c) => <SelectItem key={c.id} value={c.id} className="text-xs">{c.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <SeletorDeCamera
+          cameras={cameras}
+          value={cameraId}
+          onChange={setCameraId}
+          opcaoTodas={{ valor: '__all__', rotulo: 'Todas as câmeras' }}
+          placeholder="Câmera"
+          className="w-[min(100%,220px)] h-8"
+        />
         <Select value={label} onValueChange={setLabel}>
           <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="Objeto" /></SelectTrigger>
           <SelectContent>

@@ -51,7 +51,12 @@ test('interfaces de câmera não oferecem agenda sem executor', () => {
 test('PTZ limita a seleção a câmeras ativas e orienta quando não há compatível', () => {
   const ptz = read('src/pages/PTZPage.tsx');
   assert.match(ptz, /camera\.enabled && camera\.ptzCapable/);
-  assert.match(ptz, /Nenhuma câmera compatível com PTZ/);
+  // Texto mudou junto com o modelo: a capacidade passou a ser SONDADA, e o
+  // estado vazio agora distingue "sondada e não tem" de "ainda não deu para
+  // perguntar" (câmera offline). A regra guardada é a mesma — a tela orienta
+  // em vez de só dizer que está vazia.
+  assert.match(ptz, /Nenhuma câmera com PTZ detectado/);
+  assert.match(ptz, /ainda não puderam ser verificadas/);
   assert.match(ptz, /Câmera compatível/);
 });
 
