@@ -1,6 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { Job } from 'bullmq';
 import { AlarmStatus, CameraStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -24,8 +25,31 @@ export class CameraHealthCheckProcessor extends WorkerHost {
     private readonly recordingManager: RecordingProcessManagerService,
     private readonly streamService: FfmpegMjpegService,
     private readonly alarmsService: AlarmsService,
+    private readonly moduleRef: ModuleRef,
   ) {
     super();
+  }
+
+  /**
+   * Varredura de PTZ das câmeras cuja capacidade ainda é desconhecida.
+   *
+   * Fecha o terceiro caso: nem cadastro novo, nem volta de offline — a câmera
+   * que já estava cadastrada antes de tudo isto existir, com `ptzCapable` nulo.
+   * Roda em lote pequeno a cada ciclo e some sozinha quando não sobra ninguém.
+   *
+   * Best-effort e isolado: capacidade de PTZ jamais pode derrubar o
+   * health-check, que é o que mantém a gravação viva.
+   */
+  private async varrerCapacidadePtz() {
+    try {
+      const { PtzCapabilityService } = await import('../../ptz/ptz-capability.service');
+      const servico = this.moduleRef.get(PtzCapabilityService, { strict: false });
+      await servico.varrerDesconhecidas();
+    } catch (erro) {
+      this.logger.debug(
+        `Varredura de PTZ não executou: ${erro instanceof Error ? erro.message : String(erro)}`,
+      );
+    }
   }
 
   async process(job: Job<any>): Promise<void> {
@@ -115,6 +139,7 @@ export class CameraHealthCheckProcessor extends WorkerHost {
     await this.checkRecordingStaleness();
     await this.checkMotionDetectorHealth();
     await this.checkLiveStreamHealth();
+    await this.varrerCapacidadePtz();
     await this.alarmsService.resolveStaleMotionAlarms();
 
     const autoRemediationEnabled = this.configService.get<boolean>('healthAutoRemediationEnabled') ?? true;

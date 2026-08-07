@@ -110,6 +110,16 @@ export class UpdateCameraDto {
   @IsBoolean()
   recordingEnabled?: boolean;
 
+  /**
+   * Override manual de PTZ (editor avançado). Definir aqui marca a origem como
+   * 'manual' e a sonda automática passa a NÃO tocar mais nesta câmera — é a
+   * saída para equipamento que a sonda não sabe ler. Mandar `null` devolve o
+   * controle ao automático.
+   */
+  @IsOptional()
+  @IsBoolean()
+  ptzCapable?: boolean | null;
+
   @IsOptional()
   @IsString()
   @IsIn(RECORDING_MODES)

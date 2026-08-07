@@ -70,16 +70,29 @@ enum RecordingSource {
 }
 
 model Camera {
-  id                     String       @id @default(uuid())
-  name                   String
-  ip                     String
-  rtspPort               Int          @default(554)
-  onvifPort              Int?
-  username               String
-  passwordEncrypted      String
-  rtspPath               String?
-  onvifPath              String?
-  onvifProfileToken      String?
+  id                String  @id @default(uuid())
+  name              String
+  ip                String
+  rtspPort          Int     @default(554)
+  onvifPort         Int?
+  username          String
+  passwordEncrypted String
+  rtspPath          String?
+  onvifPath         String?
+  onvifProfileToken String?
+
+  // ── CAPACIDADE PTZ (sondada, não adivinhada) ───────────────────────────────
+  // Antes disto o front DEDUZIA PTZ de "tem caminho ONVIF configurado"
+  // (vmsDataStore), o que marcava toda câmera ONVIF como móvel e enchia a tela
+  // de PTZ com câmera fixa. Agora é resultado de sonda real.
+  //   null  = ainda não sondada (não é "não tem")
+  //   true  = um endpoint aceitou comando PTZ
+  //   false = sondada e nenhum endpoint aceitou
+  ptzCapable             Boolean?
+  // 'auto' = veio da sonda | 'manual' = o operador decidiu. A sonda NUNCA
+  // sobrescreve 'manual' — é a saída para equipamento que ela não sabe ler.
+  ptzCapableSource       String?
+  ptzProbedAt            DateTime?
   channel                Int          @default(1)
   subtype                Int          @default(0)
   liveChannel            Int?
@@ -194,23 +207,23 @@ model Camera {
 /// nasce no ativo — sem copiar terabytes entre provedores nem janela de
 /// indisponibilidade.
 model CloudStorage {
-  id                   String   @id @default(uuid())
+  id                       String   @id @default(uuid())
   /// Nome para o operador reconhecer ("Eveo 1T", "Contabo 10T").
-  name                 String
-  provider             String   @default("s3")
-  endpoint             String
-  region               String   @default("us-east-1")
-  bucket               String
-  prefix               String   @default("")
-  accessKeyId          String
+  name                     String
+  provider                 String   @default("s3")
+  endpoint                 String
+  region                   String   @default("us-east-1")
+  bucket                   String
+  prefix                   String   @default("")
+  accessKeyId              String
   /// Cifrada com a mesma chave mestra das senhas de câmera (AES-256-GCM).
   secretAccessKeyEncrypted String
-  forcePathStyle       Boolean  @default(true)
+  forcePathStyle           Boolean  @default(true)
   /// SOMENTE UM ativo por instalação: é nele que toda gravação nova é escrita.
   /// Os demais ficam somente-leitura, servindo o acervo que já está neles.
-  isActive             Boolean  @default(false)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  isActive                 Boolean  @default(false)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
   recordings Recording[]
 
@@ -218,28 +231,28 @@ model CloudStorage {
 }
 
 model Recording {
-  id              String          @id @default(uuid())
-  cameraId        String
-  camera          Camera          @relation(fields: [cameraId], references: [id], onDelete: Cascade)
-  source          RecordingSource @default(UNKNOWN)
-  triggerMode     String          @default("unknown")
-  exportedClips   ExportedClip[]
-  startedAt       DateTime
-  endedAt         DateTime?
-  filePath        String
-  durationSeconds Int?
-  sizeBytes       BigInt?
+  id                String          @id @default(uuid())
+  cameraId          String
+  camera            Camera          @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  source            RecordingSource @default(UNKNOWN)
+  triggerMode       String          @default("unknown")
+  exportedClips     ExportedClip[]
+  startedAt         DateTime
+  endedAt           DateTime?
+  filePath          String
+  durationSeconds   Int?
+  sizeBytes         BigInt?
   // Retenção em dois níveis. Quantidade de eventos de movimento cobertos pelo
   // segmento: -1 = DESCONHECIDO (backfill, IA desligada, erro ao contar),
   // 0 = sem movimento, > 0 = quantidade de eventos. O DESCONHECIDO fica em
   // QUARENTENA: nunca expira no corte curto (ver retention.service.ts).
-  motionScore     Int             @default(-1)
+  motionScore       Int             @default(-1)
   // Camada de armazenamento. NULL em tudo = só local (estado de todo o acervo
   // anterior ao offload). `cloudUploadedAt` marca o upload CONFIRMADO, e só
   // depois dele o arquivo local pode ser removido — apagar antes perderia a
   // prova para sempre.
-  cloudKey        String?
-  cloudUploadedAt DateTime?
+  cloudKey          String?
+  cloudUploadedAt   DateTime?
   /// EM QUAL storage este objeto está.
   ///
   /// Existe porque uma instalação pode trocar de fornecedor de S3 sem perder o
@@ -250,9 +263,9 @@ model Recording {
   ///
   /// NULL = storage legado (a configuração única `cloud.storage`), para que
   /// instalações anteriores à migração continuem funcionando sem backfill.
-  cloudStorageId  String?
-  cloudStorage    CloudStorage? @relation(fields: [cloudStorageId], references: [id], onDelete: SetNull)
-  localDeletedAt  DateTime?
+  cloudStorageId    String?
+  cloudStorage      CloudStorage?   @relation(fields: [cloudStorageId], references: [id], onDelete: SetNull)
+  localDeletedAt    DateTime?
   // Vigilância do acervo REMOTO. `cloudVerifiedAt` = última vez que o objeto
   // foi conferido no bucket (HEAD). `cloudMissingSince` = o bucket respondeu
   // SAUDÁVEL e o objeto NÃO estava lá — apagado por fora do sistema. A linha
@@ -261,7 +274,7 @@ model Recording {
   // Bucket inteiro fora do ar NUNCA marca isto — indisponível não é apagado.
   cloudVerifiedAt   DateTime?
   cloudMissingSince DateTime?
-  createdAt       DateTime        @default(now())
+  createdAt         DateTime        @default(now())
 
   @@unique([filePath])
   @@index([cameraId, startedAt])
@@ -291,15 +304,15 @@ model ExportedClip {
 }
 
 model CameraEvent {
-  id         String   @id @default(uuid())
+  id         String    @id @default(uuid())
   cameraId   String
-  camera     Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  camera     Camera    @relation(fields: [cameraId], references: [id], onDelete: Cascade)
   type       String
   severity   String
   message    String
   metadata   Json?
   occurredAt DateTime
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
   /// Fila de REVISÃO: marcado quando um operador revê o evento. Null = não visto.
   reviewedAt DateTime?
 
@@ -398,7 +411,7 @@ model User {
   liveLayouts       LiveLayout[]
   authSessions      AuthSession[]
   eventReviews      UserEventReview[]
-  ownedCameras      Camera[]        @relation("CameraOwner")
+  ownedCameras      Camera[]           @relation("CameraOwner")
 }
 
 model AuthSession {
@@ -576,27 +589,27 @@ model Area {
 }
 
 model CameraGroup {
-  id          String   @id @default(uuid())
-  name        String
-  description String?
-  isActive    Boolean  @default(true)
+  id                String            @id @default(uuid())
+  name              String
+  description       String?
+  isActive          Boolean           @default(true)
   /// Bloqueio comercial do grupo (ver GroupAccessStatus). Default ACTIVE: todo
   /// grupo existente continua exatamente como está após a migração.
-  accessStatus GroupAccessStatus @default(ACTIVE)
+  accessStatus      GroupAccessStatus @default(ACTIVE)
   /// Motivo mostrado ao cliente final quando o grupo está restrito/suspenso.
-  accessMessage String?
+  accessMessage     String?
   /// Cota de câmeras PRIVADAS que os usuários deste grupo podem cadastrar pelo
   /// app ("+ Adicionar câmera"). É o "acordado" com o cliente. 0 = não pode
   /// cadastrar câmera privada (padrão seguro: liberado só quando o admin define).
-  maxPrivateCameras Int  @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  maxPrivateCameras Int               @default(0)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   /// Retenção do GRUPO. Todo grupo nasce com um número — grupo sem valor
   /// deixaria o toggle "seguir o grupo" apontando para o nada.
-  retentionDays Int      @default(3)
-  cameras     Camera[]
-  permissions CameraPermission[]
+  retentionDays Int                @default(3)
+  cameras       Camera[]
+  permissions   CameraPermission[]
 
   @@index([name])
 }

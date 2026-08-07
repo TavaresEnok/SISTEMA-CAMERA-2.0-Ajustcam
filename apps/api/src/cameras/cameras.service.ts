@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { CameraStatus, CameraPermissionLevel } from '@prisma/client';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { createHash, randomBytes } from 'crypto';
@@ -155,7 +156,32 @@ export class CamerasService {
     private readonly cryptoService: CryptoService,
     private readonly portChecker: PortCheckerService,
     private readonly alarmsService: AlarmsService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  /**
+   * Dispara a sonda de PTZ sem travar quem chamou.
+   *
+   * Pega o serviço por ModuleRef porque o PtzModule já importa este módulo —
+   * injetar no construtor fecharia o ciclo. É best-effort de propósito: a
+   * capacidade PTZ não pode atrasar nem derrubar cadastro de câmera nem
+   * verificação de saúde. Quem falhar continua com `ptzCapable = null` e volta
+   * na próxima varredura.
+   */
+  private dispararSondaPtz(cameraId: string, motivo: string) {
+    void (async () => {
+      try {
+        const { PtzCapabilityService } = await import('../ptz/ptz-capability.service');
+        const servico = this.moduleRef.get(PtzCapabilityService, { strict: false });
+        const r = await servico.sondar(cameraId);
+        if (r.sondou) this.logger.debug(`Sonda de PTZ (${motivo}) camera=${cameraId} → ${r.ptzCapable}`);
+      } catch (erro) {
+        this.logger.debug(
+          `Sonda de PTZ (${motivo}) não executou camera=${cameraId}: ${erro instanceof Error ? erro.message : String(erro)}`,
+        );
+      }
+    })();
+  }
 
   private assertTestTargetAllowed(ip: string, port?: number | null): string {
     try {
@@ -258,6 +284,11 @@ export class CamerasService {
         lastSeenAt: new Date(),
       },
     });
+
+    // Pergunta à câmera se ela tem PTZ agora, no cadastro — em vez de deixar o
+    // front adivinhar depois. Não espera a resposta: cadastrar não pode demorar
+    // o tempo de uma sonda de rede.
+    this.dispararSondaPtz(camera.id, 'câmera cadastrada');
 
     return sanitizeCamera(camera);
   }
@@ -448,6 +479,14 @@ export class CamerasService {
         // Zonas: `undefined` preserva o que existe; array vazio LIMPA (volta a
         // monitorar a câmera inteira) — por isso a checagem explícita.
         ...(dto.detectionZones !== undefined ? { detectionZones: dto.detectionZones as any } : {}),
+        // PTZ manual: `undefined` não mexe; booleano marca origem 'manual' (e a
+        // sonda passa a respeitar); `null` devolve o controle ao automático,
+        // zerando também a data para a próxima varredura pegar a câmera.
+        ...(dto.ptzCapable !== undefined
+          ? dto.ptzCapable === null
+            ? { ptzCapable: null, ptzCapableSource: null, ptzProbedAt: null }
+            : { ptzCapable: dto.ptzCapable, ptzCapableSource: 'manual', ptzProbedAt: new Date() }
+          : {}),
       },
       include: { site: true, area: true, group: true },
     });
@@ -2173,6 +2212,11 @@ export class CamerasService {
       });
 
       if (previousStatus !== CameraStatus.ONLINE && status === CameraStatus.ONLINE) {
+        // A câmera que tem PTZ costuma estar offline justamente quando foi
+        // cadastrada — foi o caso das NOC Cam-01..03. Este é o momento em que
+        // dá para perguntar a ela: acabou de responder. Não bloqueia a
+        // verificação de saúde, e a sonda ignora quem já foi sondada há pouco.
+        this.dispararSondaPtz(id, 'câmera voltou online');
         await this.registerEvent(
           id,
           'HEALTH_CAMERA_RECOVERED',

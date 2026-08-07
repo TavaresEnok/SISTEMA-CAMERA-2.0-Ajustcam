@@ -3,6 +3,7 @@ import { type Camera } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
 import { type PtzCommandDto } from './dto/ptz-command.dto';
+import { diagnosticarFalhaPtz } from './helpers/diagnostico-ptz.helper';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
 import { assertCameraTargetAllowed } from '../common/network/safe-url.helper';
@@ -577,9 +578,18 @@ export class OnvifPtzService {
       errors.push(`cgi-bin/ptz.cgi: ${proprietaryResult.message}`);
     }
 
+    // O operador recebe a CAUSA e o que fazer; o rastro técnico continua
+    // inteiro, só que num campo próprio (log e painel de diagnóstico), em vez
+    // de quatro tentativas concatenadas numa caixa vermelha na tela.
+    const diagnostico = diagnosticarFalhaPtz(errors);
+    this.logger.warn(
+      `PTZ falhou camera=${camera.id} causa=${diagnostico.causa}: ${errors.slice(0, 4).join(' | ')}`,
+    );
     return {
       ok: false,
-      message: `Nenhum endpoint PTZ aceitou o comando. Tentativas: ${errors.slice(0, 4).join(' | ')}`,
+      message: diagnostico.mensagem,
+      causa: diagnostico.causa,
+      detalhesTecnicos: diagnostico.detalhesTecnicos.slice(0, 6),
     };
   }
 

@@ -301,7 +301,17 @@ function mapCameraItems(
           ? `${camera.retentionDays ?? 7} dias de retenção`
           : 'Gravação desabilitada',
       lastEvent: lastEvent ?? previous?.lastEvent,
-      ptzCapable: Boolean(camera.onvifPath || camera.onvifProfileToken),
+      // PTZ vem SONDADO da API (Camera.ptzCapable), não deduzido aqui.
+      //
+      // Isto era `Boolean(camera.onvifPath || camera.onvifProfileToken)`: ou
+      // seja, "foi cadastrada por ONVIF" virava "tem PTZ", e a tela de controle
+      // enchia de câmera fixa enquanto a que tem PTZ de verdade ficava de fora
+      // por estar offline no cadastro.
+      //
+      // `null` na API significa "ainda não sondada", e aqui vira false — não
+      // oferecer controle que talvez não exista é melhor que oferecer e falhar.
+      // A varredura resolve o null sozinha no próximo ciclo de saúde.
+      ptzCapable: camera.ptzCapable === true,
       hasAudio: Boolean(camera.audioEnabled),
       aiEnabled: camera.aiEnabled !== false,
       alarmsEnabled: camera.alarmsEnabled !== false,

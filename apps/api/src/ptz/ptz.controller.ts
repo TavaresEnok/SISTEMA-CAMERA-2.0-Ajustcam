@@ -9,6 +9,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { type AuthUser } from '../common/types/auth-user.type';
 import { RequirePermission } from '../role-permissions/require-permission.decorator';
 import { OnvifPtzService } from './onvif-ptz.service';
+import { PtzCapabilityService } from './ptz-capability.service';
 import { PtzCommandDto } from './dto/ptz-command.dto';
 
 @Controller('ptz')
@@ -18,6 +19,7 @@ export class PtzController {
     private readonly ptzService: OnvifPtzService,
     private readonly accessControlService: AccessControlService,
     private readonly auditService: AuditService,
+    private readonly ptzCapability: PtzCapabilityService,
   ) {}
 
   @Roles(UserRole.OPERATOR)
@@ -99,6 +101,29 @@ export class PtzController {
     const result = await this.ptzService.diagnoseCamera(camera);
     await this.auditService.log(user.id, 'ptz.diagnostics', 'Camera', cameraId, { ok: result.ptzLikelyWorking }, req);
     return result;
+  }
+
+  /**
+   * Re-sonda a capacidade PTZ desta câmera, sob demanda.
+   *
+   * Existe porque as três vias automáticas (cadastro, volta de offline,
+   * varredura das desconhecidas) não cobrem "troquei o equipamento no mesmo
+   * cadastro" nem "corrigi a senha ONVIF agora". Respeita o override manual:
+   * quem marcou à mão continua mandando, e a resposta diz isso em vez de
+   * fingir que sondou.
+   */
+  @Roles(UserRole.OPERATOR)
+  @RequirePermission('ptzControl')
+  @Post(':cameraId/probe')
+  async probe(
+    @CurrentUser() user: AuthUser,
+    @Param('cameraId') cameraId: string,
+    @Req() req: Request,
+  ) {
+    await this.accessControlService.assertCanControlCamera(user, cameraId);
+    const resultado = await this.ptzCapability.sondar(cameraId, { forcar: true });
+    await this.auditService.log(user.id, 'ptz.probe', 'Camera', cameraId, resultado, req);
+    return resultado;
   }
 
   @Roles(UserRole.OPERATOR)
