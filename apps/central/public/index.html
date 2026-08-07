@@ -3842,17 +3842,25 @@
         const salvarAlertas = async (extra) => {
           feedbackAlertas('Salvando...');
           try {
-            const resposta = await api(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas`, {
-              method: 'PATCH',
+            // Mesmo padrão de toda ação da página: fetch + centralUrl +
+            // credentials. (A primeira versão disto chamava um helper `api()`
+            // que NÃO existe nesta página — o clique morria em ReferenceError.)
+            const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas`), {
+              method: 'PATCH', credentials: 'include',
+              headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ alertas: { ...lerFormAlertas(), ...(extra || {}) } }),
             });
+            const resposta = await res.json().catch(() => ({}));
             if (resposta?.error === 'email_invalido') {
               feedbackAlertas(`Endereço inválido: ${(resposta.invalidos || []).join(', ')}`, 'var(--red)');
               return false;
             }
-            if (resposta?.error) { feedbackAlertas(`Não foi possível salvar: ${resposta.error}`, 'var(--red)'); return false; }
+            if (!res.ok || resposta?.error) {
+              feedbackAlertas(`Não foi possível salvar: ${resposta?.error || `erro ${res.status}`}`, 'var(--red)');
+              return false;
+            }
             feedbackAlertas('Destinos salvos.', 'var(--green)');
-            await refresh();
+            await load();
             return true;
           } catch (erro) {
             feedbackAlertas(`Falha ao salvar: ${erro?.message || erro}`, 'var(--red)');
@@ -3869,10 +3877,13 @@
           feedbackAlertas('Salvando e enviando teste...');
           if (!(await salvarAlertas())) return;
           try {
-            const r = await api(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas/teste`, { method: 'POST' });
+            const res = await fetch(centralUrl(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas/teste`), {
+              method: 'POST', credentials: 'include',
+            });
+            const r = await res.json().catch(() => ({}));
             if (r?.ok) feedbackAlertas('Teste enviado — confira o Telegram e a caixa de e-mail.', 'var(--green)');
             else feedbackAlertas(`Teste falhou: ${(r?.resultados || []).filter((x) => !x.ok).map((x) => `${x.canal}: ${x.erro}`).join(' | ') || r?.error || 'sem detalhe'}`, 'var(--red)');
-            await refresh();
+            await load();
           } catch (erro) {
             feedbackAlertas(`Teste falhou: ${erro?.message || erro}`, 'var(--red)');
           }

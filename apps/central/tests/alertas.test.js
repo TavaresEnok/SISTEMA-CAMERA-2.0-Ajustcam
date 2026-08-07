@@ -179,3 +179,23 @@ test('recuperação avisa uma vez, e reincidência conta como novo', () => {
   const voltou = updateAlertHistory({ alertHistory: resolvido.history }, disco, '2026-08-07T16:03:00Z');
   assert.equal(voltou.novos.length, 1, 'problema que volta é informação, não repetição');
 });
+
+test('os manipuladores da aba usam os helpers que EXISTEM na página', () => {
+  // A primeira versão chamava `api()` e `refresh()` — nenhum dos dois existe
+  // no index.html (a página usa `fetch(centralUrl(...))` e `load()`). O clique
+  // em Salvar morria em ReferenceError, com a aba parecendo "não funcionar".
+  // Sintaxe válida não pega referência solta; este teste pega.
+  const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/index.html'), 'utf8');
+  const inicio = html.indexOf('// ── Alertas ──');
+  assert.ok(inicio > 0, 'bloco de handlers dos alertas não encontrado');
+  // Comentários citam o defeito antigo por nome — só o CÓDIGO importa aqui.
+  const bloco = html.slice(inicio, html.indexOf('#save-license', inicio))
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.ok(bloco.length > 100, 'bloco delimitado errado');
+
+  assert.doesNotMatch(bloco, /\bawait api\(|[^lU]\bapi\(/, 'chama api(), que não existe na página');
+  assert.doesNotMatch(bloco, /\brefresh\(\)/, 'chama refresh(), que não existe na página');
+  assert.match(bloco, /fetch\(centralUrl\(/, 'deve usar o padrão da página');
+  assert.match(bloco, /await load\(\)/, 'deve recarregar com load()');
+  assert.match(bloco, /credentials: 'include'/, 'sem credentials a sessão não vai junto');
+});

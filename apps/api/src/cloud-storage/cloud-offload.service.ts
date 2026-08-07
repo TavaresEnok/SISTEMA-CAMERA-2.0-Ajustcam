@@ -237,6 +237,45 @@ export class CloudOffloadService {
     this.running = true;
     try {
       const client = this.resolver.clienteDe(destino);
+
+      // ── DISJUNTOR: a credencial prova que funciona ANTES dos gigabytes ────
+      //
+      // Incidente de 07/08/2026: com a credencial do fornecedor revogada
+      // (InvalidAccessKeyId), cada ciclo tentava subir o lote inteiro — e o
+      // corpo de cada PUT (~27 MB) era transmitido ANTES de o 403 chegar.
+      // Pior: a regra de drenagem via a fila crescer (as falhas voltam para a
+      // fila) e ESCALAVA o lote até o teto. Resultado medido: ~174 uploads ×
+      // 27 MB a cada 5 minutos contra um bucket morto — a subida do servidor
+      // saturou, o vídeo ao vivo caiu a 0 fps e a API ficou inalcançável de
+      // fora, com 5.900 falhas em 3 horas no log.
+      //
+      // O mesmo portão que a vigilância do acervo já usava: um LIST de 1 chave
+      // (barato) decide se o storage está utilizável. Falhou — por auth, bucket
+      // inexistente ou rede — o ciclo é pulado POR INTEIRO: não sobe nada e,
+      // tão importante quanto, NÃO PODA nada. Com o bucket morto, a cópia
+      // local das gravações "já enviadas" é a única que existe de verdade;
+      // apagá-la com base num acervo remoto que ninguém consegue ler seria
+      // repetir o incidente Eveo por dentro.
+      //
+      // Custa uma requisição minúscula por ciclo, então não precisa de backoff:
+      // o log cai de ~2.000 linhas/hora para 12.
+      try {
+        await client.listObjectsPage('', null, 1);
+      } catch (error) {
+        const codigo = error instanceof S3Error ? error.code : 'Erro';
+        this.ultimaFalhaEm = new Date();
+        this.ultimaFalhaCodigo = codigo;
+        let pendentes = 0;
+        try {
+          pendentes = await this.prisma.recording.count({ where: { cloudKey: null, endedAt: { not: null } } });
+        } catch { /* diagnóstico; sem o número o aviso sai igual */ }
+        this.logger.warn(
+          `Nuvem reprovou no preflight (${codigo}) — ciclo pulado por inteiro: nada enviado, nada podado. `
+          + `${pendentes} gravação(ões) aguardam no disco e sobem quando o storage voltar a aceitar a credencial.`,
+        );
+        return { ...vazio, reason: `storage indisponível no preflight: ${codigo}` };
+      }
+
       const resultado = await this.uploadPending(client, cfg, storageId);
       const apagadas = await this.pruneUploaded(cfg);
       // Vigilância do acervo já enviado: barata (HEADs em lote, com portão de
