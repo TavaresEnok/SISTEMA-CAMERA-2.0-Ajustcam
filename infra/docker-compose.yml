@@ -711,11 +711,24 @@ services:
     # expõe ao mundo é o nginx (HTTPS) via /hls/ e /webrtc/. RTSP (8554) e API (9997) seguem
     # internos à rede docker (api/ai-service/gravação alcançam por rtsp://mediamtx / :9997).
     ports:
-      - "127.0.0.1:8888:8888"   # HLS  → nginx /hls/
-      - "127.0.0.1:8889:8889"   # WebRTC WHEP (signaling) → nginx /webrtc/
+      # ── AS MESMAS VARIÁVEIS DO OVERLAY DE PRODUÇÃO ──────────────────────
+      #
+      # Estas linhas precisam existir no BASE (recriar o container sem o
+      # override dropava as portas e derrubava o /live inteiro), mas fixar
+      # `127.0.0.1` aqui quebrava toda instalação de produção: o overlay
+      # publica `${DRAC_MEDIAMTX_*_BIND}`, o Compose SOMA as listas em vez de
+      # substituir, e um `.env` com 0.0.0.0 gerava DUAS ligações para a mesma
+      # porta (127.0.0.1:8888 e 0.0.0.0:8888). A segunda colide com a
+      # primeira e o MediaMTX nunca sobe — "address already in use" sobre uma
+      # porta que, medida no host, estava livre.
+      #
+      # Usando as mesmas variáveis, base e overlay produzem entradas
+      # IDÊNTICAS, que o Compose deduplica. O padrão continua sendo loopback.
+      - "${DRAC_MEDIAMTX_HLS_BIND:-127.0.0.1}:8888:8888"   # HLS  → nginx /hls/
+      - "${DRAC_MEDIAMTX_WEBRTC_HTTP_BIND:-127.0.0.1}:8889:8889"   # WebRTC WHEP → nginx /webrtc/
       # Mídia WebRTC (ICE/UDP): PRECISA ser pública — o browser conecta direto no IP anunciado
       # (mediamtx.yml webrtcAdditionalHosts) nesta porta. Sem ela o vídeo WebRTC não flui.
-      - "8189:8189/udp"
+      - "${DRAC_MEDIAMTX_WEBRTC_UDP_BIND:-0.0.0.0}:8189:8189/udp"
       # INGESTÃO RTMP: a porta pública 1935 é atendida pelo serviço `rtmp-ingest`
       # (SRS, tradutor de dialeto), NÃO diretamente pelo MediaMTX. Medido em
       # campo: câmera legada Adobe/FMLE exige `onFCPublish`, que o MediaMTX não
