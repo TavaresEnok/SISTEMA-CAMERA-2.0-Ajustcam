@@ -14,7 +14,15 @@ STATE_DIR="$INFRA_DIR/storage/.monitor"
 STATUS_FILE="$STATE_DIR/runtime-status.json"
 HASH_FILE="$STATE_DIR/runtime-status.sha256"
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/drac-runtime-watchdog.lock"
-mkdir -p "$STATE_DIR"
+# `storage` costuma pertencer ao root (os containers o criam), enquanto o
+# watchdog roda como usuário operador. Sem isto, o mkdir falha em silêncio e o
+# serviço morre em "No such file or directory" no primeiro disparo — foi o que
+# aconteceu na instalação do D-GUARDIAN.
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  sudo -n mkdir -p "$STATE_DIR" 2>/dev/null || true
+  sudo -n chown "$(id -u):$(id -g)" "$STATE_DIR" 2>/dev/null || true
+fi
+[ -w "$STATE_DIR" ] || { echo "drac-watchdog: sem permissão de escrita em $STATE_DIR" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
@@ -48,7 +56,13 @@ done
 # ── 2) SERVIÇOS HTTP internos ────────────────────────────────────────────────
 curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1 || issues+=("api:unreachable")
 curl -fsS --max-time 5 http://127.0.0.1:5173/ >/dev/null 2>&1 || issues+=("web:unreachable")
-curl -fsS --max-time 5 http://172.17.0.1:8780/health >/dev/null 2>&1 || issues+=("build-agent:unreachable")
+# O build-agent (geração de APK) só existe no servidor MESTRE. Cobrá-lo numa
+# instalação de cliente deixava o watchdog em "degraded" PARA SEMPRE, por um
+# serviço que não deveria estar lá — e um alerta que nunca apaga é um alerta
+# que o operador aprende a ignorar. Verifica só se foi declarado.
+if [ "${DRAC_BUILD_AGENT_EXPECTED:-false}" = "true" ]; then
+  curl -fsS --max-time 5 http://172.17.0.1:8780/health >/dev/null 2>&1 || issues+=("build-agent:unreachable")
+fi
 
 # ── 3) PIPELINE DE LIVE (a falha de hoje) + AUTO-CURA ────────────────────────
 # O nginx faz proxy de /hls/ e /webrtc/ para 127.0.0.1:8888/8889. Se o MediaMTX for

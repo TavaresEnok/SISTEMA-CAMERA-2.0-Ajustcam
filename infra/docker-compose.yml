@@ -58,7 +58,13 @@ services:
       # um JSON que virou legado somente-leitura quando o painel foi para modo
       # dual. O dado VIVO da Central não tinha cópia nenhuma, e os dois backups
       # pareciam estar rodando.
-      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-drac_central}
+      # Bancos ALÉM do da aplicação. Vazio por padrão: `drac_central` só existe
+      # no servidor MESTRE, e mantê-lo como default fazia toda instalação de
+      # cliente registrar "postgres_backup=FALHOU db=drac_central" a cada
+      # ciclo — um erro FALSO, perpétuo, que ensina o operador a ignorar falha
+      # de backup. É o pior efeito colateral possível num alerta de backup.
+      # O mestre declara explicitamente no seu infra/.env.
+      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-}
     volumes:
       - ./backups/postgres:/backups
     command: >
