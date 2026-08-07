@@ -22,6 +22,12 @@ interface Props {
   onOpenCamera: (cameraId: string) => void;
   /** Alarme vindo de um push tocado — a linha ganha destaque. */
   highlightedAlarmId?: string | null;
+  /** Permissão de tratar alarme (alarmAck). Sem ela, a lista é só leitura. */
+  canManage?: boolean;
+  onAck?: (alarm: Alarm) => void;
+  onResolve?: (alarm: Alarm) => void;
+  /** Falha ao carregar — distingue "sem eventos" de "não consegui perguntar". */
+  erro?: string | null;
 }
 
 const FILTERS = [
@@ -57,7 +63,7 @@ function dayLabel(iso: string): string {
   return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' }).toUpperCase();
 }
 
-export function EventsRedesign({ alarms, cameras, streamPosters, refreshing, onRefresh, onOpenCamera, highlightedAlarmId }: Props) {
+export function EventsRedesign({ alarms, cameras, streamPosters, refreshing, onRefresh, onOpenCamera, highlightedAlarmId, canManage, onAck, onResolve, erro }: Props) {
   const { theme } = useTheme();
   const [filter, setFilter] = useState<'all' | 'motion' | 'system'>('all');
   const s = makeStyles(theme);
@@ -131,14 +137,52 @@ export function EventsRedesign({ alarms, cameras, streamPosters, refreshing, onR
                       <Text style={s.rowTitle} numberOfLines={1}>{(() => { const k = labelForEvent(a.type); return k !== 'Evento detectado' ? k : (a.title || k); })()}</Text>
                       <Text style={s.rowSub} numberOfLines={1}>{(a.cameraName || cam?.name || 'Sistema')}</Text>
                     </View>
-                    <Text style={s.time}>{new Date(a.occurredAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</Text>
+                    <View style={{ alignItems: 'flex-end', gap: 6 }}>
+                      <Text style={s.time}>{new Date(a.occurredAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</Text>
+                      {/* RECONHECER/RESOLVER voltaram: o redesign não recebia
+                          `onAck`/`onResolve`, então o operador simplesmente não
+                          conseguia tratar alarme nenhum neste APK — perda de
+                          função silenciosa em relação ao app clássico. */}
+                      {canManage && a.status !== 'resolved' ? (
+                        <View style={{ flexDirection: 'row', gap: 6 }}>
+                          {a.status === 'open' ? (
+                            <TouchableOpacity
+                              accessibilityRole="button"
+                              accessibilityLabel={`Reconhecer alarme ${a.title || labelForEvent(a.type)}`}
+                              hitSlop={6}
+                              style={[s.acao, { borderColor: theme.border }]}
+                              onPress={(e) => { e.stopPropagation(); onAck?.(a); }}
+                            >
+                              <Text style={[s.acaoTexto, { color: theme.text }]}>Reconhecer</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                          <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolver alarme ${a.title || labelForEvent(a.type)}`}
+                            hitSlop={6}
+                            style={[s.acao, { borderColor: theme.accent }]}
+                            onPress={(e) => { e.stopPropagation(); onResolve?.(a); }}
+                          >
+                            <Text style={[s.acaoTexto, { color: theme.accent }]}>Resolver</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : null}
+                    </View>
                   </TouchableOpacity>
                 );
               })}
             </View>
           </View>
         ))}
-        {alarms.length === 0 ? <Text style={s.empty}>Nenhum evento ainda.</Text> : null}
+        {alarms.length === 0 && erro ? (
+          <View style={{ alignItems: 'center', paddingVertical: 24, gap: 8 }}>
+            <Text style={[s.empty, { color: theme.danger }]}>Não foi possível carregar os eventos.</Text>
+            <Text style={s.empty}>Isto é falha de comunicação — não quer dizer que não há eventos.</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Tentar carregar novamente" onPress={onRefresh} style={[s.acao, { borderColor: theme.border, paddingHorizontal: 14, paddingVertical: 8 }]}>
+              <Text style={[s.acaoTexto, { color: theme.text }]}>Tentar novamente</Text>
+            </TouchableOpacity>
+          </View>
+        ) : alarms.length === 0 ? <Text style={s.empty}>Nenhum evento ainda.</Text> : null}
         {truncated ? (
           <Text style={s.capNote}>Mostrando os 50 eventos mais recentes.</Text>
         ) : null}
@@ -149,6 +193,8 @@ export function EventsRedesign({ alarms, cameras, streamPosters, refreshing, onR
 
 function makeStyles(t: any) {
   return StyleSheet.create({
+    acao: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5 },
+    acaoTexto: { fontSize: 11, fontWeight: '700' },
     capNote: { fontFamily: UI, fontSize: 12, color: t.textMuted, textAlign: 'center', marginTop: 18 },
     root: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 132 },
     title: { fontFamily: TITLE, fontSize: 26, fontWeight: '800', color: t.text, letterSpacing: -0.5, marginBottom: 14 },

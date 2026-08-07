@@ -1807,6 +1807,10 @@ function AppInner() {
               refreshing={refreshing}
               onRefresh={() => { void reloadAlarms(); }}
               onOpenCamera={(cameraId) => { const c = cameras.find((x) => x.id === cameraId); if (c) openLive(c); }}
+              canManage={canManageAlarms}
+              onAck={(alarm) => { void ackAlarm(alarm); }}
+              onResolve={(alarm) => { void resolveAlarm(alarm); }}
+              erro={alarmesErro}
             />
           ) : (
           <AlarmsScreen

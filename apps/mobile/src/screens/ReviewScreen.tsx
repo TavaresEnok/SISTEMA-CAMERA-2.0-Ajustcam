@@ -8,6 +8,7 @@ import { ActivityIndicator, FlatList, Image, Modal, Pressable, RefreshControl, S
 import { Icon } from '../components/Icon';
 import { PlaybackVideo } from '../components/VideoPlayers';
 import { useTheme } from '../theme/ThemeProvider';
+import { isRedesign } from '../theme/redesign';
 import type { Camera } from '../types';
 import { areaLabel, tintFor } from '../utils/camera-view';
 import {

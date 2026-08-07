@@ -3,10 +3,11 @@
  */
 import { LinearGradient } from 'expo-linear-gradient';
 import Constants from 'expo-constants';
-import React, { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { AddCameraSheet } from '../components/AddCameraSheet';
 import { Icon, type IconName } from '../components/Icon';
+import { avaliarAtualizacao, baseDoApk, urlDoBuildInfo, type AtualizacaoDisponivel } from '../utils/atualizacao';
 import { useTheme } from '../theme/ThemeProvider';
 import type { User } from '../types';
 
@@ -42,6 +43,28 @@ export function SettingsScreen({
 }: SettingsScreenProps) {
   const { theme, themeMode, setThemeMode } = useTheme();
   const [addCameraOpen, setAddCameraOpen] = useState(false);
+  // Consulta silenciosa: falha (offline, manifesto ausente) não vira erro na
+  // tela — aviso de atualização que aparece por engano é pior que nenhum.
+  const [atualizacao, setAtualizacao] = useState<AtualizacaoDisponivel | null>(null);
+  useEffect(() => {
+    const slug = String(Constants.expoConfig?.extra?.client ?? 'default');
+    const base = baseDoApk(apiUrl);
+    if (!base) return;
+    let cancelado = false;
+    void (async () => {
+      try {
+        const resposta = await fetch(urlDoBuildInfo(base, slug));
+        if (!resposta.ok) return;
+        const info = await resposta.json();
+        const atual = Number(Constants.expoConfig?.android?.versionCode ?? NaN);
+        const novidade = avaliarAtualizacao(info, atual, base);
+        if (!cancelado) setAtualizacao(novidade);
+      } catch {
+        // silencioso de propósito
+      }
+    })();
+    return () => { cancelado = true; };
+  }, [apiUrl]);
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -157,6 +180,27 @@ export function SettingsScreen({
       </Pressable>
       <Text style={[styles.version, { color: theme.textMuted }]}>DRAC VMS · versão {Constants.expoConfig?.version ?? '—'}</Text>
 
+      {/* AVISO DE VERSÃO NOVA. O APK é distribuído por link, não pela Play:
+          não há atualização automática nem aviso, e a frota fica com versões
+          misturadas sem ninguém saber. O `build-client.sh` já publica o
+          manifesto ao lado do APK — aqui só se compara e se oferece o link. */}
+      {atualizacao ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Baixar a versão ${atualizacao.versionName}`}
+          onPress={() => { void Linking.openURL(atualizacao.url); }}
+          style={[styles.atualizacao, { borderColor: theme.accent, backgroundColor: theme.surface }]}
+        >
+          <Icon name="download" size={16} color={theme.accent} strokeWidth={2} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.atualizacaoTitulo, { color: theme.text }]}>Nova versão disponível</Text>
+            <Text style={[styles.atualizacaoSub, { color: theme.textSub }]}>
+              Versão {atualizacao.versionName} — toque para baixar o APK.
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
+
       <AddCameraSheet
         visible={addCameraOpen}
         apiUrl={apiUrl}
@@ -210,5 +254,8 @@ const styles = StyleSheet.create({
   addCameraIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   logout: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, paddingVertical: 15, marginBottom: 14 },
   logoutText: { fontSize: 14, fontWeight: '800' },
+  atualizacao: { flexDirection: 'row', alignItems: 'center', gap: 11, borderWidth: 1, borderRadius: 13, paddingHorizontal: 14, paddingVertical: 12, marginTop: 14 },
+  atualizacaoTitulo: { fontSize: 14, fontWeight: '700' },
+  atualizacaoSub: { fontSize: 12, marginTop: 1 },
   version: { textAlign: 'center', fontSize: 11.5, fontWeight: '600' },
 });

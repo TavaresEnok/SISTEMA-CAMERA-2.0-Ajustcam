@@ -1,6 +1,6 @@
 {
   "appName": "DRAC Redesign",
-  "packageId": "com.ajustconsulting.dracmobile",
+  "packageId": "com.ajustconsulting.dracnovo",
   "apiUrl": "https://ajustcam.ajustconsulting.com.br/api",
   "splashBackgroundColor": "#0A0D13",
   "redesign": true,
