@@ -11,9 +11,20 @@ test('marca visível usa AjustCam e não exibe versão fictícia', () => {
 });
 
 test('páginas incompletas não aparecem na navegação nem na paleta de comandos', () => {
+  // O MAPA SAIU DA LISTA (2026-08-07): responsividade, acesso por teclado,
+  // alvo de toque e rótulos em português foram corrigidos — ele mostra dados
+  // reais e agora está no menu.
+  //
+  // Os que permanecem continuam sendo CASCA, e é isso que este teste protege:
+  //   /wall          — não renderiza vídeo nenhum (retângulos pretos);
+  //   /investigation — player e régua são maquete com valores fixos;
+  //   /events        — "Reconhecer" não chama API (some ao recarregar);
+  //   /reports       — a exportação PDF/CSV não existe.
+  // Todos estão roteados e alcançáveis por URL; o que não se faz é oferecê-los
+  // ao operador como se estivessem prontos.
   const palette = read('src/components/CommandPalette.tsx');
   const sidebar = read('src/components/Sidebar.tsx');
-  for (const path of ['/wall', '/map', '/investigation']) {
+  for (const path of ['/wall', '/investigation', '/events', '/reports']) {
     assert.doesNotMatch(palette, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
     assert.doesNotMatch(sidebar, new RegExp(`path:\\s*['\"]${path}['\"]`), path);
   }

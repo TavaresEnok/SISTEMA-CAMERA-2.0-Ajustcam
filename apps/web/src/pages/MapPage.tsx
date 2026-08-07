@@ -14,6 +14,12 @@ const STATUS_COLORS: Record<string, string> = {
   maintenance: 'hsl(var(--status-warning))',
 };
 
+// Modo de gravação em português: o painel mostrava o enum cru ("continuous"),
+// enquanto as pílulas de filtro logo acima já traduziam o status.
+const RECORDING_MODE_LABELS: Record<string, string> = {
+  continuous: 'Contínua', motion: 'Por movimento', manual: 'Manual', schedule: 'Agenda', none: 'Desligada',
+};
+
 const STATUS_FILTER_LABELS: Record<string, string> = {
   all: 'Todos',
   online: 'Online',
@@ -114,7 +120,9 @@ export default function MapPage() {
   const floorCameraCount = activeFloor?.zones.reduce((sum, zone) => sum + zone.cameras.length, 0) ?? 0;
 
   return (
-    <div className="flex h-full min-h-0 gap-4 p-6">
+    // Abaixo de `lg` empilha: antes era `flex` fixo com painel de 320px, e o
+    // mapa era esmagado a poucas centenas de pixels — no celular, inutilizável.
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4 lg:flex-row lg:overflow-hidden lg:p-6">
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {floors.map((floor) => (
@@ -207,8 +215,24 @@ export default function MapPage() {
                           key={camera.id}
                           transform={`translate(${position.x}, ${position.y})`}
                           onClick={() => setSelectedCamera((current) => current?.id === camera.id ? null : camera)}
+                          // Focável e operável por teclado: eram `<g onClick>` puros,
+                          // sem role, sem tabIndex e sem nome acessível — quem não
+                          // usa mouse não conseguia selecionar câmera nenhuma.
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`${camera.name} — ${STATUS_FILTER_LABELS[camera.status] ?? camera.status}`}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setSelectedCamera((current) => current?.id === camera.id ? null : camera);
+                            }
+                          }}
                           style={{ cursor: 'pointer' }}
                         >
+                          {/* Área de toque de 24px: o marcador visível tem 14px de
+                              diâmetro, abaixo do mínimo, e é o ÚNICO jeito de
+                              selecionar uma câmera no mapa. */}
+                          <circle r="12" fill="transparent" />
                           <circle r={selected ? 9 : 7} fill="hsl(var(--card))" stroke={color} strokeWidth={selected ? 2.2 : 1.6} />
                           <circle r="2.2" fill={color} />
                           {camera.status === 'alarm' && (
@@ -227,7 +251,7 @@ export default function MapPage() {
         </div>
       </div>
 
-      <div className="w-80 shrink-0 overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+      <div className="w-full shrink-0 overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:w-80">
         <div className="border-b border-border px-4 py-3">
           <div className="text-xs font-semibold">Detalhes da Câmera</div>
           <div className="text-[11px] text-muted-foreground mt-0.5">
@@ -249,7 +273,7 @@ export default function MapPage() {
               <div className="flex justify-between gap-3"><span className="text-muted-foreground">Zona</span><span className="text-right">{selectedCamera.zone}</span></div>
               <div className="flex justify-between gap-3"><span className="text-muted-foreground">Endereço IP</span><span className="font-mono text-right">{selectedCamera.ipAddress}</span></div>
               <div className="flex justify-between gap-3"><span className="text-muted-foreground">Status</span><span className="capitalize">{selectedCamera.status.replace('_', ' ')}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-muted-foreground">Gravação</span><span className="capitalize">{selectedCamera.recordingMode}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-muted-foreground">Gravação</span><span className="capitalize">{RECORDING_MODE_LABELS[selectedCamera.recordingMode] ?? selectedCamera.recordingMode}</span></div>
             </div>
 
             <div className="grid grid-cols-3 gap-2">
@@ -263,7 +287,9 @@ export default function MapPage() {
               </Tooltip>
               <Tooltip delayDuration={0}>
                 <TooltipTrigger asChild>
-                  <Link href="/playback" className="h-9 rounded border border-border bg-background hover:bg-accent flex items-center justify-center">
+                  {/* Leva a câmera junto: sem o parâmetro, o operador selecionava
+                      a câmera do alarme e caía numa tela genérica. */}
+                  <Link href={`/playback?cameraId=${encodeURIComponent(selectedCamera.id)}`} className="h-9 rounded border border-border bg-background hover:bg-accent flex items-center justify-center">
                     <PlaySquare className="w-4 h-4" />
                   </Link>
                 </TooltipTrigger>

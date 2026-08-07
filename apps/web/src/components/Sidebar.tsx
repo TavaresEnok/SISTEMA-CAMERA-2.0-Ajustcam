@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, LogOut, Keyboard, Shield,
   Server, Users, Radar, FolderKey, ShieldCheck, Search, Sun, Moon,
   Bell, Crosshair, HardDrive, UserCircle, Smartphone,
-  CircleHelp,
+  CircleHelp, Map, LayoutGrid, Activity, FileSearch, FileArchive, FileText, ScrollText,
   type LucideIcon,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -41,6 +41,10 @@ const NAV_SECTIONS: NavSection[] = [
       // Alertas requerem operador ou superior (viewers não têm acesso)
       { path: '/alarms',   label: 'Alertas',        icon: Bell,     roles: ['admin', 'operator'] },
       { path: '/ptz',      label: 'Controle PTZ',   icon: Crosshair },
+      // Mapa entra no menu agora que a responsividade e o acesso por teclado
+      // foram corrigidos. /wall, /investigation, /events e /reports seguem
+      // fora até deixarem de ser casca (ver plano, Fase 4b).
+      { path: '/map',      label: 'Mapa / Planta',  icon: Map,       roles: ['admin', 'operator'] },
     ],
   },
   {
@@ -50,6 +54,14 @@ const NAV_SECTIONS: NavSection[] = [
       // Câmeras e Armazenamento são exclusivos de admin/operador
       { path: '/cameras', label: 'Câmeras',       icon: Camera,   roles: ['admin', 'operator'] },
       { path: '/storage', label: 'Armazenamento', icon: HardDrive, roles: ['admin', 'operator'] },
+      { path: '/performance', label: 'Desempenho', icon: Activity,  roles: ['admin', 'operator'] },
+    ],
+  },
+  {
+    label: 'Investigação',
+    icon: FileSearch,
+    items: [
+      { path: '/evidence', label: 'Evidências', icon: FileArchive, roles: ['admin', 'operator'] },
     ],
   },
   {
@@ -63,6 +75,8 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/groups',  label: 'Grupos',      icon: FolderKey,   roles: ['admin'] },
       { path: '/roles',   label: 'Funções',     icon: ShieldCheck, roles: ['admin'] },
       { path: '/settings',label: 'Configurações',icon: Settings,   roles: ['admin'] },
+      { path: '/audit-logs', label: 'Auditoria', icon: ScrollText,  roles: ['admin'] },
+      { path: '/app-builder', label: 'Apps white-label', icon: Smartphone, roles: ['admin'] },
       // Geração de APK foi movida para a DRAC Central (painel mestre). Mantemos a
       // rota /app-builder acessível por URL, mas fora do menu de cada instalação.
     ],

@@ -142,7 +142,6 @@ export default function PerformancePage() {
         if (diagRes) setReport(diagRes.data);
         setCameraHealth(obsRes ? parseCameraHealthPayload(obsRes.data) : null);
         setStaleThreshold(obsRes ? parseStaleThreshold(obsRes.data) : undefined);
-        setStaleThreshold(obsRes ? parseStaleThreshold(obsRes.data) : undefined);
       }
     } finally {
       refreshRef.current = false;
@@ -160,7 +159,7 @@ export default function PerformancePage() {
 
   useEffect(() => {
     if (!auto) return;
-    const t = window.setInterval(() => { void refresh(); }, 5000);
+    const t = window.setInterval(() => { void refresh(); }, 20000); // 20s: o ciclo dispara 3 requisições + load() da store
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, accessToken]);

@@ -27,6 +27,15 @@ const PAGE_TITLES: Record<string, string> = {
   '/roles':         'Funções e Permissões',
   '/groups':        'Grupos',
   '/wall':          'Modo Mural',
+  // Faltavam: o cabeçalho de "Minha conta" — item que TODO usuário tem —
+  // mostrava o texto genérico "DRAC VMS".
+  '/profile':       'Minha conta',
+  '/app-builder':   'Apps white-label',
+  '/evidence':      'Evidências',
+  '/events':        'Eventos',
+  '/performance':   'Desempenho',
+  '/reports':       'Relatórios',
+  '/audit-logs':    'Auditoria',
 };
 
 function resolvePageTitle(location: string) {

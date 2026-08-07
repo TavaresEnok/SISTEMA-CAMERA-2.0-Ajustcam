@@ -49,6 +49,12 @@ const ResetPasswordPage = lazyWithReload(() => import('./pages/ResetPasswordPage
 const LiveViewPage    = lazyWithReload(() => import('./pages/LiveViewPage'));
 const PlaybackPage    = lazyWithReload(() => import('./pages/PlaybackPage'));
 const ReviewPage      = lazyWithReload(() => import('./pages/ReviewPage'));
+// Páginas que existiam sem rota nenhuma — 1.441 linhas inalcançáveis.
+const EvidencePage    = lazyWithReload(() => import('./pages/EvidencePage'));
+const PerformancePage = lazyWithReload(() => import('./pages/PerformancePage'));
+const AuditLogsPage   = lazyWithReload(() => import('./pages/AuditLogsPage'));
+const EventsPage      = lazyWithReload(() => import('./pages/EventsPage'));
+const ReportsPage     = lazyWithReload(() => import('./pages/ReportsPage'));
 const AlarmsPage      = lazyWithReload(() => import('./pages/AlarmsPage'));
 const CamerasPage     = lazyWithReload(() => import('./pages/CamerasPage'));
 const MapPage         = lazyWithReload(() => import('./pages/MapPage'));
@@ -241,6 +247,18 @@ function AppRoutes() {
       <Route path="/investigation">
         {() => <ProtectedRoute component={InvestigationPage} minRole="operator" />}
       </Route>
+      <Route path="/evidence">
+        {() => <ProtectedRoute component={EvidencePage} minRole="operator" />}
+      </Route>
+      <Route path="/events">
+        {() => <ProtectedRoute component={EventsPage} minRole="operator" />}
+      </Route>
+      <Route path="/performance">
+        {() => <ProtectedRoute component={PerformancePage} minRole="operator" />}
+      </Route>
+      <Route path="/reports">
+        {() => <ProtectedRoute component={ReportsPage} minRole="operator" />}
+      </Route>
       <Route path="/storage">
         {() => <ProtectedRoute component={StoragePage} minRole="operator" />}
       </Route>
@@ -257,6 +275,9 @@ function AppRoutes() {
       </Route>
       <Route path="/roles">
         {() => <ProtectedRoute component={RolesPage} minRole="admin" />}
+      </Route>
+      <Route path="/audit-logs">
+        {() => <ProtectedRoute component={AuditLogsPage} minRole="admin" />}
       </Route>
       <Route path="/app-builder">
         {() => <ProtectedRoute component={AppBuilderPage} minRole="admin" />}

@@ -182,7 +182,7 @@ export default function EvidencePage() {
       </div>
 
       <div className="grid flex-1 gap-4 overflow-y-auto p-6 md:grid-cols-[340px_1fr]">
-        <aside className="h-fit rounded-lg border border-border bg-card p-4 shadow-sm">
+        <aside className="space-y-3 h-fit rounded-lg border border-border bg-card p-4 shadow-sm">
           <div>
             <div className="mb-1 text-xs font-medium">Investigação</div>
             <Select value={investigationId || '__none__'} onValueChange={(value) => { if (value !== '__none__') void load(value); }}>
