@@ -2,7 +2,6 @@
  * Câmeras (redesign) — réplica da tela "Câmeras" do mockup: busca, chips de grupo,
  * alternância Lista/Mural, favoritos. Ligada aos dados reais (mesmos props da MosaicScreen).
  */
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Dimensions,
@@ -17,11 +16,11 @@ import {
 } from 'react-native';
 import { LiveVideo } from '../../components/VideoPlayers';
 import { useTheme } from '../../theme/ThemeProvider';
+import { useLibrary } from '../../state/LibraryProvider';
 import { Icon } from '../../components/Icon';
 import { isOnlineStatus } from '../../utils/camera-view';
 import type { Camera } from '../../types';
 
-const FAVS_KEY = '@drac:cam-favs:v1';
 
 const TITLE = 'Sora';
 const UI = 'InstrumentSans';
@@ -44,7 +43,12 @@ export function CamerasRedesign({ cameras, streamPosters, streamUrls, streamWhep
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState('Todas');
   const [view, setView] = useState<'list' | 'mosaic'>('list');
-  const [favs, setFavs] = useState<string[]>([]);
+  // ── UMA FONTE DE FAVORITAS ───────────────────────────────────────────────
+  // Esta tela mantinha a própria lista em `@drac:cam-favs:v1`, GLOBAL — sem
+  // escopo de usuário nem de servidor. Dois operadores no mesmo aparelho
+  // compartilhavam favoritas, e a estrela marcada aqui não existia na Home nem
+  // no app clássico, que usam o LibraryProvider (escopado por sessão).
+  const { favorites: favs, toggleFavorite: toggleFav } = useLibrary();
   const s = makeStyles(theme);
 
   const groups = useMemo(() => {
@@ -77,18 +81,6 @@ export function CamerasRedesign({ cameras, streamPosters, streamUrls, streamWhep
   useEffect(() => {
     if (liveIds.length) onRequestStreams(liveIds);
   }, [liveIds.join('|')]);
-
-  // Favoritos persistem neste aparelho (antes eram só de memória e sumiam ao fechar).
-  useEffect(() => {
-    void AsyncStorage.getItem(FAVS_KEY)
-      .then((raw) => { if (raw) setFavs(JSON.parse(raw) as string[]); })
-      .catch(() => undefined);
-  }, []);
-  const toggleFav = (id: string) => setFavs((f) => {
-    const next = f.includes(id) ? f.filter((x) => x !== id) : [...f, id];
-    void AsyncStorage.setItem(FAVS_KEY, JSON.stringify(next)).catch(() => undefined);
-    return next;
-  });
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>

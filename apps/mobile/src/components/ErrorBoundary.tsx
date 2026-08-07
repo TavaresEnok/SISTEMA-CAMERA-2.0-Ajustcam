@@ -3,6 +3,15 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 type Props = {
   children: ReactNode;
+  /**
+   * Troca de valor = a barreira volta a renderizar os filhos.
+   *
+   * Usada por aba: sem isso, um crash numa tela deixava o app inteiro na tela
+   * de recuperação — inclusive derrubando a live que o operador estava
+   * assistindo por causa de um bug num card da Revisão. Com a chave, trocar de
+   * aba já limpa o erro daquela tela.
+   */
+  resetKey?: string | number;
 };
 
 type State = {
@@ -17,6 +26,12 @@ type State = {
  */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
+
+  componentDidUpdate(anterior: Props) {
+    if (this.state.error && anterior.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
+  }
 
   static getDerivedStateFromError(error: Error): State {
     return { error };

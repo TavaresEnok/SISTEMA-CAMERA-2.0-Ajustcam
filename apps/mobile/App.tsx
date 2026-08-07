@@ -1686,7 +1686,12 @@ function AppInner() {
       {theme.bg2 !== theme.bg ? (
         <LinearGradient colors={[theme.bg, theme.bg2]} style={StyleSheet.absoluteFill} pointerEvents="none" />
       ) : null}
+      {/* BARREIRA POR ABA. Havia só a da raiz: um crash de render em qualquer
+          tela levava o app inteiro para a tela de recuperação — um bug num card
+          da Revisão derrubava a live que o operador estava assistindo. Com a
+          `resetKey` na aba, trocar de aba já limpa o erro da anterior. */}
       <View style={[styles.body, { paddingTop: TOP_SAFE }]}>
+        <ErrorBoundary resetKey={tab}>
         {tab === 'central' && (
           isRedesign ? (
             <HomeRedesign
@@ -1870,6 +1875,7 @@ function AppInner() {
           />
           )
         )}
+        </ErrorBoundary>
       </View>
 
       {isRedesign ? (

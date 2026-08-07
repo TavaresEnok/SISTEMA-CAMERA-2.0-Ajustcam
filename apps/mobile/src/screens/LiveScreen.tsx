@@ -10,7 +10,7 @@
  */
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Image, type LayoutChangeEvent, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { FlatList, ActivityIndicator, Alert, Image, type LayoutChangeEvent, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DetectionOverlay } from '../components/DetectionOverlay';
 import { Icon, type IconName } from '../components/Icon';
@@ -523,8 +523,35 @@ export function LiveScreen({
                 <Text style={[styles.emptyText, { color: theme.textSub }]}>Nenhuma gravação neste dia.</Text>
               </View>
             ) : (
-              <ScrollView style={{ flex: 1 }} contentContainerStyle={[styles.listContent, { paddingBottom: 14 + insets.bottom }]} showsVerticalScrollIndicator={false}>
-                {recordings.map((rec) => {
+              // VIRTUALIZADA: era `ScrollView + map`, montando TODAS as linhas
+              // (cada uma com Image) — com "carregar mais" a lista chega a
+              // centenas. A tela de Reprodução já usava FlatList.
+              <FlatList
+                style={{ flex: 1 }}
+                data={recordings}
+                keyExtractor={(rec: Recording) => rec.id}
+                contentContainerStyle={[styles.listContent, { paddingBottom: 14 + insets.bottom }]}
+                showsVerticalScrollIndicator={false}
+                initialNumToRender={12}
+                windowSize={7}
+                removeClippedSubviews
+                ListFooterComponent={
+                  recordings.length < recordingsTotal ? (
+                    <Pressable
+                      style={[styles.loadMore, { backgroundColor: theme.surface, borderColor: theme.border }]}
+                      onPress={onLoadMoreRecordings}
+                      disabled={recordingsLoadingMore}
+                      accessibilityRole="button"
+                      accessibilityLabel="Carregar mais gravações"
+                    >
+                      {recordingsLoadingMore ? <ActivityIndicator size="small" color={theme.accent} /> : null}
+                      <Text style={[styles.loadMoreText, { color: theme.accent }]}>
+                        {recordingsLoadingMore ? 'Carregando…' : `Carregar mais (${recordings.length} de ${recordingsTotal})`}
+                      </Text>
+                    </Pressable>
+                  ) : null
+                }
+                renderItem={({ item: rec }: { item: Recording }) => {
                   const active = activePlayback?.recording.id === rec.id;
                   const usable = rec.fileUsable !== false && rec.fileExists !== false;
                   const downloading = downloadingIds.includes(rec.id);
@@ -567,20 +594,8 @@ export function LiveScreen({
                       ) : null}
                     </Pressable>
                   );
-                })}
-                {recordings.length < recordingsTotal ? (
-                  <Pressable
-                    style={[styles.loadMore, { backgroundColor: theme.surface, borderColor: theme.border }]}
-                    onPress={onLoadMoreRecordings}
-                    disabled={recordingsLoadingMore}
-                    accessibilityRole="button"
-                    accessibilityState={{ disabled: recordingsLoadingMore, busy: recordingsLoadingMore }}
-                  >
-                    {recordingsLoadingMore ? <ActivityIndicator size="small" color={theme.accent} /> : null}
-                    <Text style={[styles.loadMoreText, { color: theme.accent }]}>{recordingsLoadingMore ? 'Carregando…' : `Carregar mais (${recordings.length} de ${recordingsTotal})`}</Text>
-                  </Pressable>
-                ) : null}
-              </ScrollView>
+                }}
+              />
             )}
             </>
             )}
