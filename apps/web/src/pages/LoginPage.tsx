@@ -105,6 +105,17 @@ export default function LoginPage() {
   const getLoginErrorMessage = (err: unknown) => {
     if (!axios.isAxiosError(err)) return 'Não foi possível autenticar agora. Tente novamente.';
     if (!err.response) return 'Não foi possível conectar à API. Verifique a conexão ou recarregue a página.';
+    // A MENSAGEM DO SERVIDOR VEM PRIMEIRO. A API responde 401 com texto
+    // específico quando a conta está BLOQUEADA por excesso de tentativas
+    // ("tente novamente em X min") — e ele era descartado em favor de
+    // "Credenciais inválidas". O operador continuava tentando achando que
+    // digitou errado, e cada tentativa ESTENDIA o próprio bloqueio.
+    const doServidor = (err.response.data as { message?: string | string[] } | undefined)?.message;
+    const texto = Array.isArray(doServidor) ? doServidor.join(' ') : doServidor;
+    if (typeof texto === 'string' && texto.trim()) return texto.trim();
+    // Limite de tentativas por minuto: virava "falha no servidor" e o usuário
+    // abria chamado reportando o sistema fora do ar.
+    if (err.response.status === 429) return 'Muitas tentativas seguidas. Aguarde um minuto e tente novamente.';
     if (err.response.status === 401) return 'Credenciais inválidas ou usuário inativo';
     return 'Falha no servidor de autenticação. Tente novamente em instantes.';
   };
@@ -130,7 +141,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden p-6" style={{ background: 'var(--bg)' }}>
+    <div className="relative flex min-h-[100dvh] w-full items-center justify-center overflow-x-hidden overflow-y-auto p-6" style={{ background: 'var(--bg)' }}>
       {/* Camadas decorativas de fundo */}
       <div
         className="pointer-events-none absolute inset-0"
@@ -199,6 +210,8 @@ export default function LoginPage() {
                 onChange={(e) => { setUsername(e.target.value); setError(''); }}
                 placeholder="seu@email.com"
                 autoFocus
+                name="username"
+                autoComplete="username"
                 data-testid="input-username"
               />
             </div>
@@ -217,6 +230,8 @@ export default function LoginPage() {
                   onChange={(e) => { setPassword(e.target.value); setError(''); }}
                   placeholder="••••••••"
                   style={{ paddingRight: 34 }}
+                  name="password"
+                  autoComplete="current-password"
                   data-testid="input-password"
                 />
               </div>
@@ -243,7 +258,11 @@ export default function LoginPage() {
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 text-[11px]" style={{ color: '#E07878', background: 'rgba(200,72,72,.08)', border: '1px solid rgba(200,72,72,.2)', borderRadius: 8, padding: '8px 11px' }}>
+            // `role="alert"`: sem isto, quem usa leitor de tela apertava Enter e
+            // não recebia nenhuma informação de que a senha foi rejeitada.
+            // Cor pelo token de TEXTO (--s-alarm-tx): o hex #E07878 dava 2,6:1
+            // sobre o fundo claro — passava no tema escuro, por isso ninguém viu.
+            <div role="alert" className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--s-alarm-tx)', background: 'rgba(200,72,72,.08)', border: '1px solid rgba(200,72,72,.2)', borderRadius: 8, padding: '8px 11px' }}>
               <AlertCircle size={13} /> {error}
             </div>
           )}

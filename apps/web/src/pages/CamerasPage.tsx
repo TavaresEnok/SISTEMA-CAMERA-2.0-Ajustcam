@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { getRequestErrorMessage } from '../lib/request-error';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   LayoutGrid, List, Search, Plus, Edit, PlaySquare,
@@ -54,17 +55,6 @@ const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
 
 
 const STATUS_PILLS = ['all', 'online', 'recording', 'motion', 'alarm', 'offline'] as const;
-
-function getRequestErrorMessage(error: unknown, fallback: string) {
-  if (axios.isAxiosError(error)) {
-    const message = error.response?.data?.message;
-    if (Array.isArray(message)) return message.join('\n');
-    if (typeof message === 'string' && message.trim()) return message;
-    if (typeof error.response?.data?.error === 'string') return error.response.data.error;
-    return error.message || fallback;
-  }
-  return error instanceof Error ? error.message : fallback;
-}
 
 const DEFAULT_CAMERA_CHANNEL = 1;
 const MAIN_STREAM_SUBTYPE = 0;
@@ -383,7 +373,11 @@ function WizardModal({
   const handlePrimary = async () => {
     if (step < steps.length - 1) {
       if (step === 0 && !detectedMax) {
-        const detected = await handleTestConnection(false);
+        // SILÊNCIO PERIGOSO: com `false` os avisos de sucesso E de falha eram
+        // suprimidos, e a função devolvia "ok" desde que não houvesse exceção.
+        // Com usuário/senha errados o assistente avançava calado e salvava uma
+        // câmera que nunca ia transmitir.
+        const detected = await handleTestConnection(true);
         if (!detected) return;
       }
       setStep((current) => current + 1);
@@ -598,7 +592,11 @@ function WizardModal({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 8, scale: 0.98 }}
         transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="w-full max-w-[560px] overflow-hidden rounded-lg border border-border bg-card shadow-sm"
+        // `max-h-[90vh]` + coluna com corpo rolável: em notebook de 768px,
+        // depois da detecção (diagnóstico + confirmação visual 16:9 + faixas de
+        // compatibilidade) o rodapé com "Voltar/Próximo" ficava CORTADO e sem
+        // como rolar até ele — o cadastro travava sem mensagem de erro.
+        className="flex max-h-[90vh] w-full max-w-[560px] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-border bg-background/40">
@@ -623,7 +621,7 @@ function WizardModal({
           ))}
         </div>
 
-        <div className="p-5 min-h-48">
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {step === 0 && (
             <div className="space-y-3">
               <div className="space-y-1">
@@ -929,9 +927,12 @@ function WizardModal({
           >Voltar</button>
           <button
             onClick={() => void handlePrimary()}
-            disabled={!canAdvance || isSaving}
+            // `isTesting` no disabled: o "Próximo" disparava uma varredura de
+            // portas de vários segundos sem NENHUM retorno na tela, continuava
+            // habilitado, e o instalador clicava de novo disparando a segunda.
+            disabled={!canAdvance || isSaving || isTesting}
             className="px-4 py-2 rounded bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-          >{isSaving ? 'Adicionando...' : step < steps.length - 1 ? 'Próximo' : 'Adicionar Câmera'}</button>
+          >{isSaving ? 'Adicionando...' : isTesting ? 'Detectando…' : step < steps.length - 1 ? 'Próximo' : 'Adicionar Câmera'}</button>
         </div>
       </motion.div>
     </motion.div>

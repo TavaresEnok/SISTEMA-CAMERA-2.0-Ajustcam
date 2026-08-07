@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getRequestErrorMessage } from '../lib/request-error';
 import { format } from 'date-fns';
 import { useCallback, useEffect, useMemo, useRef, useState, type InputHTMLAttributes, type MouseEvent, type ReactNode, type SelectHTMLAttributes, type WheelEvent as ReactWheelEvent } from 'react';
 import { Link, useLocation, useParams } from 'wouter';
@@ -675,7 +676,7 @@ export default function CameraDetailPage() {
         if (!cancelled) {
           toast({
             title: 'Falha ao carregar configuração da câmera',
-            description: error instanceof Error ? error.message : 'Não foi possível carregar os parâmetros.',
+            description: getRequestErrorMessage(error, 'Não foi possível carregar os parâmetros.'),
             variant: 'destructive',
           });
         }
@@ -722,7 +723,7 @@ export default function CameraDetailPage() {
         setLastCommand(`Movimento ${direction} ativo em ${cam.name}`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Falha ao iniciar PTZ.';
+      const message = getRequestErrorMessage(error, 'Falha ao iniciar PTZ.');
       if (activeMovementRef.current === movement) {
         activeMovementRef.current = null;
         setActiveDirection(null);
@@ -753,7 +754,7 @@ export default function CameraDetailPage() {
       setLastError(null);
       setLastCommand(`Movimento ${direction} finalizado em ${movement.cameraName}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Falha ao parar PTZ.';
+      const message = getRequestErrorMessage(error, 'Falha ao parar PTZ.');
       setCommandState('error');
       setLastError(message);
       setLastCommand(`Falha ao parar ${direction} em ${movement.cameraName}`);
@@ -1017,7 +1018,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha ao salvar câmera',
-        description: error instanceof Error ? error.message : 'Não foi possível salvar as alterações.',
+        description: getRequestErrorMessage(error, 'Não foi possível salvar as alterações.'),
         variant: 'destructive',
       });
     } finally {
@@ -1060,7 +1061,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha no teste de conexão',
-        description: error instanceof Error ? error.message : 'Não foi possível testar a câmera.',
+        description: getRequestErrorMessage(error, 'Não foi possível testar a câmera.'),
         variant: 'destructive',
       });
     } finally {
@@ -1095,7 +1096,7 @@ export default function CameraDetailPage() {
       setLiveDiagnostics(null);
       toast({
         title: 'Falha ao diagnosticar',
-        description: error instanceof Error ? error.message : 'Não foi possível diagnosticar a câmera.',
+        description: getRequestErrorMessage(error, 'Não foi possível diagnosticar a câmera.'),
         variant: 'destructive',
       });
     } finally {
@@ -1132,7 +1133,7 @@ export default function CameraDetailPage() {
         capturedAt: null,
         source: null,
         stream: null,
-        reason: error instanceof Error ? error.message : 'Não foi possível capturar a imagem da câmera.',
+        reason: getRequestErrorMessage(error, 'Não foi possível capturar a imagem da câmera.'),
       });
     } finally {
       setPreviewLoading(false);
@@ -1213,7 +1214,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha na descoberta',
-        description: error instanceof Error ? error.message : 'Não foi possível descobrir endpoints da câmera.',
+        description: getRequestErrorMessage(error, 'Não foi possível descobrir endpoints da câmera.'),
         variant: 'destructive',
       });
     } finally {
@@ -1238,7 +1239,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha na reconexão de gravação',
-        description: error instanceof Error ? error.message : 'Não foi possível reconectar gravação.',
+        description: getRequestErrorMessage(error, 'Não foi possível reconectar gravação.'),
         variant: 'destructive',
       });
     } finally {
@@ -1303,7 +1304,7 @@ export default function CameraDetailPage() {
       setRecordingOverride(null);
       toast({
         title: 'Falha ao iniciar gravação',
-        description: error instanceof Error ? error.message : 'Não foi possível iniciar a gravação manual.',
+        description: getRequestErrorMessage(error, 'Não foi possível iniciar a gravação manual.'),
         variant: 'destructive',
       });
     } finally {
@@ -1327,7 +1328,7 @@ export default function CameraDetailPage() {
       setRecordingOverride(null);
       toast({
         title: 'Falha ao parar gravação',
-        description: error instanceof Error ? error.message : 'Não foi possível parar a gravação manual.',
+        description: getRequestErrorMessage(error, 'Não foi possível parar a gravação manual.'),
         variant: 'destructive',
       });
     } finally {
@@ -1376,7 +1377,7 @@ export default function CameraDetailPage() {
       setRecordingOverride(null);
       toast({
         title: 'Falha na gravação por movimento',
-        description: error instanceof Error ? error.message : 'Não foi possível atualizar o modo por movimento.',
+        description: getRequestErrorMessage(error, 'Não foi possível atualizar o modo por movimento.'),
         variant: 'destructive',
       });
     } finally {
@@ -1403,7 +1404,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha no diagnóstico PTZ',
-        description: error instanceof Error ? error.message : 'Não foi possível diagnosticar PTZ.',
+        description: getRequestErrorMessage(error, 'Não foi possível diagnosticar PTZ.'),
         variant: 'destructive',
       });
     } finally {
@@ -1430,7 +1431,7 @@ export default function CameraDetailPage() {
     } catch (error) {
       toast({
         title: 'Falha ao acionar alarme',
-        description: error instanceof Error ? error.message : 'Não foi possível acionar a saída de alarme da câmera.',
+        description: getRequestErrorMessage(error, 'Não foi possível acionar a saída de alarme da câmera.'),
         variant: 'destructive',
       });
     } finally {

@@ -41,7 +41,7 @@ export default function ResetPasswordPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden p-6" style={{ background: 'var(--bg)' }}>
+    <div className="relative flex min-h-[100dvh] w-full items-center justify-center overflow-x-hidden overflow-y-auto p-6" style={{ background: 'var(--bg)' }}>
       <div
         className="relative w-full"
         style={{
@@ -68,11 +68,13 @@ export default function ResetPasswordPage() {
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
             <div>
-              <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--tx-3)' }}>Nova senha</label>
+              <label htmlFor="new-password" className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--tx-3)' }}>Nova senha</label>
               <div className="relative">
                 <div className="input-wrap">
                   <span className="input-icon"><Lock size={13} /></span>
                   <input
+                    id="new-password"
+                    autoComplete="new-password"
                     className="input"
                     type={showPassword ? 'text' : 'password'}
                     value={newPassword}
