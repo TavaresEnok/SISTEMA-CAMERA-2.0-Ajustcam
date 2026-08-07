@@ -179,14 +179,18 @@ export default function PerfisPage() {
       </div>
 
       <Sheet open={!!editRole} onOpenChange={(o) => !o && setEditRole(null)}>
-        <SheetContent className="bg-card border-border w-80">
-          <SheetHeader>
+        {/* CORPO ROLÁVEL + RODAPÉ FIXO. O SheetContent é `h-full` e não rolava:
+            com as 11 permissões (~44px cada) mais cabeçalho e respiro, em
+            notebook de 1366×768 o admin editava e NÃO ALCANÇAVA o botão Salvar
+            — e piora a cada permissão nova vinda do backend. */}
+        <SheetContent className="bg-card border-border w-80 flex flex-col p-0 gap-0">
+          <SheetHeader className="shrink-0 border-b border-border p-5">
             <SheetTitle className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-primary" />
               Editar Perfil: {editRole ? (ROLE_LABELS[editRole] ?? editRole) : ''}
             </SheetTitle>
           </SheetHeader>
-          <div className="mt-4 space-y-2">
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-5">
             {keys.map((key) => (
               <div
                 key={key}
@@ -206,7 +210,9 @@ export default function PerfisPage() {
                 />
               </div>
             ))}
-            <div className="flex justify-end gap-2 pt-4">
+          </div>
+          <div className="shrink-0 border-t border-border p-4">
+            <div className="flex justify-end gap-2">
               <button onClick={() => setEditRole(null)} className="h-8 px-4 rounded border border-border text-xs hover:bg-accent">Cancelar</button>
               <button
                 onClick={() => void saveEdit()}

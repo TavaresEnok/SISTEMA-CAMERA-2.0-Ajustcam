@@ -112,6 +112,11 @@ export default function AppBuilderPage() {
   const jobFor = (slug: string) => jobs.find((j) => j.slug === slug);
 
   return (
+    // CONTRATO DE ROLAGEM: o casco (AppLayout) é `overflow-hidden` e cada
+    // página fornece a própria rolagem. Sem `h-full overflow-y-auto`, o
+    // formulário de novo cliente mais 3–4 clientes cadastrados já cortavam a
+    // lista — e os botões "Gerar APK" ficavam inalcançáveis.
+    <div className="h-full overflow-y-auto">
     <div className="p-6 max-w-5xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Apps white-label</h1>
@@ -178,6 +183,7 @@ export default function AppBuilderPage() {
           );
         })}
       </div>
+    </div>
     </div>
   );
 }

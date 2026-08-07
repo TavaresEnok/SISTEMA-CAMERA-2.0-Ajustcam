@@ -205,6 +205,9 @@ export default function PerformancePage() {
   const healthSummary = summarizeCameraHealth(healthRows);
 
   return (
+    // Mesma regra do contrato de rolagem: esta página é longa (3 cartões +
+    // 4 indicadores + 2 tabelas por câmera) e seria cortada sem isto.
+    <div className="h-full overflow-y-auto">
     <div className="p-4 md:p-6 space-y-5">
       {/* ── Header ── */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -465,6 +468,7 @@ export default function PerformancePage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
     </div>
   );
 }

@@ -52,6 +52,7 @@ import { Button } from '@/components/ui/button';
 import { getApiBaseUrl } from '../lib/api-base';
 import { useAuthStore } from '../store/authStore';
 import { useToast } from '../hooks/use-toast';
+import { ToastAction } from '@/components/ui/toast';
 
 // Presets (atalhos rápidos). Qualquer CxL livre também é aceito via campo custom.
 const GRID_PRESETS: { size: GridSize; icon: ReactNode }[] = [
@@ -336,6 +337,9 @@ export default function LiveViewPage() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (layoutDialog || deleteTarget) return;
+      // No mural em tela cheia, Esc é a primeira tecla que todo operador tenta
+      // — e não fazia nada (o botão "Sair" é pequeno e fica no canto).
+      if (wallMode) { toggleWallMode(); return; }
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
       // Esc com um popover/menu/diálogo Radix aberto pertence a ELE (fechá-lo),
@@ -346,7 +350,7 @@ export default function LiveViewPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [restoreLayout, layoutDialog, deleteTarget]);
+  }, [restoreLayout, layoutDialog, deleteTarget, wallMode, toggleWallMode]);
 
   const handleCamAction = useCallback((action: string, camera: Camera) => {
     if (action === 'playback') setLocation(`/playback?cameraId=${encodeURIComponent(camera.id)}`);
@@ -429,9 +433,27 @@ export default function LiveViewPage() {
     const targetIdx = slotValido != null
       ? slotValido
       : newIds.findIndex(id => !id || !cameras.find(c => c.id === id));
-    newIds[targetIdx >= 0 ? targetIdx : count - 1] = camId;
+    // GRADE CHEIA SEM QUADRO ESCOLHIDO: `targetIdx` vira -1 e o código escrevia
+    // no ÚLTIMO quadro, apagando a câmera que estava lá sem aviso nem desfazer.
+    // Agora o operador é avisado de quem saiu (e por quê), com como voltar.
+    const indiceFinal = targetIdx >= 0 ? targetIdx : count - 1;
+    const substituida = targetIdx >= 0 ? null : newIds[indiceFinal];
+    newIds[indiceFinal] = camId;
     setCameraIds(newIds);
     setSelectedSlotIndex(null);
+    if (substituida) {
+      const anterior = cameras.find((camera) => camera.id === substituida);
+      const idsAntes = [...cameraIds.slice(0, count)];
+      toast({
+        title: 'A grade estava cheia',
+        description: `"${anterior?.name ?? 'A câmera do último quadro'}" saiu para abrir espaço. Escolha um quadro antes de clicar para decidir onde entra.`,
+        action: (
+          <ToastAction altText="Desfazer" onClick={() => setCameraIds(idsAntes)}>
+            Desfazer
+          </ToastAction>
+        ),
+      });
+    }
   };
 
   const removeCameraFromSlot = (slotIndex: number) => {
@@ -848,7 +870,15 @@ export default function LiveViewPage() {
                     onAction={handleCamAction}
                     streamStartDelayMs={streamStartDelay(i, count)}
                   />
-                  <div className={wallMode ? 'hidden' : 'pointer-events-none absolute top-9 right-1.5 z-40 flex items-center gap-1.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100'}>
+                  <div // Aparecem também quando o quadro está SELECIONADO: em tela sensível
+                    // ao toque não existe hover, e "Trocar"/"Remover" ficavam
+                    // inalcançáveis — montar a grade era impossível no hardware
+                    // típico de sala de operação.
+                    className={wallMode
+                      ? 'hidden'
+                      : `absolute top-9 right-1.5 z-40 flex items-center gap-1.5 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 ${
+                          selectedCam === cam.id ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+                        }`}>
                     <button
                       onClick={(event) => {
                         event.stopPropagation();

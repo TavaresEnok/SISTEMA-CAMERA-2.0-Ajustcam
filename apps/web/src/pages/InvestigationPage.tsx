@@ -705,7 +705,11 @@ export default function InvestigationPage() {
           </div>
         </div>
 
-        <div className="w-80 shrink-0 border-l border-border bg-card">
+        <div // ROLAGEM: a coluna empilha seis blocos (evidência, anexar, notas,
+        // atividade, rastreabilidade e CADEIA DE CUSTÓDIA) e não rolava — em
+        // 1080p nunca se chegava à cadeia de custódia, que é a razão de existir
+        // desta tela.
+        className="flex w-80 shrink-0 flex-col overflow-y-auto border-l border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div>
               <div className="text-xs font-semibold">Evidência</div>
