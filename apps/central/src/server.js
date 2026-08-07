@@ -17,6 +17,7 @@ const {
   buildInstallationPayload: buildCloudStoragePayload,
   decryptSecret: decryptStorageSecret,
 } = require('./cloud-storage');
+const alertas = require('./alertas');
 const { testS3Access, measureS3Performance, diagnosticarConexao, localizarServidor } = require('./s3-probe');
 const { resolverEndpoint } = require('./endpoint-scheme');
 const scheduler = require('./scheduler');
@@ -800,15 +801,58 @@ function alertKey(alert) {
   return `${code}:${message}`;
 }
 
+/**
+ * Atualiza o histórico E devolve as TRANSIÇÕES do ciclo.
+ *
+ * As transições são o que dá deduplicação de graça no aviso: um alerta que já
+ * estava ACTIVE e continua ACTIVE não produz transição nenhuma, então não
+ * gera mensagem. Sem isso, um disco cheio viraria um aviso a cada heartbeat —
+ * 60 mensagens por hora, e o operador silencia o canal justamente antes da
+ * próxima ocorrência que importava.
+ *
+ * `novos` cobre os dois casos que merecem aviso: alerta inédito e alerta que
+ * tinha sido resolvido e VOLTOU (reincidência é informação, não repetição).
+ */
+/**
+ * Manda os avisos dos alertas que MUDARAM de estado neste heartbeat.
+ *
+ * Best-effort por contrato: nada aqui pode derrubar o processamento do
+ * heartbeat, que é o que mantém a frota visível. Falha de canal vira log e
+ * segue — e um canal quebrado não impede o outro (ver despacharAlerta).
+ */
+function despacharAlertasDaInstalacao(item, novos, resolvidos) {
+  const config = alertas.normalizarAlertas(item.alertChannels);
+  if (!config.telegramEnabled && !config.emailEnabled) return;
+
+  void (async () => {
+    try {
+      if (novos.length) {
+        await alertas.despacharAlerta(config, alertas.montarMensagem({ instalacao: item, alertas: novos }));
+      }
+      if (resolvidos.length && config.avisarRecuperacao) {
+        await alertas.despacharAlerta(
+          config,
+          alertas.montarMensagem({ instalacao: item, alertas: resolvidos, recuperado: true }),
+        );
+      }
+    } catch (erro) {
+      console.error(`[alertas] falha ao avisar instalacao=${item.id}: ${erro?.message || erro}`);
+    }
+  })();
+}
+
 function updateAlertHistory(existing, alerts, now) {
   const history = Array.isArray(existing.alertHistory) ? existing.alertHistory.slice() : [];
   const activeKeys = new Set(alerts.map(alertKey));
   const indexByKey = new Map(history.map((entry, index) => [entry.key, index]));
+  const novos = [];
+  const resolvidos = [];
 
   for (const alert of alerts) {
     const key = alertKey(alert);
     const previousIndex = indexByKey.get(key);
     if (previousIndex == null) {
+      novos.push({ key, level: alert.level || 'warning', code: alert.code || 'generic', message: alert.message || 'Alerta operacional.' });
       history.push({
         id: crypto.randomUUID(),
         key,
@@ -824,6 +868,9 @@ function updateAlertHistory(existing, alerts, now) {
       continue;
     }
     const entry = history[previousIndex];
+    if (entry.status !== 'ACTIVE') {
+      novos.push({ key, level: alert.level || entry.level || 'warning', code: alert.code || entry.code || 'generic', message: alert.message || entry.message || 'Alerta operacional.' });
+    }
     entry.status = 'ACTIVE';
     entry.level = alert.level || entry.level || 'warning';
     entry.code = alert.code || entry.code || 'generic';
@@ -837,12 +884,15 @@ function updateAlertHistory(existing, alerts, now) {
     if (entry.status === 'ACTIVE' && !activeKeys.has(entry.key)) {
       entry.status = 'RESOLVED';
       entry.resolvedAt = now;
+      resolvidos.push({ key: entry.key, level: entry.level, code: entry.code, message: entry.message });
     }
   }
 
-  return history
+  const ordenado = history
     .sort((a, b) => new Date(b.lastSeenAt || b.firstSeenAt || 0).getTime() - new Date(a.lastSeenAt || a.firstSeenAt || 0).getTime())
     .slice(0, ALERT_HISTORY_LIMIT);
+
+  return { history: ordenado, novos, resolvidos };
 }
 
 function publicInstallation(item) {
@@ -904,6 +954,8 @@ function publicInstallation(item) {
     // Storage em nuvem SEM a credencial: `describeCloudStorage` remove o
     // segredo e devolve só `hasSecret`. O painel nunca precisa da chave; quem
     // precisa dela é a instalação, e ela a recebe pelo heartbeat.
+    // `alertasPublicos` NUNCA devolve o token do bot, nem cifrado.
+    alertas: alertas.alertasPublicos(item.alertChannels),
     cloudStorage: describeCloudStorage(item.cloudStorage),
     // Estado de entrega da configuração, para a tela dizer a verdade em vez de
     // "pendente/não pendente" sem explicação.
@@ -1320,7 +1372,7 @@ async function handleHeartbeat(req, res) {
     activeUsers: Number(metrics.activeUsers || 0),
   });
   while (heartbeatHistory.length > HEARTBEAT_HISTORY_LIMIT) heartbeatHistory.shift();
-  const alertHistory = updateAlertHistory(existing, alerts, now);
+  const { history: alertHistory, novos: alertasNovos, resolvidos: alertasResolvidos } = updateAlertHistory(existing, alerts, now);
   const item = {
     ...existing,
     id: installationId,
@@ -1348,6 +1400,19 @@ async function handleHeartbeat(req, res) {
   };
   db.installations[installationId] = item;
   await saveDb(db);
+
+  // ── AVISAR QUEM PRECISA SABER ─────────────────────────────────────────────
+  //
+  // Até aqui o alerta virava histórico e parava na tela. Quem não estivesse
+  // com o painel aberto não ficava sabendo — e o painel não fica aberto de
+  // madrugada, que é quando a maioria das quedas acontece.
+  //
+  // DEPOIS do saveDb e SEM await: o heartbeat responde em milissegundos e o
+  // envio (SMTP e HTTPS externos) corre por fora. Segurar a resposta faria a
+  // instalação achar que a Central caiu por causa de um servidor de e-mail
+  // lento — trocaria um problema de aviso por um de monitoramento.
+  despacharAlertasDaInstalacao(item, alertasNovos, alertasResolvidos);
+
   // Série temporal: o JSON continua guardando só as últimas ~100 amostras (o
   // arquivo não aguenta mais que isso); o histórico LONGO vai para o Postgres,
   // quando houver. Sem Postgres isto é um retorno imediato.
@@ -2275,6 +2340,92 @@ async function verificarStorage(config) {
   }, { timeoutMs: 12000 });
 }
 
+
+// ── ALERTAS POR INSTALAÇÃO ──────────────────────────────────────────────────
+
+async function handlePatchAlertas(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const body = await readBody(req);
+  const payload = body && typeof body === 'object' ? body.alertas : null;
+  if (!payload || typeof payload !== 'object') {
+    return json(req, res, 400, { error: 'alertas_payload_invalido' });
+  }
+
+  // Endereço inválido é RECUSADO com a lista do que caiu, em vez de aceito e
+  // descartado em silêncio: salvar "ok" e o alerta nunca chegar é o pior
+  // resultado possível numa tela de alerta.
+  if (Array.isArray(payload.emails)) {
+    const invalidos = payload.emails
+      .map((e) => String(e ?? '').trim())
+      .filter((e) => e && !alertas.emailPlausivel(e));
+    if (invalidos.length) {
+      return json(req, res, 400, { error: 'email_invalido', invalidos: invalidos.slice(0, 5) });
+    }
+    if (payload.emails.filter(Boolean).length > alertas.LIMITE_EMAILS) {
+      return json(req, res, 400, { error: 'email_limite', limite: alertas.LIMITE_EMAILS });
+    }
+  }
+
+  let config;
+  try {
+    config = alertas.mesclarAlertas(item.alertChannels, payload);
+  } catch (erro) {
+    // Sem CENTRAL_STORAGE_SECRET não dá para cifrar o token — e gravar em claro
+    // seria pior que recusar.
+    return json(req, res, 500, { error: 'segredo_indisponivel', message: String(erro?.message || erro) });
+  }
+
+  item.alertChannels = config;
+  item.updatedAt = new Date().toISOString();
+  addAuditEvent(db, req, {
+    type: 'alertas.updated',
+    actor: actor.email,
+    result: 'accepted',
+    installationId,
+    detail: `email=${config.emailEnabled ? config.emails.length : 0} telegram=${config.telegramEnabled}`,
+  });
+  await saveDb(db);
+  return json(req, res, 200, { alertas: alertas.alertasPublicos(config) });
+}
+
+async function handleTestarAlertas(req, res, db, actor, installationId) {
+  const item = db.installations[installationId];
+  if (!item) return json(req, res, 404, { error: 'installation_not_found' });
+
+  const config = alertas.normalizarAlertas(item.alertChannels);
+  if (!config.telegramEnabled && !config.emailEnabled) {
+    return json(req, res, 400, { error: 'nenhum_canal_configurado' });
+  }
+
+  const mensagem = alertas.montarMensagem({
+    instalacao: item,
+    alertas: [{ message: 'Mensagem de teste enviada pelo painel da Central. Se você recebeu isto, o canal está funcionando.' }],
+  });
+  const resultados = await alertas.despacharAlerta(config, mensagem);
+  const ok = resultados.length > 0 && resultados.every((r) => r.ok);
+
+  // O selo é escrito pelo SERVIDOR a partir do resultado REAL — nunca aceito
+  // do corpo. Mesma lição do teste de storage.
+  item.alertChannels = {
+    ...config,
+    ultimoTesteAt: new Date().toISOString(),
+    ultimoTesteOk: ok,
+    ultimoTesteMensagem: ok
+      ? `Enviado com sucesso (${resultados.map((r) => r.canal).join(', ')}).`
+      : resultados.filter((r) => !r.ok).map((r) => `${r.canal}: ${r.erro}`).join(' | ').slice(0, 300),
+  };
+  addAuditEvent(db, req, {
+    type: 'alertas.test',
+    actor: actor.email,
+    result: ok ? 'accepted' : 'denied',
+    installationId,
+  });
+  await saveDb(db);
+  return json(req, res, ok ? 200 : 502, { ok, resultados, alertas: alertas.alertasPublicos(item.alertChannels) });
+}
+
 async function handleTestCloudStorage(req, res, db, actor, installationId) {
   const item = db.installations[installationId];
   if (!item) return json(req, res, 404, { error: 'installation_not_found' });
@@ -3003,6 +3154,14 @@ async function route(req, res) {
       const cloudTestMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/cloud-storage\/test$/);
       if (req.method === 'POST' && cloudTestMatch) {
         return handleTestCloudStorage(req, res, db, actor, decodeURIComponent(cloudTestMatch[1]));
+      }
+      const alertasMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/alertas$/);
+      if (req.method === 'PATCH' && alertasMatch) {
+        return handlePatchAlertas(req, res, db, actor, decodeURIComponent(alertasMatch[1]));
+      }
+      const alertasTesteMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/alertas\/teste$/);
+      if (req.method === 'POST' && alertasTesteMatch) {
+        return handleTestarAlertas(req, res, db, actor, decodeURIComponent(alertasTesteMatch[1]));
       }
       const aiPolicyMatch = url.pathname.match(/^\/api\/admin\/installations\/([^/]+)\/ai-policy$/);
       if (req.method === 'PATCH' && aiPolicyMatch) {

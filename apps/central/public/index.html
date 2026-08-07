@@ -139,6 +139,26 @@
       .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: .92em; letter-spacing: -.01em; }
       .num { font-variant-numeric: tabular-nums; }
       .subtext { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+
+      /* AJUDA EM SANFONA — <details> nativo: abre sem JS, é navegável por
+         teclado e anunciado por leitor de tela sem nenhum atributo extra.
+         Fechado por padrão porque quem já configurou não precisa reler. */
+      .ajuda-bloco { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; background: var(--surface-soft); }
+      .ajuda-bloco > summary { cursor: pointer; padding: 10px 12px; font-size: 12.5px; font-weight: 600;
+        display: flex; align-items: center; gap: 8px; list-style: none; }
+      .ajuda-bloco > summary::-webkit-details-marker { display: none; }
+      .ajuda-marca { display: inline-flex; align-items: center; justify-content: center;
+        width: 17px; height: 17px; border-radius: 50%; border: 1px solid var(--line);
+        font-size: 11px; font-weight: 700; color: var(--muted); flex: none; }
+      .ajuda-bloco[open] > summary { border-bottom: 1px solid var(--line-hair); }
+      .ajuda-bloco[open] > summary .ajuda-marca { color: var(--ink); }
+      .ajuda-corpo { padding: 10px 12px 12px; font-size: 12px; line-height: 1.65; color: var(--muted); }
+      .ajuda-corpo p { margin: 0 0 8px; }
+      .ajuda-corpo ol { margin: 0 0 8px; padding-left: 18px; }
+      .ajuda-corpo li { margin-bottom: 5px; }
+      .ajuda-corpo code { background: var(--surface); border: 1px solid var(--line-hair);
+        border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+      .ajuda-corpo .ajuda-nota { border-left: 2px solid var(--amber-line); padding-left: 9px; margin-bottom: 0; }
       .quiet { color: var(--quiet); }
       .rule { height: 1px; border: 0; margin: 0;
         background: linear-gradient(90deg, transparent, var(--line) 48px, var(--line) calc(100% - 48px), transparent); }
@@ -1206,6 +1226,7 @@
               <button data-tab="ia">Inteligência artificial</button>
               <button data-tab="nuvem">Armazenamento em nuvem</button>
               <button data-tab="escala">Escala</button>
+              <button data-tab="alertas">Alertas</button>
               <button data-tab="manutencao">Manutenção</button>
             </nav>
             <div id="detail-panel"></div>
@@ -3677,6 +3698,112 @@
                   <div class="subtext">O diagnóstico é sanitizado: não inclui chave de licença, token nem segredos.</div>`}
               </div>
             </section>
+          </div>
+
+          <div class="detail-tab-panel" data-tab-panel="alertas">
+            <div class="grid-2">
+              <section class="panel">
+                <div class="panel-head"><div><div class="panel-title">Para quem avisar</div>
+                  <div class="panel-subtitle">Destinos de alerta desta instalação</div></div></div>
+                <!-- Formulário fica na CASCA, como o de contrato: ele só muda
+                     por ação do operador (salvar/testar), nunca por heartbeat.
+                     Num corpo volátil, a repintura de 30s apagaria o que a
+                     pessoa está digitando no meio do cadastro. -->
+                <div class="detail-body">
+                  <div class="field">
+                    <label for="alertas-emails">E-mails que recebem os alertas</label>
+                    <textarea id="alertas-emails" rows="3" placeholder="um endereço por linha&#10;plantao@empresa.com.br"
+                      ${item.alertas?.emailDisponivel ? '' : 'disabled'}>${escapeHtml((item.alertas?.emails || []).join('\n'))}</textarea>
+                    ${item.alertas?.emailDisponivel
+                      ? '<div class="subtext">Até 5 endereços.</div>'
+                      : '<div class="subtext" style="color:var(--amber)">Indisponível: a Central ainda não tem uma conta de e-mail configurada no servidor. O Telegram continua funcionando.</div>'}
+                  </div>
+
+                  <div class="field" style="margin-top:12px">
+                    <label for="alertas-chat">ID do chat no Telegram</label>
+                    <input id="alertas-chat" type="text" placeholder="-1001234567890"
+                      value="${escapeHtml(item.alertas?.telegramChatId || '')}">
+                  </div>
+                  <div class="field">
+                    <label for="alertas-token">Token do bot</label>
+                    <input id="alertas-token" type="password" autocomplete="off"
+                      placeholder="${item.alertas?.telegramTokenConfigurado ? 'Token guardado — preencha só para trocar' : '123456789:AAH...'}">
+                    <div class="subtext">${item.alertas?.telegramTokenConfigurado
+                      ? 'Já existe um token salvo. Deixe em branco para mantê-lo.'
+                      : 'Obtido com o @BotFather — veja a ajuda ao lado.'}</div>
+                  </div>
+
+                  <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:6px">
+                    <input id="alertas-recuperacao" type="checkbox" ${item.alertas?.avisarRecuperacao !== false ? 'checked' : ''}>
+                    <span>Avisar também quando o problema for resolvido</span>
+                  </label>
+
+                  <div class="license-actions" style="margin-top:13px">
+                    <button id="alertas-salvar" class="primary">Salvar destinos</button>
+                    <button id="alertas-testar">Enviar teste</button>
+                    ${item.alertas?.telegramTokenConfigurado ? '<button id="alertas-limpar-token" class="danger">Remover token</button>' : ''}
+                  </div>
+                  ${item.alertas?.ultimoTesteAt ? `<div class="subtext" style="margin-top:8px;color:${item.alertas.ultimoTesteOk ? 'var(--green)' : 'var(--red)'}">
+                    Último teste: ${escapeHtml(item.alertas.ultimoTesteMensagem || (item.alertas.ultimoTesteOk ? 'OK' : 'falhou'))}
+                  </div>` : ''}
+                  <div id="alertas-feedback" class="subtext" style="margin-top:8px"></div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head"><div><div class="panel-title">Como configurar</div>
+                  <div class="panel-subtitle">Passo a passo, sem pressa</div></div></div>
+                <div class="detail-body">
+                  <details class="ajuda-bloco">
+                    <summary><span class="ajuda-marca">?</span> Como receber alertas no Telegram</summary>
+                    <div class="ajuda-corpo">
+                      <p>São duas informações: um <b>bot</b> (quem manda a mensagem) e um <b>chat</b> (para onde ela vai).</p>
+                      <ol>
+                        <li>No Telegram, procure por <b>@BotFather</b> e abra a conversa.</li>
+                        <li>Envie <code>/newbot</code> e escolha um nome e um usuário para o bot.</li>
+                        <li>O BotFather responde com um <b>token</b> parecido com
+                            <code>123456789:AAH...</code> — é ele que vai no campo ao lado.</li>
+                        <li>Agora o destino: crie um grupo com as pessoas que devem ser avisadas
+                            e <b>adicione o seu bot</b> ao grupo. Para receber sozinho, basta
+                            abrir a conversa do bot e enviar qualquer mensagem.</li>
+                        <li>Para descobrir o <b>ID do chat</b>, adicione o bot
+                            <b>@userinfobot</b> ao grupo (ou fale com ele em conversa direta) —
+                            ele responde com o número. Em grupo, o número começa com
+                            <code>-100</code>; guarde o sinal de menos.</li>
+                        <li>Preencha os dois campos aqui, salve e use <b>Enviar teste</b>.</li>
+                      </ol>
+                      <p class="ajuda-nota">Se o teste falhar com "chat not found", quase sempre o
+                         bot ainda não foi adicionado ao grupo, ou ninguém falou com ele ainda —
+                         o Telegram não deixa um bot escrever primeiro para quem nunca o procurou.</p>
+                    </div>
+                  </details>
+
+                  <details class="ajuda-bloco">
+                    <summary><span class="ajuda-marca">?</span> Como receber alertas por e-mail</summary>
+                    <div class="ajuda-corpo">
+                      <p>Basta escrever os endereços que devem ser avisados, um por linha.
+                         Você pode cadastrar vários — o técnico de plantão e o responsável
+                         pelo cliente, por exemplo.</p>
+                      <p class="ajuda-nota">O e-mail sai de uma conta configurada na própria
+                         Central (para toda a frota), então aqui você só informa <b>quem
+                         recebe</b>. Se o campo aparecer indisponível, é porque essa conta
+                         ainda não foi configurada no servidor da Central.</p>
+                    </div>
+                  </details>
+
+                  <details class="ajuda-bloco">
+                    <summary><span class="ajuda-marca">?</span> Quando o aviso é disparado</summary>
+                    <div class="ajuda-corpo">
+                      <p>Quando um alerta <b>aparece</b> — e, se você quiser, também quando ele
+                         <b>passa</b>. Alerta que continua ativo não é reenviado: você recebe
+                         uma vez quando o problema começa, não a cada minuto enquanto dura.</p>
+                      <p class="ajuda-nota">Um alerta que já tinha sido resolvido e volta a
+                         acontecer conta como novo — reincidência é informação.</p>
+                    </div>
+                  </details>
+                </div>
+              </section>
+            </div>
           </div>`;
 
         // Só troca o DOM quando a CASCA mudou — o que é raro. Os corpos
@@ -3691,6 +3818,66 @@
         // O innerHTML acima recriou os painéis; sem reaplicar, a aba escolhida
         // some e o operador volta para "Visão geral" a cada atualização.
         setDetailTab(state.detailTab || 'visao');
+        // ── Alertas ──────────────────────────────────────────────────────
+        const feedbackAlertas = (texto, cor) => {
+          const alvo = els.detail.querySelector('#alertas-feedback');
+          if (alvo) { alvo.textContent = texto; alvo.style.color = cor || ''; }
+        };
+        const lerFormAlertas = () => {
+          const emails = (els.detail.querySelector('#alertas-emails')?.value || '')
+            .split(/[\n,;]+/).map((e) => e.trim()).filter(Boolean);
+          const chatId = (els.detail.querySelector('#alertas-chat')?.value || '').trim();
+          const token = (els.detail.querySelector('#alertas-token')?.value || '').trim();
+          return {
+            emails,
+            emailEnabled: emails.length > 0,
+            telegramChatId: chatId,
+            // Só liga o Telegram se HÁ como mandar: chat mais token (novo ou já
+            // guardado). Sem isto o painel diria "ativo" sobre um canal mudo.
+            telegramEnabled: Boolean(chatId) && (Boolean(token) || Boolean(item.alertas?.telegramTokenConfigurado)),
+            avisarRecuperacao: Boolean(els.detail.querySelector('#alertas-recuperacao')?.checked),
+            ...(token ? { telegramBotToken: token } : {}),
+          };
+        };
+        const salvarAlertas = async (extra) => {
+          feedbackAlertas('Salvando...');
+          try {
+            const resposta = await api(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas`, {
+              method: 'PATCH',
+              body: JSON.stringify({ alertas: { ...lerFormAlertas(), ...(extra || {}) } }),
+            });
+            if (resposta?.error === 'email_invalido') {
+              feedbackAlertas(`Endereço inválido: ${(resposta.invalidos || []).join(', ')}`, 'var(--red)');
+              return false;
+            }
+            if (resposta?.error) { feedbackAlertas(`Não foi possível salvar: ${resposta.error}`, 'var(--red)'); return false; }
+            feedbackAlertas('Destinos salvos.', 'var(--green)');
+            await refresh();
+            return true;
+          } catch (erro) {
+            feedbackAlertas(`Falha ao salvar: ${erro?.message || erro}`, 'var(--red)');
+            return false;
+          }
+        };
+        els.detail.querySelector('#alertas-salvar')?.addEventListener('click', () => { void salvarAlertas(); });
+        els.detail.querySelector('#alertas-limpar-token')?.addEventListener('click', () => {
+          void salvarAlertas({ limparTelegramToken: true, telegramEnabled: false });
+        });
+        els.detail.querySelector('#alertas-testar')?.addEventListener('click', async () => {
+          // Salva ANTES de testar: testar o que está no servidor enquanto a tela
+          // mostra outra coisa faria o operador depurar a configuração errada.
+          feedbackAlertas('Salvando e enviando teste...');
+          if (!(await salvarAlertas())) return;
+          try {
+            const r = await api(`/api/admin/installations/${encodeURIComponent(item.id)}/alertas/teste`, { method: 'POST' });
+            if (r?.ok) feedbackAlertas('Teste enviado — confira o Telegram e a caixa de e-mail.', 'var(--green)');
+            else feedbackAlertas(`Teste falhou: ${(r?.resultados || []).filter((x) => !x.ok).map((x) => `${x.canal}: ${x.erro}`).join(' | ') || r?.error || 'sem detalhe'}`, 'var(--red)');
+            await refresh();
+          } catch (erro) {
+            feedbackAlertas(`Teste falhou: ${erro?.message || erro}`, 'var(--red)');
+          }
+        });
+
         els.detail.querySelector('#save-license')?.addEventListener('click', () => requestContractChange(item.id, els.detail.querySelector('#license-select').value, els.detail.querySelector('#license-message').value.trim()));
         els.detail.querySelector('#suspend-license')?.addEventListener('click', () => requestContractChange(item.id, 'SUSPENDED', els.detail.querySelector('#license-message').value.trim() || 'Suspensão administrativa.'));
         els.detail.querySelector('#copy-selected-diagnostics')?.addEventListener('click', () => copyDiagnosticsFor(item.id));
