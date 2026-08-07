@@ -3,5 +3,6 @@
   "slug": "drac-mobile",
   "packageId": "com.ajustconsulting.dracmobile",
   "apiUrl": "",
-  "primaryColor": "#3b82f6"
+  "primaryColor": "#3b82f6",
+  "crashDsn": "https://0f57ec022f6243ac91e8056ec0fe0b6e@ajustcam.ajustconsulting.com.br/glitchtip/1"
 }

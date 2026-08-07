@@ -4,5 +4,6 @@
   "apiUrl": "https://ajustcam.ajustconsulting.com.br/api",
   "splashBackgroundColor": "#0A0D13",
   "redesign": true,
-  "skipFirebase": true
+  "skipFirebase": true,
+  "crashDsn": "https://0f57ec022f6243ac91e8056ec0fe0b6e@ajustcam.ajustconsulting.com.br/glitchtip/1"
 }

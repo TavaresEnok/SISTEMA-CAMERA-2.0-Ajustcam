@@ -41,7 +41,9 @@ import {
 } from './src/services/sessionStore';
 import { authenticateWithBiometrics, getBiometricSupport } from './src/services/biometrics';
 import { registerForPush, subscribeToNotificationTaps, unregisterFromPush } from './src/services/push';
+import Constants from 'expo-constants';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
+import { iniciarRelatorioDeTravamento, marcarInstalacao } from './src/services/crash-reporting';
 import { useAlarms } from './src/hooks/useAlarms';
 import { useLiveDetections } from './src/hooks/useLiveDetections';
 import { ThemeProvider, useTheme } from './src/theme/ThemeProvider';
@@ -58,6 +60,11 @@ import { montarUrlDeReproducao } from './src/utils/playback-source';
 const PLAY_TOKEN_RENEW_MS = 4 * 60 * 1000;
 
 const RECORDINGS_PAGE_SIZE = 50;
+
+// Antes de qualquer render: um travamento na inicialização é justamente o que
+// não se descobre por telefonema.
+iniciarRelatorioDeTravamento();
+marcarInstalacao(String(Constants.expoConfig?.extra?.client ?? 'default'));
 
 export default function App() {
   return (

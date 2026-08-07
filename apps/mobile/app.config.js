@@ -165,6 +165,10 @@ module.exports = () => ({
       // Servidor embutido por cliente (cai para a env pública, depois vazio).
       apiUrl: c.apiUrl || process.env.EXPO_PUBLIC_API_URL || '',
       primaryColor: c.primaryColor || null,
+      // Relatório de travamento (GlitchTip hospedado na AjustConsulting). Sem
+      // isto o app funciona igual — só não avisa quando fecha sozinho no
+      // celular do cliente. Por cliente, para separar as frotas.
+      crashDsn: c.crashDsn || process.env.CRASH_DSN || '',
     },
   },
 });

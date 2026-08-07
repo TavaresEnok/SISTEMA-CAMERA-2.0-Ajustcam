@@ -1,0 +1,117 @@
+# ── GlitchTip: relatório de travamentos do app móvel ────────────────────────
+#
+# POR QUE EXISTE. Os APKs são distribuídos por link, fora da Play Store. Isso
+# custa exatamente o painel que a loja daria de graça: quando o app fecha
+# sozinho no celular de um cliente, ninguém fica sabendo — nem que aconteceu,
+# nem em qual tela, nem por quê. Com uma frota de APKs por cliente (cada um com
+# aparelho, Android e câmeras diferentes), descobrir travamento por telefonema
+# não escala.
+#
+# POR QUE HOSPEDADO AQUI, e não no Sentry: os relatórios saem dos celulares dos
+# clientes e ficam na infraestrutura da AjustCam. Nada de dado de cliente
+# trafegando para terceiro — o que casa com a exigência de LGPD do resto do
+# sistema.
+#
+# POR QUE STACK SEPARADA (arquivo próprio, sem `depends_on` do sistema):
+# este servidor GRAVA CÂMERA. O compose principal não pode ganhar uma peça que,
+# se falhar ou pesar, arraste junto a gravação. Aqui o GlitchTip sobe e desce
+# sozinho:
+#
+#   docker compose -f infra/docker-compose.glitchtip.yml up -d
+#   docker compose -f infra/docker-compose.glitchtip.yml down
+#
+# LIMITES DE RECURSO são explícitos e conservadores. O servidor tem ~10GB de RAM
+# com a gravação e o transcode disputando; o teto total desta stack é ~1,1GB, e
+# `cpus` impede que a indexação de eventos roube CPU do FFmpeg.
+
+services:
+  glitchtip-postgres:
+    image: postgres:16-alpine
+    container_name: glitchtip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_DB_PASSWORD:?defina GLITCHTIP_DB_PASSWORD no infra/.env}
+      POSTGRES_DB: glitchtip
+    volumes:
+      - glitchtip_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glitchtip"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { memory: 384M, cpus: '1.0' }
+    networks: [glitchtip-net]
+
+  glitchtip-redis:
+    image: valkey/valkey:8-alpine
+    container_name: glitchtip-redis
+    restart: unless-stopped
+    # Teto de memória no PRÓPRIO Redis, não só no container: estourar o limite
+    # do Docker mataria o processo; `maxmemory` faz ele descartar o mais antigo
+    # e seguir vivo, que é o comportamento certo para uma fila de eventos.
+    command: ["valkey-server", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    deploy:
+      resources:
+        limits: { memory: 128M, cpus: '0.5' }
+    networks: [glitchtip-net]
+
+  glitchtip-web:
+    image: glitchtip/glitchtip:v4.1
+    container_name: glitchtip-web
+    restart: unless-stopped
+    depends_on:
+      glitchtip-postgres: { condition: service_healthy }
+    environment: &glitchtip_env
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD}@glitchtip-postgres:5432/glitchtip
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?defina GLITCHTIP_SECRET_KEY no infra/.env}
+      PORT: "8000"
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-http://127.0.0.1:9800}
+      # Cadastro FECHADO: este painel é interno. Sem isto, qualquer um que
+      # alcance a porta cria conta e lê os relatórios de travamento.
+      ENABLE_OPEN_USER_REGISTRATION: "False"
+      # Retenção curta: relatório de travamento perde utilidade rápido, e o
+      # disco deste servidor é o mesmo que guarda gravação.
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: "30"
+      CELERY_WORKER_AUTOSCALE: "1,2"
+    ports:
+      # Só no laço local: quem publica para fora é o nginx do host, com TLS.
+      - "127.0.0.1:9800:8000"
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: '1.0' }
+    networks: [glitchtip-net]
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip:v4.1
+    container_name: glitchtip-worker
+    restart: unless-stopped
+    command: ./bin/run-celery-with-beat.sh
+    depends_on:
+      glitchtip-postgres: { condition: service_healthy }
+    environment: *glitchtip_env
+    deploy:
+      resources:
+        limits: { memory: 384M, cpus: '1.0' }
+    networks: [glitchtip-net]
+
+  glitchtip-migrate:
+    image: glitchtip/glitchtip:v4.1
+    container_name: glitchtip-migrate
+    depends_on:
+      glitchtip-postgres: { condition: service_healthy }
+    command: ./manage.py migrate
+    environment: *glitchtip_env
+    restart: "no"
+    networks: [glitchtip-net]
+
+volumes:
+  glitchtip_pg:
+
+networks:
+  # Rede PRÓPRIA: o GlitchTip não alcança postgres, redis nem a API do VMS.
+  glitchtip-net:
+    driver: bridge
