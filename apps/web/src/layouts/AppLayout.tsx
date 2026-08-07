@@ -16,7 +16,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/live':          'Ao Vivo',
   '/playback':      'Reprodução',
   '/review':        'Revisão',
-  '/alarms':        'Alertas',
+  '/alarms':        'Alarmes',
   '/cameras':       'Câmeras',
   '/map':           'Mapa / Planta',
   '/ptz':           'Controle PTZ',

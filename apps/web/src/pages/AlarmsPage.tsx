@@ -808,7 +808,7 @@ export default function AlertasPage() {
                       {selectedAlarm.priority}
                     </span>
                     <span className="rounded border border-border bg-muted/50 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                      {selectedAlarm.status === 'active' ? 'Ativo' : selectedAlarm.status === 'acknowledged' ? 'Reconhecido' : 'Resolvido'}
+                      {selectedAlarm.status === 'active' ? 'Aberto' : selectedAlarm.status === 'acknowledged' ? 'Reconhecido' : 'Resolvido'}
                     </span>
                   </div>
                   <h2 className="text-[18px] font-semibold tracking-tight">{selectedAlarm.name}</h2>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
+import { formatarBytes } from '../lib/formato';
 import { Archive, Eraser, KeyRound, Trash2 } from 'lucide-react';
 import { toast } from '../hooks/use-toast';
 
@@ -37,12 +38,6 @@ type Storage = {
   maisRecente: string | null;
 };
 
-function tamanho(bytes: number): string {
-  if (!bytes) return '0 B';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(u.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
-}
 
 function periodo(de: string | null, ate: string | null): string {
   if (!de || !ate) return '';
@@ -96,7 +91,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
       toast({
         title: `${s.bucket} esvaziado`,
         description:
-          `${data.objetosApagados} objetos apagados (${tamanho(data.bytesLiberados)}); ` +
+          `${data.objetosApagados} objetos apagados (${formatarBytes(data.bytesLiberados)}); ` +
           `${data.gravacoesAfetadas} gravações perderam a cópia na nuvem` +
           (data.falhas ? `. ${data.falhas} objetos resistiram e continuam lá.` : '.'),
       });
@@ -194,7 +189,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {s.gravacoes > 0
-                    ? <>{s.gravacoes} gravações · {tamanho(s.bytes)} · {periodo(s.maisAntiga, s.maisRecente)}</>
+                    ? <>{s.gravacoes} gravações · {formatarBytes(s.bytes)} · {periodo(s.maisAntiga, s.maisRecente)}</>
                     : 'Nenhuma gravação do AjustCam aponta para este storage.'}
                 </div>
                 {!s.credencialLegivel && (
@@ -244,7 +239,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
                 </div>
                 <p className="mt-1 text-xs">
                   Os objetos serão apagados no fornecedor e não há como desfazer.
-                  {s.gravacoes > 0 && <> <b>{s.gravacoes} gravações</b> ({tamanho(s.bytes)}) perderão a cópia na nuvem;
+                  {s.gravacoes > 0 && <> <b>{s.gravacoes} gravações</b> ({formatarBytes(s.bytes)}) perderão a cópia na nuvem;
                     as que não tiverem mais arquivo local ficarão indisponíveis.</>}
                 </p>
                 <p className="mt-2 text-xs text-muted-foreground">

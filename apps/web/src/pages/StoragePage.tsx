@@ -5,6 +5,7 @@ import { useVmsDataStore } from '../store/vmsDataStore';
 import { useAuthStore } from '../store/authStore';
 import { getApiBaseUrl } from '../lib/api-base';
 import { toast } from '../hooks/use-toast';
+import { formatarBytes } from '../lib/formato';
 import { CloudStorageCard } from '../components/CloudStorageCard';
 import { PreviousStoragesCard } from '../components/PreviousStoragesCard';
 import {
@@ -137,7 +138,10 @@ export default function MonitoramentoPage() {
     }
   }
 
-  const toGB = (raw: string | number | bigint) => (Number(raw) / 1024 / 1024 / 1024).toFixed(2);
+  // Formatador único (lib/formato): escolhe a unidade pelo tamanho e usa a
+  // notação brasileira. O `toGB` local forçava GB sempre — uma câmera de 30 MB
+  // aparecia como "0.03 GB" — com ponto decimal e sem separador de milhar.
+  const toGB = (raw: string | number | bigint) => formatarBytes(Number(raw));
   const volumes = useMemo(() => system ? [
     {
       server: system.server.hostname,
@@ -287,7 +291,7 @@ export default function MonitoramentoPage() {
           {!analyticsLoading && analyticsError && analyticsError}
           {!analyticsLoading && analytics && (
             <span>
-              {analytics.summary.rows} linha(s) · gravações: {toGB(analytics.summary.totalRecordingsBytes)} GB · clipes: {toGB(analytics.summary.totalClipsBytes)} GB · total: {toGB(analytics.summary.totalBytes)} GB
+              {analytics.summary.rows} linha(s) · gravações: {toGB(analytics.summary.totalRecordingsBytes)} · clipes: {toGB(analytics.summary.totalClipsBytes)} · total: {toGB(analytics.summary.totalBytes)}
             </span>
           )}
         </div>
@@ -308,12 +312,12 @@ export default function MonitoramentoPage() {
                   <td className="px-5 py-3 font-mono text-xs">{row.day}</td>
                   <td className="px-5 py-3 text-xs">{row.cameraName}</td>
                   <td className="px-5 py-3 text-xs">
-                    {row.recordingsCount} arquivo(s) · {toGB(row.recordingsBytes)} GB
+                    {row.recordingsCount} arquivo(s) · {toGB(row.recordingsBytes)}
                   </td>
                   <td className="px-5 py-3 text-xs">
-                    {row.clipsCount} arquivo(s) · {toGB(row.clipsBytes)} GB
+                    {row.clipsCount} arquivo(s) · {toGB(row.clipsBytes)}
                   </td>
-                  <td className="px-5 py-3 text-xs font-semibold">{toGB(row.totalBytes)} GB</td>
+                  <td className="px-5 py-3 text-xs font-semibold">{toGB(row.totalBytes)}</td>
                 </tr>
               ))}
             </tbody>
@@ -355,7 +359,7 @@ export default function MonitoramentoPage() {
                 {analytics?.summary ? (
                   <p className="rounded border border-[hsl(var(--destructive)_/_0.3)] bg-[hsl(var(--destructive)_/_0.08)] px-2 py-1.5 text-[hsl(var(--destructive))]">
                     No período consultado são <strong>{analytics.summary.rows}</strong> registro(s),{' '}
-                    <strong>{toGB(analytics.summary.totalBytes)} GB</strong> de vídeo.
+                    <strong>{toGB(analytics.summary.totalBytes)}</strong> de vídeo.
                   </p>
                 ) : null}
                 <p>

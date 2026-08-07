@@ -39,7 +39,7 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/playback', label: 'Reprodução',     icon: PlaySquare },
       { path: '/review',   label: 'Revisão',        icon: Sparkles },
       // Alertas requerem operador ou superior (viewers não têm acesso)
-      { path: '/alarms',   label: 'Alertas',        icon: Bell,     roles: ['admin', 'operator'] },
+      { path: '/alarms',   label: 'Alarmes',        icon: Bell,     roles: ['admin', 'operator'] },
       { path: '/ptz',      label: 'Controle PTZ',   icon: Crosshair },
       // Mapa entra no menu agora que a responsividade e o acesso por teclado
       // foram corrigidos. /wall, /investigation, /events e /reports seguem
