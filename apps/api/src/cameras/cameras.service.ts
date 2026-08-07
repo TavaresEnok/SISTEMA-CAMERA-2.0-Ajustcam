@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'crypto';
 import * as http from 'http';
 import { statfs } from 'node:fs/promises';
 import { aiEnabledEfetivo } from './helpers/motion-detector.helper';
+import { escolherGrupoDoCliente, type VinculoDeGrupo } from './helpers/grupo-do-cliente.helper';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PortCheckerService } from '../common/network/port-checker.service';
@@ -301,15 +302,13 @@ export class CamerasService {
    * mesmo que ele não pertença a nenhum grupo.
    */
   async createPrivateForOwner(dto: CreateCameraDto, owner: AuthUser) {
-    // O grupo do cliente: aquele onde ele tem nível ADMIN. Se tiver mais de um,
-    // usa o primeiro; se nenhum, a câmera fica sem grupo (acesso pela permissão
-    // direta + ownerUserId). O admin do sistema pode reassociar depois.
-    const ownerGroup = await this.prisma.cameraPermission.findFirst({
-      where: { userId: owner.id, groupId: { not: null }, level: CameraPermissionLevel.ADMIN },
-      select: { groupId: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    const groupId = ownerGroup?.groupId ?? dto.groupId ?? undefined;
+    // O grupo do cliente: aquele com que ele tem vínculo, em qualquer nível (a
+    // regra e o porquê estão em `helpers/grupo-do-cliente.helper.ts`). Se não
+    // tiver nenhum, a câmera fica sem grupo — acesso pela permissão direta +
+    // ownerUserId, e o admin reassocia depois.
+    const groupId = escolherGrupoDoCliente(await this.vinculosDeGrupo(owner.id))
+      ?? dto.groupId
+      ?? undefined;
 
     // COTA (o "acordado"): quantas câmeras privadas o cliente pode ter. A cota
     // vive no GRUPO do cliente; sem grupo (ou cota 0), não pode cadastrar. O
@@ -340,15 +339,18 @@ export class CamerasService {
    * (`limit`) definido no grupo dele. O app usa isso para mostrar "1 de 1" e
    * desabilitar o "+" quando estourar. Sem grupo → limite 0 (padrão seguro).
    */
+  /** Vínculos de grupo do usuário — a fonte única para descobrir "o grupo dele". */
+  private vinculosDeGrupo(userId: string) {
+    return this.prisma.cameraPermission.findMany({
+      where: { userId, groupId: { not: null } },
+      select: { groupId: true, level: true, createdAt: true },
+    }) as Promise<VinculoDeGrupo[]>;
+  }
+
   async getPrivateCameraQuota(owner: AuthUser, groupIdHint?: string | null): Promise<{ used: number; limit: number }> {
     let groupId = groupIdHint ?? null;
     if (!groupId) {
-      const ownerGroup = await this.prisma.cameraPermission.findFirst({
-        where: { userId: owner.id, groupId: { not: null }, level: CameraPermissionLevel.ADMIN },
-        select: { groupId: true },
-        orderBy: { createdAt: 'asc' },
-      });
-      groupId = ownerGroup?.groupId ?? null;
+      groupId = escolherGrupoDoCliente(await this.vinculosDeGrupo(owner.id));
     }
     const [used, group] = await Promise.all([
       this.prisma.camera.count({ where: { isPrivate: true, ownerUserId: owner.id } }),
