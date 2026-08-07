@@ -19,7 +19,7 @@ import {
 } from 'react-native';
 import { useTheme } from '../../theme/ThemeProvider';
 import { Icon } from '../../components/Icon';
-import { isOnlineStatus } from '../../utils/camera-view';
+import { isRecordingArmed, isOnlineStatus } from '../../utils/camera-view';
 import { loadFeaturedCameraId, saveFeaturedCameraId } from './featuredCamera';
 import type { Alarm, Camera } from '../../types';
 
@@ -81,7 +81,8 @@ export function HomeRedesign(props: Props) {
 
   const online = useMemo(() => cameras.filter((c) => isOnlineStatus(c.status)), [cameras]);
   const offline = cameras.length - online.length;
-  const recording = Math.min(online.length, Math.max(1, Math.round(online.length * 0.4))); // estimativa visual
+  // Contagem REAL (gravação armada + online). Antes: `online × 0,4`.
+  const recording = useMemo(() => cameras.filter(isRecordingArmed).length, [cameras]);
   const pinned = featuredId ? cameras.find((c) => c.id === featuredId) ?? null : null;
   const hero = pinned ?? online[0] ?? cameras[0] ?? null;
   const heroPoster = hero ? streamPosters[hero.id] : null;
@@ -158,7 +159,9 @@ export function HomeRedesign(props: Props) {
           <View style={{ position: 'absolute', top: 12, left: 12, flexDirection: 'row', gap: 6 }}>
             <View style={[styles.liveBadge, { position: 'relative', top: 0, left: 0 }]}>
               <View style={styles.liveDot} />
-              <Text style={styles.liveText}>AO VIVO</Text>
+              {/* O hero cai em `cameras[0]` quando não há nenhuma online — o
+                  selo "AO VIVO" fixo mentia justamente nesse caso. */}
+              <Text style={styles.liveText}>{hero && isOnlineStatus(hero.status) ? 'AO VIVO' : 'OFFLINE'}</Text>
             </View>
             {pinned ? (
               <View style={styles.pinBadge}>

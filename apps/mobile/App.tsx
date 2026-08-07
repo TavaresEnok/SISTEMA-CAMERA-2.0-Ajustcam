@@ -74,7 +74,7 @@ export default function App() {
 }
 
 function AppInner() {
-  const { theme, applyBranding } = useTheme();
+  const { theme, branding, applyBranding } = useTheme();
   const { setScope: setLibraryScope } = useLibrary();
   const { width: winWidth, height: winHeight } = useWindowDimensions();
   const [session, setSession] = useState<Session | null>(null);
@@ -169,7 +169,7 @@ function AppInner() {
   recordingDateRef.current = recordingDate;
   recordingsRef.current = recordings;
 
-  const { alarms, openAlarmCount, reload: reloadAlarms, ack: ackAlarm, resolve: resolveAlarm } = useAlarms(session);
+  const { alarms, openAlarmCount, reload: reloadAlarms, ack: ackAlarm, resolve: resolveAlarm, erro: alarmesErro, carregando: alarmesCarregando } = useAlarms(session);
   const liveDetections = useLiveDetections(session, liveCamera != null, liveCamera?.id ?? null);
 
   const operationalMessages = buildOperationalMessages(cameras, lastSyncError);
@@ -1813,8 +1813,9 @@ function AppInner() {
             alarms={alarms}
             highlightedAlarmId={highlightedAlarmId}
             canManage={canManageAlarms}
-            refreshing={refreshing}
+            refreshing={alarmesCarregando}
             onRefresh={() => { void reloadAlarms(); }}
+            erro={alarmesErro}
             onAck={ackAlarm}
             onResolve={resolveAlarm}
             onOpenCamera={(cameraId) => {
@@ -1838,6 +1839,7 @@ function AppInner() {
               onBiometricChange={(enabled) => { void changeBiometricPreference(enabled); }}
               onLogout={() => { void logout(); }}
               onCamerasChanged={() => { void loadAll(true); }}
+              facilityName={branding.facilityName}
             />
           ) : (
           <SettingsScreen

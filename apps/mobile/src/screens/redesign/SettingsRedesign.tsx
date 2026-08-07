@@ -55,15 +55,19 @@ export function SettingsRedesign(props: Props) {
           </View>
         </View>
 
-        {/* Provedor / plano */}
-        <View style={[s.card, { marginTop: 12 }]}>
-          <View style={s.providerIcon}><Icon name="server" size={18} color={theme.accent} /></View>
-          <View style={{ flex: 1 }}>
-            <Text style={s.providerName}>{facilityName || 'Grupo Flash'}</Text>
-            <Text style={s.providerSub}>Plano de monitoramento</Text>
+        {/* Provedor: só aparece quando HÁ nome real da instalação.
+            O fallback era o literal "Grupo Flash" — e como o App nunca passava
+            `facilityName`, TODO build white-label mostrava o nome de outro
+            cliente, com um selo "Ativo" que não vinha de dado nenhum. */}
+        {facilityName ? (
+          <View style={[s.card, { marginTop: 12 }]}>
+            <View style={s.providerIcon}><Icon name="server" size={18} color={theme.accent} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.providerName}>{facilityName}</Text>
+              <Text style={s.providerSub}>Instalação conectada</Text>
+            </View>
           </View>
-          <View style={s.activeBadge}><Text style={s.activeText}>Ativo</Text></View>
-        </View>
+        ) : null}
 
         {/* Configuração */}
         <Text style={s.section}>Configuração</Text>

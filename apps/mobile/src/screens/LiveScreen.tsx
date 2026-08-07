@@ -20,7 +20,7 @@ import type { Theme } from '../theme/theme';
 import { withAlpha } from '../services/branding';
 import type { SavedClip } from '../services/clips';
 import type { ActivePlayback, Camera, Direction, LiveDetection, Recording } from '../types';
-import { areaLabel } from '../utils/camera-view';
+import { ptzLabel, areaLabel } from '../utils/camera-view';
 import { formatBytes, formatDateLabel, formatDuration, formatTime, localDateKey } from '../utils/format';
 
 interface LiveScreenProps {
@@ -357,7 +357,7 @@ export function LiveScreen({
               {ptzFeedback ? (
                 <View style={[styles.feedback, { backgroundColor: withAlpha(c.accent, 0.14) ?? undefined }]}>
                   <Icon name="crosshair" size={14} color={c.accent} />
-                  <Text style={[styles.feedbackText, { color: c.accent }]}>{ptzFeedback}</Text>
+                  <Text style={[styles.feedbackText, { color: c.accent }]}>{ptzLabel(ptzFeedback)}</Text>
                 </View>
               ) : null}
               <View style={styles.ctrlRow}>
@@ -417,7 +417,7 @@ export function LiveScreen({
             {ptzFeedback ? (
               <View style={[styles.feedback, { backgroundColor: theme.accentBg, marginBottom: 16 }]}>
                 <Icon name="crosshair" size={14} color={theme.accent} />
-                <Text style={[styles.feedbackText, { color: theme.accent }]}>{ptzFeedback}</Text>
+                <Text style={[styles.feedbackText, { color: theme.accent }]}>{ptzLabel(ptzFeedback)}</Text>
               </View>
             ) : null}
             <PtzControls c={c} centered />

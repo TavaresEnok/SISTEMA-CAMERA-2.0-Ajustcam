@@ -12,6 +12,9 @@ export type UseAlarms = {
   reload: () => Promise<void>;
   ack: (alarm: Alarm) => Promise<void>;
   resolve: (alarm: Alarm) => Promise<void>;
+  /** Falha na última carga — distingue "não há alarmes" de "não consegui perguntar". */
+  erro: string | null;
+  carregando: boolean;
 };
 
 /**
@@ -21,6 +24,8 @@ export type UseAlarms = {
  */
 export function useAlarms(session: Session | null): UseAlarms {
   const [alarms, setAlarms] = useState<Alarm[]>([]);
+  const [erro, setErro] = useState<string | null>(null);
+  const [carregando, setCarregando] = useState(false);
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
 
   useEffect(() => {
@@ -30,11 +35,20 @@ export function useAlarms(session: Session | null): UseAlarms {
 
   const reload = useCallback(async () => {
     if (!session) return;
+    setCarregando(true);
     try {
       const data = await request<{ items: Alarm[] }>(session.apiUrl, '/cameras/alarms?limit=100', session.token);
       setAlarms(Array.isArray(data.items) ? data.items : []);
-    } catch {
-      // Mantém a lista atual em falha transitória de rede; o próximo ciclo tenta de novo.
+      setErro(null);
+    } catch (erro) {
+      // ERRO ≠ "TUDO TRANQUILO". Mantém a lista atual (falha transitória não
+      // apaga o que já está na tela), mas REGISTRA a falha: sem isto, uma
+      // primeira carga que falhasse deixava `alarms: []` e a tela afirmava
+      // "Tudo tranquilo — nenhum alarme". Numa central de alarmes, essa é a
+      // mentira mais cara que a interface pode contar.
+      setErro(erro instanceof Error ? erro.message : 'Não foi possível carregar os alarmes.');
+    } finally {
+      setCarregando(false);
     }
   }, [session?.token, session?.apiUrl]);
 
@@ -77,5 +91,5 @@ export function useAlarms(session: Session | null): UseAlarms {
 
   const openAlarmCount = useMemo(() => alarms.filter((alarm) => alarm.status === 'OPEN').length, [alarms]);
 
-  return { alarms, openAlarmCount, reload, ack, resolve };
+  return { alarms, openAlarmCount, reload, ack, resolve, erro, carregando };
 }

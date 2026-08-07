@@ -137,8 +137,19 @@ export function PlaybackScreen({
 
       <View style={[styles.timelineCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
         <View style={styles.timelineHeader}>
-          <Text style={[styles.timelineTitle, { color: theme.text }]}>Linha do tempo · 24 horas</Text>
-          <Text style={[styles.timelineHint, { color: theme.textSub }]}>toque no trecho para abrir</Text>
+          {/* A régua desenha SÓ as gravações já carregadas (página de 50, mais
+              recentes primeiro). Rotulá-la "24 horas" fazia a madrugada de um
+              dia movimentado parecer vazia — o operador concluía que não houve
+              gravação. Enquanto houver página pendente, o título diz a verdade
+              e a dica convida a carregar o resto. */}
+          <Text style={[styles.timelineTitle, { color: theme.text }]}>
+            {recordingsTotal > recordings.length ? 'Linha do tempo · trecho carregado' : 'Linha do tempo · 24 horas'}
+          </Text>
+          <Text style={[styles.timelineHint, { color: theme.textSub }]}>
+            {recordingsTotal > recordings.length
+              ? `${recordings.length} de ${recordingsTotal} — role a lista para carregar mais`
+              : 'toque no trecho para abrir'}
+          </Text>
         </View>
         <View style={[styles.timelineTrack, { backgroundColor: theme.surfaceAlt }]}>
           {[25, 50, 75].map((left) => <View key={left} style={[styles.timelineGridLine, { left: `${left}%`, backgroundColor: theme.border }]} />)}

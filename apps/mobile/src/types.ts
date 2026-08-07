@@ -55,6 +55,9 @@ export type Camera = {
   canControl?: boolean;
   canRecord?: boolean;
   ptzCapable?: boolean;
+  /** Gravação armada para esta câmera (a API já devolve; o app não tipava). */
+  recordingEnabled?: boolean;
+  recordingMode?: string;
   preferredLiveProtocol?: string;
   detectedWidth?: number | null;
   detectedHeight?: number | null;

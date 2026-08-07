@@ -15,6 +15,7 @@ import { useTheme } from '../../theme/ThemeProvider';
 import { Icon, type IconName } from '../../components/Icon';
 import type { SavedClip } from '../../services/clips';
 import type { ActivePlayback, Camera, Direction, LiveDetection, Recording } from '../../types';
+import { isOnlineStatus, ptzLabel } from '../../utils/camera-view';
 
 const TITLE = 'Sora';
 const UI = 'InstrumentSans';
@@ -232,7 +233,12 @@ export function LiveScreenRedesign(props: Props) {
         {isPlaying ? (
           <View style={s.dateBadge}><Text style={s.dateText}>{new Date(activePlayback!.recording.startedAt).toLocaleDateString('pt-BR')}</Text></View>
         ) : (
-          <View style={s.liveBadge}><View style={s.liveDot} /><Text style={s.liveText}>AO VIVO</Text></View>
+          /* "AO VIVO" só quando a câmera está DE FATO online: o selo era fixo
+             e continuava vermelho com a câmera offline — a pílula sobre o vídeo
+             já dizia "Offline", dois avisos contraditórios na mesma tela. */
+          isOnlineStatus(camera.status)
+            ? <View style={s.liveBadge}><View style={s.liveDot} /><Text style={s.liveText}>AO VIVO</Text></View>
+            : <View style={s.dateBadge}><Text style={s.dateText}>Offline</Text></View>
         )}
       </View>
 
@@ -284,7 +290,7 @@ export function LiveScreenRedesign(props: Props) {
           {ptzFeedback ? (
             <View style={s.ptzFeedback}>
               <Icon name="crosshair" size={14} color={theme.accent} />
-              <Text style={s.ptzFeedbackText}>{ptzFeedback}</Text>
+              <Text style={s.ptzFeedbackText}>{ptzLabel(ptzFeedback)}</Text>
             </View>
           ) : null}
 

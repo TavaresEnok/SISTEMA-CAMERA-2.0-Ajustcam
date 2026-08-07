@@ -17,6 +17,8 @@ interface AlarmsScreenProps {
   canManage: boolean;
   refreshing: boolean;
   onRefresh: () => void;
+  /** Falha ao carregar — distingue "não há alarmes" de "não consegui perguntar". */
+  erro?: string | null;
   onAck: (alarm: Alarm) => void;
   onResolve: (alarm: Alarm) => void;
   onOpenCamera: (cameraId: string) => void;
@@ -35,7 +37,7 @@ function timeAgo(iso: string): string {
 }
 
 
-export function AlarmsScreen({ alarms, highlightedAlarmId, canManage, refreshing, onRefresh, onAck, onResolve, onOpenCamera }: AlarmsScreenProps) {
+export function AlarmsScreen({ alarms, highlightedAlarmId, canManage, refreshing, onRefresh, onAck, onResolve, onOpenCamera, erro}: AlarmsScreenProps) {
   const { theme } = useTheme();
   const [segment, setSegment] = useState<Segment>('Abertos');
 
@@ -115,7 +117,28 @@ export function AlarmsScreen({ alarms, highlightedAlarmId, canManage, refreshing
         })}
       </View>
 
-      {filtered.length === 0 ? (
+      {/* ERRO ≠ "TUDO TRANQUILO". Com a lista vazia POR FALHA, a tela afirmava
+          que não havia alarme — numa central de monitoramento, é a mentira mais
+          cara possível. Agora o erro tem cara de erro e oferece saída. */}
+      {filtered.length === 0 && erro ? (
+        <View style={[styles.empty, { borderColor: theme.danger }]}>
+          <View style={[styles.emptyIcon, { backgroundColor: theme.surface }]}>
+            <Icon name="alert" size={24} color={theme.danger} strokeWidth={2.2} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: theme.danger }]}>Não foi possível carregar</Text>
+          <Text style={[styles.emptyText, { color: theme.textSub }]}>
+            Isto é falha de comunicação — não quer dizer que não há alarmes.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Tentar carregar os alarmes novamente"
+            onPress={onRefresh}
+            style={[styles.retry, { borderColor: theme.border, backgroundColor: theme.surface }]}
+          >
+            <Text style={[styles.retryText, { color: theme.text }]}>Tentar novamente</Text>
+          </Pressable>
+        </View>
+      ) : filtered.length === 0 ? (
         <View style={[styles.empty, { borderColor: theme.border }]}>
           <View style={[styles.emptyIcon, { backgroundColor: theme.surface }]}>
             <Icon name="check" size={24} color={theme.success} strokeWidth={2.2} />
@@ -274,5 +297,7 @@ const styles = StyleSheet.create({
   empty: { borderWidth: 1, borderStyle: 'dashed', borderRadius: 20, paddingVertical: 36, paddingHorizontal: 22, alignItems: 'center', gap: 10 },
   emptyIcon: { width: 50, height: 50, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   emptyTitle: { fontSize: 14.5, fontWeight: '800' },
+  retry: { marginTop: 12, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9 },
+  retryText: { fontSize: 13, fontWeight: '600' },
   emptyText: { fontSize: 12.5, fontWeight: '500', textAlign: 'center' },
 });
