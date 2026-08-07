@@ -80,6 +80,10 @@ export type Recording = {
 export type ActivePlayback = {
   recording: Recording;
   url: string;
+  /** Fonte pedida ao servidor: original (padrão) ou versão compatível. */
+  fonte: 'direta' | 'compativel';
+  /** Segundo em que o vídeo deve retomar (renovação de token, degrau de codec). */
+  retomarEm?: number;
 };
 
 export type MobileCapabilities = {

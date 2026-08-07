@@ -56,6 +56,10 @@ interface LiveScreenProps {
   onOpenPlayback: (recording: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
+  onNaoDecodificou: () => boolean;
+  /** Posição corrente, para retomar o ponto ao trocar a URL. */
+  onProgressoPlayback: (segundos: number) => void;
   onDownloadRecording: (recording: Recording) => void;
   onPreviousDate: () => void;
   onNextDate: () => void;
@@ -112,7 +116,7 @@ export function LiveScreen({
   recordings, recordingsTotal, recordingsLoading, recordingsLoadingMore, recordingsError,
   myRecordings, onPlayLocal, onDeleteLocal, recordingDate, activePlayback, recordingActive, recordingBusy,
   onBack, onSendPtz, onToggleRecording, onSnapshot,
-  onOpenPlayback, onClosePlayback, onRetryPlayback, onDownloadRecording, onPreviousDate, onNextDate,
+  onOpenPlayback, onClosePlayback, onRetryPlayback, onNaoDecodificou, onProgressoPlayback, onDownloadRecording, onPreviousDate, onNextDate,
   onLoadMoreRecordings, onRetryRecordings, onThumbnailError, onRefreshStream,
   canPlayback, canDownload, downloadingIds,
   notificationsMuted, onToggleNotifications,
@@ -187,7 +191,7 @@ export function LiveScreen({
   const videoEl = (
     <>
       {playing ? (
-        <PlaybackVideo uri={activePlayback!.url} posterUri={activePlayback!.recording.thumbnailUrl} onRetry={onRetryPlayback} style={StyleSheet.absoluteFill} />
+        <PlaybackVideo uri={activePlayback!.url} posterUri={activePlayback!.recording.thumbnailUrl} onRetry={onRetryPlayback} onNaoDecodificou={onNaoDecodificou} onProgresso={onProgressoPlayback} initialPositionSeconds={activePlayback!.retomarEm ?? null} style={StyleSheet.absoluteFill} />
       ) : hdActive ? (
         // Máxima qualidade: HLS H.265 puro (whepUri=null força o caminho HLS).
         <LiveVideo

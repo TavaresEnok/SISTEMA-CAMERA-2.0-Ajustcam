@@ -35,6 +35,10 @@ interface PlaybackScreenProps {
   onOpenPlayback: (recording: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
+  onNaoDecodificou: () => boolean;
+  /** Posição corrente, para retomar o ponto ao trocar a URL. */
+  onProgressoPlayback: (segundos: number) => void;
   onDownloadRecording: (recording: Recording) => void;
   onPreviousDate: () => void;
   onNextDate: () => void;
@@ -46,7 +50,7 @@ interface PlaybackScreenProps {
 export function PlaybackScreen({
   cameras, selectedCamera, recordings, recordingsTotal, loading, loadingMore, error,
   activePlayback, recordingDate, canPlayback, canDownload, downloadingIds,
-  onSelectCamera, onOpenPlayback, onClosePlayback, onRetryPlayback, onDownloadRecording,
+  onSelectCamera, onOpenPlayback, onClosePlayback, onRetryPlayback, onNaoDecodificou, onProgressoPlayback, onDownloadRecording,
   onPreviousDate, onNextDate, onLoadMore, onRetry, onThumbnailError,
 }: PlaybackScreenProps) {
   const { theme } = useTheme();
@@ -79,7 +83,7 @@ export function PlaybackScreen({
       <View style={[styles.player, { borderColor: theme.border }]}>
         {activePlayback ? (
           <>
-            <PlaybackVideo uri={activePlayback.url} posterUri={playerPoster} onRetry={onRetryPlayback} style={StyleSheet.absoluteFill} />
+            <PlaybackVideo uri={activePlayback.url} posterUri={playerPoster} onRetry={onRetryPlayback} onNaoDecodificou={onNaoDecodificou} onProgresso={onProgressoPlayback} initialPositionSeconds={activePlayback.retomarEm ?? null} style={StyleSheet.absoluteFill} />
             <Pressable
               style={styles.closePlayback}
               onPress={onClosePlayback}

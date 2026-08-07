@@ -51,6 +51,11 @@ import { buildOperationalMessages } from './src/utils/operational';
 import { cameraPosterUrl, clipDownloadUrl, recordingThumbnailUrl } from './src/utils/media-endpoints';
 import { reviewFeedPath, reviewPlayUrl, reviewPlaybackTarget, type ReviewFilters, type ReviewFeedResponse, type ReviewItem } from './src/utils/review';
 import type { ActivePlayback, Camera, Direction, MobileCapabilities, Recording, Session, StreamUrls, Tab, User } from './src/types';
+import { montarUrlDeReproducao } from './src/utils/playback-source';
+
+// O play-token vale 5 min no servidor; renovar aos 4 dá folga para a
+// requisição e a troca de fonte acontecerem antes de vencer.
+const PLAY_TOKEN_RENEW_MS = 4 * 60 * 1000;
 
 const RECORDINGS_PAGE_SIZE = 50;
 
@@ -104,6 +109,9 @@ function AppInner() {
   const [recordingsLoadingMore, setRecordingsLoadingMore] = useState(false);
   const [recordingsError, setRecordingsError] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<ActivePlayback | null>(null);
+  // Espelho para os timers lerem o playback VIGENTE sem stale closure.
+  const activePlaybackRef = useRef<ActivePlayback | null>(null);
+  useEffect(() => { activePlaybackRef.current = activePlayback; }, [activePlayback]);
   const [ptzActive, setPtzActive] = useState<Direction | null>(null);
   const [ptzFeedback, setPtzFeedback] = useState<string | null>(null);
   const [recordingActive, setRecordingActive] = useState(false);
@@ -1146,6 +1154,9 @@ function AppInner() {
     setActivePlayback({
       recording: { id: clip.id, cameraId: clip.cameraId, startedAt: clip.createdAt, thumbnailUrl: clip.thumbnailUri },
       url: clip.uri,
+      // Arquivo local: não passa pelo servidor, então não há fonte a negociar
+      // nem token a renovar (o efeito de renovação ignora URLs `file:`).
+      fonte: 'direta',
     });
   };
 
@@ -1157,24 +1168,70 @@ function AppInner() {
     setSavedClips(await removeClip(sessionScope, clip.id));
   };
 
-  const openPlayback = async (recording: Recording) => {
+  // Abre a reprodução pedindo a fonte DIRETA (arquivo original, pass-through).
+  // `fonte` e `retomarEm` existem para o degrau de codec e para a renovação do
+  // play-token, que trocam a URL sem o usuário perder o ponto do vídeo.
+  const openPlayback = async (
+    recording: Recording,
+    opcoes: { fonte?: 'direta' | 'compativel'; retomarEm?: number; silencioso?: boolean } = {},
+  ) => {
     if (!session || !capabilities.playback) return;
+    const fonte = opcoes.fonte ?? 'direta';
     const token = session.token;
     const generation = ++playbackRequestRef.current;
     try {
       const data = await request<{ playToken: string }>(session.apiUrl, `/recordings/${recording.id}/play-token`, session.token, { method: 'POST' });
-      const url = normalizeServerUrl(`${session.apiUrl}/recordings/${recording.id}/play?token=${encodeURIComponent(data.playToken)}&compatible=1`, session.apiUrl);
+      const url = normalizeServerUrl(
+        montarUrlDeReproducao(session.apiUrl, recording.id, data.playToken, fonte),
+        session.apiUrl,
+      );
       if (!url) throw new Error('URL de reprodução indisponível.');
       if (
         sessionTokenRef.current !== token
         || playbackRequestRef.current !== generation
         || selectedCameraIdRef.current !== recording.cameraId
       ) return;
-      setActivePlayback({ recording, url });
+      setActivePlayback({ recording, url, fonte, retomarEm: opcoes.retomarEm });
     } catch (error) {
       if (sessionTokenRef.current !== token || playbackRequestRef.current !== generation) return;
+      // Renovação silenciosa não pode virar alerta: o vídeo está tocando.
+      if (opcoes.silencioso) return;
       Alert.alert('Reprodução', error instanceof Error ? error.message : 'Não foi possível abrir a gravação.');
     }
+  };
+
+  // ── RENOVAÇÃO DO PLAY-TOKEN DURANTE A REPRODUÇÃO ──────────────────────────
+  //
+  // O token de reprodução vale 5 minutos e era emitido UMA vez, congelado na
+  // URL. Pausar o vídeo (ou esgotar o buffer) por mais que isso e dar play/seek
+  // levava 401 → "Não foi possível reproduzir". O web renova a cada 15s; aqui
+  // basta reemitir antes de vencer, preservando o ponto em que o usuário está.
+  const posicaoDoPlaybackRef = useRef(0);
+  useEffect(() => {
+    if (!activePlayback || activePlayback.url.startsWith('file:')) return;
+    const timer = setInterval(() => {
+      const atual = activePlaybackRef.current;
+      if (!atual || atual.url.startsWith('file:')) return;
+      void openPlayback(atual.recording, {
+        fonte: atual.fonte,
+        retomarEm: posicaoDoPlaybackRef.current,
+        silencioso: true,
+      });
+    }, PLAY_TOKEN_RENEW_MS);
+    return () => clearInterval(timer);
+  }, [activePlayback?.recording.id, activePlayback?.fonte]);
+
+  // Degrau de codec: o player não conseguiu decodificar o arquivo original
+  // (codec exótico, ou aparelho sem HEVC por hardware). Aí sim vale pagar o
+  // transcode — e só nesse caso.
+  const tentarFonteCompativel = () => {
+    const atual = activePlaybackRef.current;
+    if (!atual || atual.fonte !== 'direta') return false;
+    void openPlayback(atual.recording, {
+      fonte: 'compativel',
+      retomarEm: posicaoDoPlaybackRef.current,
+    });
+    return true;
   };
 
   const closePlayback = () => {
@@ -1191,7 +1248,9 @@ function AppInner() {
       if (clip) setTimeout(() => playLocalClip(clip), 0);
       return;
     }
-    void openPlayback(current.recording);
+    // Ao repetir manualmente, volta para a fonte direta: se o problema era
+    // token vencido, não há motivo para pagar transcode.
+    void openPlayback(current.recording, { fonte: current.fonte, retomarEm: posicaoDoPlaybackRef.current });
   };
 
   // ─── Revisão (item 2.7) ────────────────────────────────────────────────────
@@ -1533,6 +1592,8 @@ function AppInner() {
             onOpenPlayback={openPlayback}
             onClosePlayback={closePlayback}
             onRetryPlayback={retryPlayback}
+            onNaoDecodificou={tentarFonteCompativel}
+            onProgressoPlayback={(segundos: number) => { posicaoDoPlaybackRef.current = segundos; }}
             onPreviousDate={() => shiftRecordingDate(-1)}
             onNextDate={() => shiftRecordingDate(1)}
             onSelectDate={(key) => setRecordingDate(key)}
@@ -1576,6 +1637,8 @@ function AppInner() {
           onOpenPlayback={openPlayback}
           onClosePlayback={closePlayback}
           onRetryPlayback={retryPlayback}
+          onNaoDecodificou={tentarFonteCompativel}
+          onProgressoPlayback={(segundos: number) => { posicaoDoPlaybackRef.current = segundos; }}
           onDownloadRecording={downloadRecording}
           onPreviousDate={() => shiftRecordingDate(-1)}
           onNextDate={() => shiftRecordingDate(1)}
@@ -1699,6 +1762,8 @@ function AppInner() {
             onOpenPlayback={openPlayback}
             onClosePlayback={closePlayback}
             onRetryPlayback={retryPlayback}
+            onNaoDecodificou={tentarFonteCompativel}
+            onProgressoPlayback={(segundos: number) => { posicaoDoPlaybackRef.current = segundos; }}
             onDownloadRecording={downloadRecording}
             onPreviousDate={() => shiftRecordingDate(-1)}
             onNextDate={() => shiftRecordingDate(1)}

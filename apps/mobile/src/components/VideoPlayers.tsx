@@ -14,6 +14,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { ehPreparoEmAndamento, esperaAteRetentar } from '../utils/playback-source';
 import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { WebRtcVideo } from './WebRtcVideo';
 import { Icon } from './Icon';
@@ -343,7 +344,7 @@ const PLAYBACK_RATES = [1, 1.5, 2, 0.5];
  * play/pause central, avançar/retroceder 10s, barra de progresso arrastável
  * (scrubbing), velocidade e tempo. Toque mostra/esconde; auto-esconde tocando.
  */
-export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionSeconds }: {
+export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionSeconds, onNaoDecodificou, onProgresso }: {
   uri: string;
   posterUri?: string | null;
   style: StyleProp<ViewStyle>;
@@ -351,6 +352,12 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionS
   /** Seek inicial (s) aplicado assim que a gravação fica pronta — usado pela
    *  Revisão para abrir o vídeo NO INSTANTE do evento (recordingId+offset). */
   initialPositionSeconds?: number | null;
+  /** O player não conseguiu decodificar o arquivo original: o dono pode pedir
+   *  a versão compatível (transcodada). Devolve true se houve degrau. */
+  onNaoDecodificou?: () => boolean;
+  /** Posição corrente, para o dono retomar o ponto ao trocar a URL (renovação
+   *  de token ou degrau de codec). */
+  onProgresso?: (segundos: number) => void;
 }) {
   const { theme } = useTheme();
   const player = useVideoPlayer(null, (instance) => {
@@ -377,6 +384,79 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionS
   // Seek pendente do "abrir no instante": aplicado uma única vez quando a
   // gravação fica pronta (o currentTime só "pega" depois do readyToPlay).
   const pendingSeekRef = useRef<number | null>(null);
+  // ── 503 "PREPARANDO" NÃO É FALHA ────────────────────────────────────────
+  // Quando a versão compatível ainda não está em cache, o servidor responde
+  // 503 { preparing: true } com Retry-After e transcodifica em segundo plano.
+  // O player mostrava "Não foi possível reproduzir" e deixava o usuário
+  // tocando "Tentar novamente" às cegas por até 5 minutos.
+  const [preparando, setPreparando] = useState(false);
+  const tentativaDePreparoRef = useRef(0);
+  const timerDePreparoRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const degrauTentadoRef = useRef(false);
+  // Watchdog de buffering: diferente do live, a reprodução não tinha timeout —
+  // conexão que morria no meio virava spinner infinito, sem saída.
+  const bufferingDesdeRef = useRef<number | null>(null);
+
+  // ── POR QUE O VÍDEO NÃO ABRIU ───────────────────────────────────────────
+  //
+  // O player só informa "error", sem status nem corpo. Uma sonda HTTP leve
+  // (Range de 1 byte) distingue os três casos que exigem reações OPOSTAS:
+  //
+  //   503 preparing → o transcode está rodando: esperar e tentar sozinho;
+  //   401/403       → token venceu: o dono reemite (retry devolve token novo);
+  //   qualquer outro (ou decodificação) → degrau para a versão compatível.
+  const diagnosticarFalha = useCallback(async () => {
+    if (uri.startsWith('file:')) { setPlaybackError(true); return; }
+    let status: number | null = null;
+    let retryAfter: string | null = null;
+    try {
+      const resposta = await fetch(uri, { method: 'GET', headers: { Range: 'bytes=0-0' } });
+      status = resposta.status;
+      retryAfter = resposta.headers.get('Retry-After');
+    } catch {
+      status = null; // rede: trata como erro comum
+    }
+
+    if (ehPreparoEmAndamento(status)) {
+      // Nada quebrou: o servidor está transcodificando. Avisa e reagenda.
+      setPlaybackError(false);
+      setPreparando(true);
+      const tentativa = tentativaDePreparoRef.current++;
+      // Teto de tentativas: o transcode leva até ~5 min; passando disso, algo
+      // está errado de verdade e insistir só esconde o problema.
+      if (tentativa > 40) { setPreparando(false); setPlaybackError(true); return; }
+      const espera = esperaAteRetentar(retryAfter, tentativa) * 1000;
+      if (timerDePreparoRef.current) clearTimeout(timerDePreparoRef.current);
+      timerDePreparoRef.current = setTimeout(() => {
+        try { player.replace({ uri }); player.play(); } catch { /* ignore */ }
+      }, espera);
+      return;
+    }
+
+    // Não é preparo: talvez o aparelho não decodifique este arquivo. UMA
+    // tentativa de degrau (o dono decide se existe fonte compatível).
+    if (!degrauTentadoRef.current && onNaoDecodificou) {
+      degrauTentadoRef.current = true;
+      if (onNaoDecodificou()) { setPreparando(true); return; }
+    }
+    setPreparando(false);
+    setPlaybackError(true);
+  }, [uri, player, onNaoDecodificou]);
+
+  // Watchdog: buffering que não sai do lugar vira erro com saída, em vez de
+  // spinner eterno (o live já tinha isto; a reprodução não).
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!bufferingDesdeRef.current || playbackError || preparando) return;
+      if (Date.now() - bufferingDesdeRef.current > 25_000) {
+        bufferingDesdeRef.current = null;
+        void diagnosticarFalha();
+      }
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [diagnosticarFalha, playbackError, preparando]);
+
+  useEffect(() => () => { if (timerDePreparoRef.current) clearTimeout(timerDePreparoRef.current); }, []);
 
   // Troca de gravação: a tela reusa este componente, então ao mudar a uri
   // recarregamos a fonte (sem recriar o player) e resetamos o estado.
@@ -391,6 +471,11 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionS
       setPlaybackError(false);
       // Nova gravação → arma (ou limpa) o seek inicial para esta uri.
       pendingSeekRef.current = typeof initialPositionSeconds === 'number' && initialPositionSeconds > 0 ? initialPositionSeconds : null;
+      setPreparando(false);
+      tentativaDePreparoRef.current = 0;
+      degrauTentadoRef.current = false;
+      bufferingDesdeRef.current = Date.now();
+      if (timerDePreparoRef.current) { clearTimeout(timerDePreparoRef.current); timerDePreparoRef.current = null; }
       player.replace({ uri });
       player.playbackRate = 1;
       player.play();
@@ -403,13 +488,17 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionS
     const timeSub = player.addListener('timeUpdate', (p: { currentTime?: number }) => {
       if (scrubbingRef.current) return;
       const cur = typeof p?.currentTime === 'number' ? p.currentTime : player.currentTime;
-      if (Number.isFinite(cur)) setPosition(cur);
+      if (Number.isFinite(cur)) { setPosition(cur); onProgresso?.(cur); }
+      bufferingDesdeRef.current = null;
       const d = player.duration;
       if (Number.isFinite(d) && d > 0) { durationRef.current = d; setDuration(d); }
     });
     const statusSub = player.addListener('statusChange', (p: { status?: string }) => {
-      setBuffering(p?.status === 'loading');
-      if (p?.status === 'error') setPlaybackError(true);
+      const carregando = p?.status === 'loading';
+      setBuffering(carregando);
+      if (carregando && bufferingDesdeRef.current == null) bufferingDesdeRef.current = Date.now();
+      if (!carregando) bufferingDesdeRef.current = null;
+      if (p?.status === 'error') void diagnosticarFalha();
       if (p?.status === 'readyToPlay') {
         setPlaybackError(false);
         const d = player.duration;
@@ -532,6 +621,16 @@ export function PlaybackVideo({ uri, posterUri, style, onRetry, initialPositionS
       {buffering ? (
         <View style={[StyleSheet.absoluteFill, playerLocal.center]} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
+        </View>
+      ) : null}
+
+      {preparando && !playbackError ? (
+        <View style={[StyleSheet.absoluteFill, playerLocal.error]}>
+          <ActivityIndicator color="#fff" />
+          <Text style={[playerLocal.errorText, { marginTop: 10 }]}>Preparando o vídeo…</Text>
+          <Text style={[playerLocal.errorText, { fontSize: 11, opacity: 0.75, marginTop: 4 }]}>
+            O servidor está convertendo esta gravação. Começa sozinho quando ficar pronta.
+          </Text>
         </View>
       ) : null}
 

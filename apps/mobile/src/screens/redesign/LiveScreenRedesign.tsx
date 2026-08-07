@@ -14,7 +14,7 @@ import { LiveVideo, PlaybackVideo, type LiveStatus } from '../../components/Vide
 import { useTheme } from '../../theme/ThemeProvider';
 import { Icon, type IconName } from '../../components/Icon';
 import type { SavedClip } from '../../services/clips';
-import type { Camera, Direction, LiveDetection, Recording } from '../../types';
+import type { ActivePlayback, Camera, Direction, LiveDetection, Recording } from '../../types';
 
 const TITLE = 'Sora';
 const UI = 'InstrumentSans';
@@ -36,7 +36,7 @@ interface Props {
   recordingsError: string | null;
   recordingsTotal: number;
   recordingDate: string;
-  activePlayback: { recording: Recording; url: string } | null;
+  activePlayback: ActivePlayback | null;
   recordingActive: boolean;
   recordingBusy: boolean;
   ptzActive: Direction | null;
@@ -56,6 +56,10 @@ interface Props {
   onOpenPlayback: (r: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
+  onNaoDecodificou: () => boolean;
+  /** Posição corrente, para retomar o ponto ao trocar a URL. */
+  onProgressoPlayback: (segundos: number) => void;
   onPreviousDate: () => void;
   onNextDate: () => void;
   onSelectDate: (dateKey: string) => void;
@@ -133,7 +137,7 @@ export function LiveScreenRedesign(props: Props) {
   // Entrar/sair da tela cheia remonta o player (o stream reconecta em ~1s),
   // mesmo custo de trocar de câmera — aceitável e simples.
   const video = isPlaying ? (
-    <PlaybackVideo uri={activePlayback!.url} posterUri={activePlayback!.recording.thumbnailUrl} onRetry={props.onRetryPlayback} style={s.videoFill} />
+    <PlaybackVideo uri={activePlayback!.url} posterUri={activePlayback!.recording.thumbnailUrl} onRetry={props.onRetryPlayback} onNaoDecodificou={props.onNaoDecodificou} onProgresso={props.onProgressoPlayback} initialPositionSeconds={activePlayback!.retomarEm ?? null} style={s.videoFill} />
   ) : (
     <LiveVideo
       uri={hdActive ? hdUrl : streamUrl}
