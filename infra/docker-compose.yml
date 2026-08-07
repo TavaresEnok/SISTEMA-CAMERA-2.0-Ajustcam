@@ -116,6 +116,8 @@ services:
       - vms-net
 
   central-data-backup:
+    # Acompanha a Central: só existe onde ela existe.
+    profiles: ["central"]
     image: alpine:3.20
     container_name: vms-central-data-backup
     restart: unless-stopped
@@ -130,6 +132,18 @@ services:
     command: ["/bin/sh", "/backup-central-data.sh"]
 
   drac-central:
+    # ── PAINEL MESTRE — NÃO roda no servidor do cliente ────────────────────
+    #
+    # A Central administra a FROTA de instalações; uma instalação de cliente é
+    # administrada POR ela, não roda uma cópia dela. Sem este perfil, todo
+    # `docker compose up` num servidor de cliente subia o painel mestre —
+    # descoberto na instalação do D-GUARDIAN (07/08/2026), onde ele ainda
+    # entrava em laço de reinício por não conseguir escrever seu arquivo de
+    # dados. Além do desperdício, é confuso e desnecessário expor o painel da
+    # operação inteira na máquina de um cliente.
+    #
+    # No servidor MESTRE, subir com `--profile central`.
+    profiles: ["central"]
     build:
       context: ..
       dockerfile: apps/central/Dockerfile
@@ -496,7 +510,12 @@ services:
       - /var/run:rw,noexec,nosuid,nodev,size=8m,uid=101,gid=101
     depends_on:
       - api
-      - drac-central
+      # `drac-central` NÃO entra aqui: ele vive sob o perfil "central" e não
+      # existe numa instalação de cliente. Declarar a dependência tornava o
+      # arquivo INVÁLIDO sem o perfil ("depends on undefined service"), o que
+      # derrubaria toda instalação nova. O nginx do web só encaminha /central/
+      # quando há para onde encaminhar — a ausência é tratada em tempo de
+      # requisição, não de composição.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
