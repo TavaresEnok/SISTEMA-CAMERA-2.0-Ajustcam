@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-DRAC_REPO_URL="${DRAC_REPO_URL:-https://github.com/TavaresEnok/DRAC.git}"
+# O repositório REAL do produto. O padrão anterior (TavaresEnok/DRAC) não
+# contém os commits publicados pela Central — clonar de lá falha com
+# "upload-pack: not our ref" no commit fixado.
+DRAC_REPO_URL="${DRAC_REPO_URL:-https://github.com/TavaresEnok/SISTEMA-CAMERA-2.0-Ajustcam.git}"
 DRAC_INSTALLER_COMMIT="${DRAC_INSTALLER_COMMIT:-}"
-DRAC_INSTALL_DIR="${DRAC_INSTALL_DIR:-/home/flashnet/Drac}"
-DRAC_OPERATING_USER="${DRAC_OPERATING_USER:-flashnet}"
+# Padrões de PRODUTO, não da máquina de desenvolvimento.
+#
+# Até 07/08/2026 estes eram `/home/flashnet/Drac` e `flashnet` — o diretório e
+# o usuário do desenvolvedor. Numa instalação de cliente isso criava uma pasta
+# com o nome de alguém que não existe naquele servidor, e um usuário idem.
+# `/opt/drac` é onde software de terceiro mora em Linux, e o usuário operador
+# passa a ser quem de fato invocou o instalador (via sudo), com queda para
+# `drac` quando não dá para saber.
+DRAC_INSTALL_DIR="${DRAC_INSTALL_DIR:-/opt/drac}"
+DRAC_OPERATING_USER="${DRAC_OPERATING_USER:-${SUDO_USER:-drac}}"
 DRAC_CENTRAL_URL="${DRAC_CENTRAL_URL:-https://ajustcam.ajustconsulting.com.br/central}"
 DRAC_ENVIRONMENT="${DRAC_ENVIRONMENT:-prod}"
 DRAC_AUTO_YES="${DRAC_AUTO_YES:-false}"
