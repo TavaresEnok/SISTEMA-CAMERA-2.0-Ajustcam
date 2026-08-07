@@ -408,13 +408,27 @@ prepare_env() {
   env_set "$env_file" CLOUD_CONNECTOR_TIMEOUT_MS "8000"
   env_set "$env_file" DRAC_VERSION "$DRAC_INSTALLER_COMMIT"
   env_set "$env_file" DRAC_LAUNCH_PROFILE "standard"
-  env_set "$env_file" DRAC_API_BIND "0.0.0.0"
-  env_set "$env_file" DRAC_WEB_BIND "0.0.0.0"
+  # ── O QUE FICA EXPOSTO À INTERNET ─────────────────────────────────────────
+  #
+  # ATENÇÃO: publicar em 0.0.0.0 aqui EXPÕE DE VERDADE, mesmo com ufw ativo —
+  # o Docker escreve regras de DNAT que são avaliadas ANTES das do firewall.
+  # Medido na instalação do D-GUARDIAN: ufw liberava só 22/80/443/1935/8189 e,
+  # ainda assim, a API (3000), o HLS (8888) e a sinalização WebRTC (8889)
+  # respondiam da internet — a API inteira alcançável sem HTTPS e sem passar
+  # pelo nginx.
+  #
+  # A regra: só é público o que NÃO PODE passar pelo nginx.
+  #   · 8189/udp — mídia WebRTC: o navegador conecta direto no IP anunciado.
+  #   · 1935/tcp — RTMP: a câmera disca para cá (tratado à parte).
+  # Todo o resto (API, web, HLS, sinalização, RTSP) fica em loopback e é
+  # servido pelo nginx do host, com HTTPS.
+  env_set "$env_file" DRAC_API_BIND "127.0.0.1"
+  env_set "$env_file" DRAC_WEB_BIND "127.0.0.1"
   env_set "$env_file" DRAC_POSTGRES_BIND "127.0.0.1"
   env_set "$env_file" DRAC_REDIS_BIND "127.0.0.1"
-  env_set "$env_file" DRAC_MEDIAMTX_RTSP_BIND "0.0.0.0"
-  env_set "$env_file" DRAC_MEDIAMTX_HLS_BIND "0.0.0.0"
-  env_set "$env_file" DRAC_MEDIAMTX_WEBRTC_HTTP_BIND "0.0.0.0"
+  env_set "$env_file" DRAC_MEDIAMTX_RTSP_BIND "127.0.0.1"
+  env_set "$env_file" DRAC_MEDIAMTX_HLS_BIND "127.0.0.1"
+  env_set "$env_file" DRAC_MEDIAMTX_WEBRTC_HTTP_BIND "127.0.0.1"
   env_set "$env_file" DRAC_MEDIAMTX_WEBRTC_UDP_BIND "0.0.0.0"
   env_set "$env_file" MEDIAMTX_WEBRTC_ADDITIONAL_HOST "$DRAC_SERVER_IP"
   env_set "$env_file" MEDIAMTX_PUBLIC_HOST "$DRAC_SERVER_IP"
