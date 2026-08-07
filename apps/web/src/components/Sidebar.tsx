@@ -81,6 +81,18 @@ const NAV_SECTIONS: NavSection[] = [
   },
 ];
 
+/**
+ * Páginas ESCONDIDAS do menu.
+ *
+ * A rota continua existindo e funcionando — quem tem o endereço direto entra
+ * normalmente. É só a porta de entrada visível que sai do caminho do operador.
+ * Para voltar a exibir qualquer uma, basta tirá-la desta lista.
+ *
+ * Uma seção que fique sem nenhum item visível desaparece junto (é o caso de
+ * "Investigação", cujo único item é /investigation).
+ */
+const PAGINAS_OCULTAS = new Set<string>(['/ia', '/investigation', '/audit-logs']);
+
 /* Role accent — no red for admin; steel blue hierarchy */
 const ROLE_COLOR: Record<string, string> = {
   admin:    'text-[hsl(var(--primary))]',
@@ -110,8 +122,11 @@ export function Sidebar({
   const visibleSections = NAV_SECTIONS
     .map((section) => ({
       ...section,
-      items: section.items.filter((item) => !item.roles || item.roles.includes(role)),
+      items: section.items.filter(
+        (item) => (!item.roles || item.roles.includes(role)) && !PAGINAS_OCULTAS.has(item.path),
+      ),
     }))
+    // Seção que ficou sem nenhum item some junto (é o que apaga "Investigação").
     .filter((section) => section.items.length > 0);
 
   return (
