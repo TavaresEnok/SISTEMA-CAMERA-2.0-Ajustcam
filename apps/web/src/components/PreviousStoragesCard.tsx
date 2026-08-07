@@ -238,8 +238,8 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
             {/* A confirmação diz o que vai acontecer com ESTE storage, com os
                 números dele. Um "tem certeza?" genérico não informa nada. */}
             {aberto && confirmando.acao === 'esvaziar' && (
-              <div className="mt-3 rounded border border-[hsl(var(--status-critical)_/_0.4)] bg-[hsl(var(--status-critical)_/_0.08)] p-3">
-                <div className="text-sm font-medium text-[hsl(var(--status-critical))]">
+              <div className="mt-3 rounded border border-[hsl(var(--destructive)_/_0.4)] bg-[hsl(var(--destructive)_/_0.08)] p-3">
+                <div className="text-sm font-medium text-[hsl(var(--destructive))]">
                   Apagar os arquivos em {s.bucket}
                 </div>
                 <p className="mt-1 text-xs">
@@ -262,7 +262,7 @@ export function PreviousStoragesCard({ apiUrl, accessToken }: { apiUrl: string; 
                     type="button"
                     disabled={executando || digitado !== s.bucket}
                     onClick={() => void esvaziar(s)}
-                    className="rounded bg-[hsl(var(--status-critical))] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+                    className="rounded bg-[hsl(var(--destructive))] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
                   >
                     {executando ? 'Apagando…' : 'Apagar definitivamente'}
                   </button>

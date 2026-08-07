@@ -1502,7 +1502,7 @@ export default function CameraDetailPage() {
                   />
                 </div>
               ) : null}
-              <div className="scan-line-overlay absolute inset-0" />
+              <div className="camera-scanline absolute inset-0" />
               {!cam.isOnline && <Camera className="h-12 w-12 text-muted-foreground/35" />}
               <div className="absolute left-2 top-2 z-10 flex items-center gap-2">
                 <div className={cn('h-2 w-2 rounded-full', isRecordingActive ? 'rec-pulse bg-[hsl(var(--destructive))]' : 'bg-[hsl(var(--status-online))]')} />

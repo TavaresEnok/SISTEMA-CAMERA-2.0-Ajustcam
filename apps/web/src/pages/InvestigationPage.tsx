@@ -210,6 +210,23 @@ export default function InvestigationPage() {
   // comprimento JÁ CORTADO por slice(40) como se fosse o total: "40
   // ocorrências encontradas" com 900 existentes é afirmação factualmente
   // errada — e numa investigação isso pode ir a juízo.
+  // MOTIVO DO RELATÓRIO em diálogo, não em `window.prompt`: a caixa nativa é
+  // bloqueável pelo navegador, não valida, fica fora do tema e não permite
+  // revisar o texto — e este motivo é registro de auditoria.
+  const [pedindoMotivo, setPedindoMotivo] = useState(false);
+  const [motivoRelatorio, setMotivoRelatorio] = useState('');
+  const gerarRelatorio = useCallback(async (reason: string) => {
+    if (!investigationId || !reason.trim()) return;
+    try {
+      const { data } = await client.get<{ html: string }>(
+        `/investigations/${investigationId}/report?reason=${encodeURIComponent(reason.trim())}`,
+      );
+      setReportHtml(data.html);
+    } catch (error) {
+      toast({ title: 'Falha ao gerar relatório', description: error instanceof Error ? error.message : 'Erro no relatório', variant: 'destructive' });
+    }
+  }, [client, investigationId]);
+
   const trackEventsTotal = useMemo(() => {
     const q = query.trim().toLowerCase();
     return events
@@ -593,17 +610,7 @@ export default function InvestigationPage() {
               {savingLegalHold ? 'Salvando...' : 'Salvar preservação'}
             </button>
             <button
-              onClick={async () => {
-                if (!investigationId) return;
-                const reason = window.prompt('Motivo para gerar relatório (obrigatório):')?.trim() ?? '';
-                if (!reason) return;
-                try {
-                  const { data } = await client.get<{ html: string }>(`/investigations/${investigationId}/report?reason=${encodeURIComponent(reason)}`);
-                  setReportHtml(data.html);
-                } catch (error) {
-                  toast({ title: 'Falha ao gerar relatório', description: error instanceof Error ? error.message : 'Erro no relatório', variant: 'destructive' });
-                }
-              }}
+              onClick={() => { if (investigationId) { setMotivoRelatorio(''); setPedindoMotivo(true); } }}
               className="h-8 rounded border border-border px-3 text-xs hover:bg-[hsl(var(--accent))]"
             >
               Gerar Relatório
@@ -880,7 +887,7 @@ export default function InvestigationPage() {
       {reportHtml && (
         <div className="border-t border-border bg-card p-3">
           <div className="mb-2 text-xs font-semibold">Pré-visualização do relatório</div>
-          <iframe title="Relatório" srcDoc={reportHtml} className="h-80 w-full rounded border border-border bg-white" />
+          <iframe title="Relatório" aria-label="Relatório" srcDoc={reportHtml} className="h-80 w-full rounded border border-border bg-white" />
         </div>
       )}
 
@@ -894,6 +901,39 @@ export default function InvestigationPage() {
         </div>
         <div>{format(new Date(), 'dd/MM/yyyy HH:mm:ss')}</div>
       </div>
+      {pedindoMotivo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl">
+            <h2 className="text-sm font-semibold">Motivo para gerar o relatório</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              O motivo fica registrado junto com o relatório, para auditoria.
+            </p>
+            <label className="sr-only" htmlFor="motivo-relatorio">Motivo</label>
+            <textarea
+              id="motivo-relatorio"
+              autoFocus
+              rows={3}
+              value={motivoRelatorio}
+              onChange={(event) => setMotivoRelatorio(event.target.value)}
+              className="input mt-3 w-full resize-y py-2"
+              placeholder="Descreva o motivo (obrigatório)"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setPedindoMotivo(false)} className="btn btn-secondary btn-sm">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={!motivoRelatorio.trim()}
+                onClick={() => { const texto = motivoRelatorio; setPedindoMotivo(false); void gerarRelatorio(texto); }}
+                className="btn btn-primary btn-sm disabled:opacity-40"
+              >
+                Gerar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -189,7 +189,7 @@ export default function MonitoramentoPage() {
           <div className="bg-card border border-border rounded-xl p-4"><div className="text-[10px] uppercase text-[hsl(var(--muted-foreground))]">Livre</div><div className="mt-2 text-2xl font-semibold">{free.toFixed(1)} TB</div></div>
         </div>
       </div>
-      <StorageSection title="Saúde do servidor" open={openStorageSections.health} onToggle={() => toggleStorageSection('health')}>
+      <StorageSection title="Saúde do servidor" aria-label="Saúde do servidor" open={openStorageSections.health} onToggle={() => toggleStorageSection('health')}>
         <div className="flex items-start justify-between gap-4 border-b border-border/70 px-5 py-4">
           <div className="min-w-0">
             <h3 className="text-[15px] font-semibold text-foreground">Uso atual</h3>
@@ -233,7 +233,7 @@ export default function MonitoramentoPage() {
           </div>
         </div>
       </StorageSection>
-      <StorageSection title="Volumes" open={openStorageSections.volumes} onToggle={() => toggleStorageSection('volumes')}>
+      <StorageSection title="Volumes" aria-label="Volumes" open={openStorageSections.volumes} onToggle={() => toggleStorageSection('volumes')}>
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <div>
             <div className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">Detalhes de armazenamento</div>
@@ -265,14 +265,14 @@ export default function MonitoramentoPage() {
           </tbody>
         </table>
       </StorageSection>
-      <StorageSection title="Armazenamento em nuvem" open={openStorageSections.cloud} onToggle={() => toggleStorageSection('cloud')}>
+      <StorageSection title="Armazenamento em nuvem" aria-label="Armazenamento em nuvem" open={openStorageSections.cloud} onToggle={() => toggleStorageSection('cloud')}>
         <CloudStorageCard apiUrl={API_URL} accessToken={accessToken} />
         {/* Só aparece quando existe storage anterior — é o que sobra de uma
             troca de fornecedor, e continua sendo pago até alguém esvaziá-lo. */}
         <PreviousStoragesCard apiUrl={API_URL} accessToken={accessToken} />
       </StorageSection>
 
-      <StorageSection title="Uso por câmera" open={openStorageSections.cameras} onToggle={() => toggleStorageSection('cameras')}>
+      <StorageSection title="Uso por câmera" aria-label="Uso por câmera" open={openStorageSections.cameras} onToggle={() => toggleStorageSection('cameras')}>
         <div className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
           <div>
             <div className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">Gravações e clipes exportados no período selecionado</div>

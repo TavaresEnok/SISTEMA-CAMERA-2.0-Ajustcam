@@ -699,7 +699,7 @@ export default function AlertasPage() {
             <button
               onClick={limparFiltros}
               className="btn btn-secondary btn-sm"
-              title="Remover todos os filtros aplicados no modo avançado"
+              title="Remover todos os filtros aplicados no modo avançado" aria-label="Remover todos os filtros aplicados no modo avançado"
             >
               <Filter className="h-3.5 w-3.5" />
               {filtrosAtivosCount} filtro(s) ativo(s) · limpar
@@ -714,7 +714,7 @@ export default function AlertasPage() {
           <button
             onClick={toggleAlarmSound}
             className="btn btn-secondary btn-sm btn-icon"
-            title={muted ? 'Ativar som' : 'Silenciar alertas'}
+            title={muted ? 'Ativar som' : 'Silenciar alertas'} aria-label={muted ? 'Ativar som' : 'Silenciar alertas'}
           >
             {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
           </button>

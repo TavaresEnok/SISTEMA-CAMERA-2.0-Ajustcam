@@ -88,9 +88,14 @@ export default function EvidencePage() {
     }
   };
 
-  const review = async (id: string, decision: 'APPROVED' | 'REJECTED') => {
-    const why = window.prompt(`Motivo para ${decision === 'APPROVED' ? 'aprovar' : 'rejeitar'}:`)?.trim() ?? '';
-    if (!why) return;
+  // Diálogo de justificativa: um só, reaproveitado pelas três decisões que
+  // exigem motivo registrado na cadeia de custódia.
+  const [motivoAlvo, setMotivoAlvo] = useState<
+    { tipo: 'review'; id: string; decision: 'APPROVED' | 'REJECTED' } | { tipo: 'execute'; id: string } | null
+  >(null);
+  const [motivoTexto, setMotivoTexto] = useState('');
+
+  const review = async (id: string, decision: 'APPROVED' | 'REJECTED', why: string) => {
     try {
       await client.post(`/investigations/${investigationId}/exports/${id}/review`, { decision, reason: why });
       await load(investigationId);
@@ -100,9 +105,7 @@ export default function EvidencePage() {
     }
   };
 
-  const execute = async (id: string) => {
-    const why = window.prompt('Motivo da execução da exportação:')?.trim() ?? '';
-    if (!why) return;
+  const execute = async (id: string, why: string) => {
     try {
       await client.post(`/investigations/${investigationId}/exports/${id}/execute`, { reason: why });
       await load(investigationId);
@@ -290,12 +293,12 @@ export default function EvidencePage() {
                     <div className="flex flex-wrap gap-2 pt-1">
                       {user?.role === 'admin' && status === 'PENDING' && (
                         <>
-                          <button onClick={() => void review(entry.id, 'APPROVED')} className="inline-flex h-7 items-center gap-1 rounded-md border border-[hsl(var(--status-online)_/_0.4)] px-2.5 text-xs text-[hsl(var(--status-online))]"><CheckCircle2 className="h-3.5 w-3.5" /> Aprovar</button>
-                          <button onClick={() => void review(entry.id, 'REJECTED')} className="inline-flex h-7 items-center gap-1 rounded-md border border-[hsl(var(--destructive)_/_0.4)] px-2.5 text-xs text-[hsl(var(--destructive))]"><XCircle className="h-3.5 w-3.5" /> Rejeitar</button>
+                          <button onClick={() => { setMotivoTexto(''); setMotivoAlvo({ tipo: 'review', id: entry.id, decision: 'APPROVED' }); }} className="inline-flex h-7 items-center gap-1 rounded-md border border-[hsl(var(--status-online)_/_0.4)] px-2.5 text-xs text-[hsl(var(--status-online))]"><CheckCircle2 className="h-3.5 w-3.5" /> Aprovar</button>
+                          <button onClick={() => { setMotivoTexto(''); setMotivoAlvo({ tipo: 'review', id: entry.id, decision: 'REJECTED' }); }} className="inline-flex h-7 items-center gap-1 rounded-md border border-[hsl(var(--destructive)_/_0.4)] px-2.5 text-xs text-[hsl(var(--destructive))]"><XCircle className="h-3.5 w-3.5" /> Rejeitar</button>
                         </>
                       )}
                       {status === 'APPROVED' && (
-                        <button onClick={() => void execute(entry.id)} className="inline-flex h-7 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-xs text-primary"><FileArchive className="h-3.5 w-3.5" /> Executar Exportação</button>
+                        <button onClick={() => { setMotivoTexto(''); setMotivoAlvo({ tipo: 'execute', id: entry.id }); }} className="inline-flex h-7 items-center gap-1 rounded-md border border-primary/40 px-2.5 text-xs text-primary"><FileArchive className="h-3.5 w-3.5" /> Executar Exportação</button>
                       )}
                     </div>
                   )}
@@ -312,6 +315,53 @@ export default function EvidencePage() {
           </div>
         </section>
       </div>
+      {/* JUSTIFICATIVA DA CADEIA DE CUSTÓDIA. Vinha de `window.prompt`: caixa
+          bloqueável pelo navegador, fora do tema, sem validação, sem revisão do
+          texto antes de enviar e sem acessibilidade — inaceitável no registro
+          que sustenta a prova. */}
+      {motivoAlvo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl">
+            <h2 className="text-sm font-semibold">
+              {motivoAlvo.tipo === 'execute'
+                ? 'Motivo da execução da exportação'
+                : motivoAlvo.decision === 'APPROVED' ? 'Motivo da aprovação' : 'Motivo da rejeição'}
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Este texto entra na cadeia de custódia e acompanha o pacote exportado.
+            </p>
+            <label className="sr-only" htmlFor="motivo-custodia">Motivo</label>
+            <textarea
+              id="motivo-custodia"
+              autoFocus
+              rows={3}
+              value={motivoTexto}
+              onChange={(event) => setMotivoTexto(event.target.value)}
+              className="input mt-3 w-full resize-y py-2"
+              placeholder="Descreva o motivo (obrigatório)"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setMotivoAlvo(null)} className="btn btn-secondary btn-sm">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={!motivoTexto.trim()}
+                onClick={() => {
+                  const alvo = motivoAlvo;
+                  const texto = motivoTexto.trim();
+                  setMotivoAlvo(null);
+                  if (alvo.tipo === 'execute') void execute(alvo.id, texto);
+                  else void review(alvo.id, alvo.decision, texto);
+                }}
+                className="btn btn-primary btn-sm disabled:opacity-40"
+              >
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

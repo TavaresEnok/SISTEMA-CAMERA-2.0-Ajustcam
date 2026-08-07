@@ -358,7 +358,7 @@ export default function UsuariosPage() {
                     <td className="px-3 py-2.5 text-[hsl(var(--muted-foreground))]">{visibleRoleLabel(u.role)}</td>
                     <td className="px-3 py-2.5">
                       {groupPermissions.length > 0 ? (
-                        <span className="text-[hsl(var(--muted-foreground))] truncate block max-w-[200px]" title={groupPermissions.map((p) => p.group?.name).filter(Boolean).join(', ')}>
+                        <span className="text-[hsl(var(--muted-foreground))] truncate block max-w-[200px]" title={groupPermissions.map((p) => p.group?.name).filter(Boolean).join(', ')} aria-label={groupPermissions.map((p) => p.group?.name).filter(Boolean).join(', ')}>
                           {groupPermissions.map((p) => p.group?.name).filter(Boolean).join(', ')}
                         </span>
                       ) : (
@@ -373,13 +373,13 @@ export default function UsuariosPage() {
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-                        <button onClick={() => { setEditUser(u); setSelectedUserId(u.id); }} className="w-6 h-6 flex items-center justify-center rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--chart-2))] hover:bg-[hsl(var(--accent))] transition-colors" title="Editar">
+                        <button onClick={() => { setEditUser(u); setSelectedUserId(u.id); }} className="w-6 h-6 flex items-center justify-center rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--chart-2))] hover:bg-[hsl(var(--accent))] transition-colors" title="Editar" aria-label="Editar">
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => void toggleLock(u.id, !u.active)}
                           className={cn("w-6 h-6 flex items-center justify-center rounded text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] transition-colors", u.active ? "hover:text-[hsl(var(--destructive))]" : "hover:text-[hsl(var(--status-online))]")}
-                          title={u.active ? 'Bloquear usuário' : 'Desbloquear usuário'}
+                          title={u.active ? 'Bloquear usuário' : 'Desbloquear usuário'} aria-label={u.active ? 'Bloquear usuário' : 'Desbloquear usuário'}
                         >
                           {u.active ? <UserX className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                         </button>
@@ -387,7 +387,7 @@ export default function UsuariosPage() {
                           <button
                             onClick={() => setExcluirAlvo({ id: u.id, name: u.name, email: u.email })}
                             className="w-6 h-6 flex items-center justify-center rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))] hover:bg-[hsl(var(--accent))] transition-colors"
-                            title="Excluir permanentemente"
+                            title="Excluir permanentemente" aria-label="Excluir permanentemente"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -508,7 +508,7 @@ export default function UsuariosPage() {
                         onClick={() => void revokeAccess(permission.id)}
                         disabled={accessLoading}
                         className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
-                        title="Remover acesso"
+                        title="Remover acesso" aria-label="Remover acesso"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>

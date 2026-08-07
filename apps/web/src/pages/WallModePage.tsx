@@ -90,7 +90,7 @@ export default function WallModePage() {
           </div>
           <div className="flex items-center gap-4">
             {activeAlertas > 0 && (
-              <div className="flex items-center gap-1.5 alarm-blink">
+              <div className="flex items-center gap-1.5 alarm-glow">
                 <Bell className="h-3.5 w-3.5 text-[hsl(var(--destructive))]" />
                 <span className="text-xs text-[hsl(var(--destructive))]">{activeAlertas} alerta{activeAlertas === 1 ? '' : 's'} ativo{activeAlertas === 1 ? '' : 's'}</span>
               </div>
@@ -125,7 +125,7 @@ export default function WallModePage() {
           const overlay = statusOverlay(cam.status);
           return (
             <div key={cam.id} className="relative bg-black overflow-hidden group">
-              <div className="absolute inset-0 scan-line-overlay opacity-40" />
+              <div className="absolute inset-0 camera-scanline opacity-40" />
               <div className="absolute inset-0 flex items-center justify-center">
                 <Camera className="h-8 w-8 text-white/10" />
               </div>

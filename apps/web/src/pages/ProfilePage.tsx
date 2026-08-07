@@ -353,7 +353,7 @@ export default function ProfilePage() {
                       </span>
                       <button
                         className="btn btn-ghost btn-xs"
-                        title={user.isActive ? 'Bloquear acesso' : 'Reativar acesso'}
+                        title={user.isActive ? 'Bloquear acesso' : 'Reativar acesso'} aria-label={user.isActive ? 'Bloquear acesso' : 'Reativar acesso'}
                         onClick={() => void toggleActive(user.id, !user.isActive)}
                       >
                         {user.isActive

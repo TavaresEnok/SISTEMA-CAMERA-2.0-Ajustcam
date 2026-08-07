@@ -798,7 +798,7 @@ export default function GroupsPage() {
                         <span className="min-w-0 flex-1 truncate">{c.name}</span>
                         {!segue && <span className="shrink-0 text-[11px] text-muted-foreground">{propria || 3} dias próprios</span>}
                         {perde > 0 && (
-                          <span className="shrink-0 text-[11px]" style={{ color: 'hsl(var(--warning))' }}>−{perde} dias</span>
+                          <span className="shrink-0 text-[11px]" style={{ color: 'hsl(var(--status-warning))' }}>−{perde} dias</span>
                         )}
                       </label>
                     );
