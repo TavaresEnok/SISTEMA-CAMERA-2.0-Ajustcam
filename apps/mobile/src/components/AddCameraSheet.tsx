@@ -185,7 +185,7 @@ export function AddCameraSheet({ visible, apiUrl, token, onClose, onCreated }: A
               {submitting ? <ActivityIndicator color="#fff" /> : (
                 <>
                   <Icon name="plus" size={18} color="#fff" strokeWidth={2.6} />
-                  <Text style={styles.saveText}>Cadastrar câmera</Text>
+                  <Text style={[styles.saveText, { color: theme.textOnAccent }]}>Cadastrar câmera</Text>
                 </>
               )}
             </LinearGradient>
@@ -222,5 +222,7 @@ const styles = StyleSheet.create({
   banner: { flexDirection: 'row', alignItems: 'center', gap: 9, borderRadius: 12, paddingHorizontal: 13, paddingVertical: 11, marginTop: 14 },
   bannerText: { fontSize: 12.5, fontWeight: '700', flex: 1 },
   saveBtn: { borderRadius: 14, paddingVertical: 15, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
-  saveText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  // cor vem do tema no uso (`textOnAccent`): branco fixo sobre a cor da marca
+  // fica ilegível quando o cliente usa uma primária clara.
+  saveText: { fontSize: 15, fontWeight: '800' },
 });

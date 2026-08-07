@@ -54,6 +54,9 @@ if [[ ! "$PACKAGE_ID" =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$ ]]; t
   echo "packageId inválido em config.json: '$PACKAGE_ID'" >&2; exit 2
 fi
 APP_NAME="$(node -e "process.stdout.write((require('$CONFIG').appName||'$SLUG'))")"
+# Opt-in de tráfego sem TLS (rede interna sem certificado). Lido aqui para o
+# gate do APK final saber que a exceção é deliberada — ver adiante.
+ALLOW_CLEARTEXT="$(node -e "process.stdout.write(String(require('$CONFIG').allowCleartext === true))")"
 
 echo ">> Cliente: $SLUG  |  app: $APP_NAME  |  pacote: $PACKAGE_ID"
 
@@ -183,7 +186,18 @@ for forbidden in android.permission.SYSTEM_ALERT_WINDOW android.permission.WRITE
 done
 APK_MANIFEST="$("$BUILD_TOOLS/aapt" dump xmltree "$OUT" AndroidManifest.xml)"
 grep -Eq 'android:allowBackup.*0x0$' <<<"$APK_MANIFEST" || { echo "APK final permite backup de dados internos" >&2; exit 4; }
-grep -Eq 'android:usesCleartextTraffic.*0x0$' <<<"$APK_MANIFEST" || { echo "APK final permite tráfego sem TLS" >&2; exit 4; }
+# CLEARTEXT: proibido por padrão, liberado só com opt-in EXPLÍCITO do cliente.
+#
+# Antes o gate era absoluto e a flag `allowCleartext` do config era letra morta:
+# uma instalação de rede interna, sem TLS, não tinha NENHUM caminho de build — e
+# o app aceitava `http://` no campo de servidor para depois falhar no Android
+# com erro genérico de rede. Agora a exceção existe, é declarada por cliente, e
+# aparece no log do build (não passa despercebida numa revisão).
+if [ "$ALLOW_CLEARTEXT" = "true" ]; then
+  echo "!! ATENÇÃO: build com tráfego sem TLS liberado (allowCleartext do cliente '$SLUG')" >&2
+else
+  grep -Eq 'android:usesCleartextTraffic.*0x0$' <<<"$APK_MANIFEST" || { echo "APK final permite tráfego sem TLS (defina allowCleartext no config do cliente se for intencional)" >&2; exit 4; }
+fi
 grep -Eq 'android:requestLegacyExternalStorage.*0x0$' <<<"$APK_MANIFEST" || { echo "APK final usa armazenamento legado" >&2; exit 4; }
 echo ">> manifest final validado (sem overlay/storage legado, backup e cleartext bloqueados)"
 

@@ -204,7 +204,7 @@ function ListRow({ cam, poster, theme, s, fav, onToggleFav, onOpen }: any) {
         </View>
       </View>
       <View style={{ alignItems: 'center', gap: 10 }}>
-        <TouchableOpacity onPress={onToggleFav} hitSlop={10}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Favoritar câmera" onPress={onToggleFav} hitSlop={10}>
           <Icon name="star" size={20} color={fav ? theme.warning : theme.textMuted} />
         </TouchableOpacity>
         <Icon name="forward" size={15} color={theme.textMuted} />
@@ -246,7 +246,7 @@ function MosaicTile({ cam, poster, live, hlsUrl, whepUrl, onRefreshStream, theme
       )}
       <View style={s.tileShade} />
       {isOn ? <View style={[s.liveBadgeSm, { top: 8, left: 8 }]}><View style={s.liveDotSm} /><Text style={s.liveTextSm}>AO VIVO</Text></View> : null}
-      <TouchableOpacity style={s.tileStar} onPress={onToggleFav} hitSlop={8}>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Favoritar câmera" style={s.tileStar} onPress={onToggleFav} hitSlop={8}>
         <Icon name="star" size={16} color={fav ? theme.warning : '#fff'} />
       </TouchableOpacity>
       <View style={s.tileFooter}>

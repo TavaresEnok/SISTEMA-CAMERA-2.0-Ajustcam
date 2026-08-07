@@ -57,6 +57,8 @@ interface Props {
   onOpenPlayback: (r: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Gravação cujo token está sendo emitido (retorno imediato ao toque). */
+  abrindoGravacaoId?: string | null;
   /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
   onNaoDecodificou: () => boolean;
   /** Posição corrente, para retomar o ponto ao trocar a URL. */
@@ -199,10 +201,10 @@ export function LiveScreenRedesign(props: Props) {
         ) : null}
         {!isPlaying ? (
           <View style={[s.fsBottom, { bottom: 40 + insets.bottom, left: insets.left, right: insets.right }]}>
-            <TouchableOpacity style={[s.fsBtn, !muted && audioAvailable !== false && s.fsBtnOn]} disabled={audioAvailable === false} onPress={() => setMuted((m) => !m)} activeOpacity={0.8}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Áudio" style={[s.fsBtn, !muted && audioAvailable !== false && s.fsBtnOn]} disabled={audioAvailable === false} onPress={() => setMuted((m) => !m)} activeOpacity={0.8}>
               <Icon name="mic" size={20} color={audioAvailable === false ? 'rgba(255,255,255,0.4)' : '#fff'} />
             </TouchableOpacity>
-            <TouchableOpacity style={s.fsBtn} onPress={() => onSnapshot(camera)} activeOpacity={0.8}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Tirar foto" style={s.fsBtn} onPress={() => onSnapshot(camera)} activeOpacity={0.8}>
               <Icon name="camera" size={20} color="#fff" />
             </TouchableOpacity>
             <TouchableOpacity style={[s.fsBtn, recordingActive && s.fsBtnRec]} onPress={() => onToggleRecording(camera)} activeOpacity={0.8}>

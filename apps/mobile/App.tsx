@@ -109,6 +109,8 @@ function AppInner() {
   const [recordingsLoadingMore, setRecordingsLoadingMore] = useState(false);
   const [recordingsError, setRecordingsError] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<ActivePlayback | null>(null);
+  /** Gravação cujo play-token está sendo emitido — dá retorno ao toque. */
+  const [abrindoGravacaoId, setAbrindoGravacaoId] = useState<string | null>(null);
   // Espelho para os timers lerem o playback VIGENTE sem stale closure.
   const activePlaybackRef = useRef<ActivePlayback | null>(null);
   useEffect(() => { activePlaybackRef.current = activePlayback; }, [activePlayback]);
@@ -1179,6 +1181,9 @@ function AppInner() {
     const fonte = opcoes.fonte ?? 'direta';
     const token = session.token;
     const generation = ++playbackRequestRef.current;
+    // Feedback IMEDIATO: o POST do play-token levava 2–4s em 3G e nada mudava
+    // na tela nesse intervalo — o operador tocava de novo achando que falhou.
+    if (!opcoes.silencioso) setAbrindoGravacaoId(recording.id);
     try {
       const data = await request<{ playToken: string }>(session.apiUrl, `/recordings/${recording.id}/play-token`, session.token, { method: 'POST' });
       const url = normalizeServerUrl(
@@ -1197,6 +1202,8 @@ function AppInner() {
       // Renovação silenciosa não pode virar alerta: o vídeo está tocando.
       if (opcoes.silencioso) return;
       Alert.alert('Reprodução', error instanceof Error ? error.message : 'Não foi possível abrir a gravação.');
+    } finally {
+      if (playbackRequestRef.current === generation) setAbrindoGravacaoId(null);
     }
   };
 
@@ -1604,6 +1611,7 @@ function AppInner() {
             onPlayLocal={playLocalClip}
             onDeleteLocal={deleteLocalClip}
             onRefreshStream={() => { void loadStream(live.id, 'selected', true); }}
+            abrindoGravacaoId={abrindoGravacaoId}
           />
         ) : (
         <LiveScreen
@@ -1651,7 +1659,8 @@ function AppInner() {
           downloadingIds={downloadingIds}
           notificationsMuted={notificationsMuted}
           onToggleNotifications={toggleNotifications}
-        />
+          abrindoGravacaoId={abrindoGravacaoId}
+          />
         )}
         {/* Menu inferior também na câmera aberta — tocar numa aba sai do vídeo e
             vai pra ela. Escondido em paisagem (vídeo em tela cheia usa a área).
@@ -1770,6 +1779,7 @@ function AppInner() {
             onLoadMore={loadMoreRecordings}
             onRetry={() => { if (selectedCamera) void loadRecordings(selectedCamera.id, recordingDateRef.current); }}
             onThumbnailError={refreshExpiredThumbnails}
+            abrindoGravacaoId={abrindoGravacaoId}
           />
         )}
 

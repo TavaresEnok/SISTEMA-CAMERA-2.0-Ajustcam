@@ -121,7 +121,7 @@ export function HomeRedesign(props: Props) {
           <Text style={styles.greet}>{greeting()},</Text>
           <Text style={styles.client} numberOfLines={1}>{clientName}</Text>
         </View>
-        <TouchableOpacity style={styles.iconBtn} onPress={onOpenAlarms} activeOpacity={0.8}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Alarmes" style={styles.iconBtn} onPress={onOpenAlarms} activeOpacity={0.8}>
           <Icon name="bell" size={19} color={theme.text} />
           {alarmCount > 0 ? <View style={styles.badgeDot} /> : null}
         </TouchableOpacity>
@@ -147,7 +147,7 @@ export function HomeRedesign(props: Props) {
 
       {/* Hero: câmera em destaque (long-press para fixar/soltar) */}
       {hero ? (
-        <TouchableOpacity style={styles.hero} activeOpacity={0.9} onPress={() => onOpenCamera(hero)} onLongPress={() => pinCamera(hero)}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Tirar foto" style={styles.hero} activeOpacity={0.9} onPress={() => onOpenCamera(hero)} onLongPress={() => pinCamera(hero)}>
           {heroPoster ? (
             <Image source={{ uri: heroPoster }} style={styles.heroImg} resizeMode="cover" onError={() => onPosterError?.(hero.id)} />
           ) : (
@@ -196,7 +196,7 @@ export function HomeRedesign(props: Props) {
           const poster = streamPosters[cam.id];
           const isPinnedCard = featuredId === cam.id;
           return (
-            <TouchableOpacity key={cam.id} style={styles.card} activeOpacity={0.85} onPress={() => onOpenCamera(cam)} onLongPress={() => pinCamera(cam)}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Tirar foto" key={cam.id} style={styles.card} activeOpacity={0.85} onPress={() => onOpenCamera(cam)} onLongPress={() => pinCamera(cam)}>
               <View style={styles.cardThumb}>
                 {isOn && poster ? (
                   <Image source={{ uri: poster }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => onPosterError?.(cam.id)} />
@@ -229,7 +229,7 @@ export function HomeRedesign(props: Props) {
           const cam = a.cameraId ? cameras.find((c) => c.id === a.cameraId) : undefined;
           const poster = cam ? streamPosters[cam.id] : null;
           return (
-            <TouchableOpacity
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Alarmes"
               key={a.id}
               style={styles.activity}
               activeOpacity={0.85}

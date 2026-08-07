@@ -56,6 +56,8 @@ interface LiveScreenProps {
   onOpenPlayback: (recording: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Gravação cujo token está sendo emitido (retorno imediato ao toque). */
+  abrindoGravacaoId?: string | null;
   /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
   onNaoDecodificou: () => boolean;
   /** Posição corrente, para retomar o ponto ao trocar a URL. */
@@ -119,8 +121,7 @@ export function LiveScreen({
   onOpenPlayback, onClosePlayback, onRetryPlayback, onNaoDecodificou, onProgressoPlayback, onDownloadRecording, onPreviousDate, onNextDate,
   onLoadMoreRecordings, onRetryRecordings, onThumbnailError, onRefreshStream,
   canPlayback, canDownload, downloadingIds,
-  notificationsMuted, onToggleNotifications,
-}: LiveScreenProps) {
+  notificationsMuted, onToggleNotifications, abrindoGravacaoId }: LiveScreenProps) {
   const { theme } = useTheme();
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('idle');
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });

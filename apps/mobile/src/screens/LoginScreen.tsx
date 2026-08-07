@@ -5,6 +5,7 @@ import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, Text
 import { BRANDING, BRAND_LOGO } from '../branding';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../theme/ThemeProvider';
+import Constants from 'expo-constants';
 import { withAlpha } from '../services/branding';
 
 interface LoginScreenProps {
@@ -34,6 +35,10 @@ export function LoginScreen({
   // genérico (sem servidor embutido) mostra o campo p/ digitar o endereço.
   const hasBakedServer = !!(BRANDING.apiUrl && BRANDING.apiUrl.trim());
   const [showServer, setShowServer] = useState(!apiUrl);
+  // Servidor sem TLS num build que bloqueia tráfego em claro: o Android recusa
+  // no nível do SISTEMA e o usuário só veria "erro de rede", sem pista da causa.
+  const avisoDeCleartext = /^http:\/\//i.test((apiUrl ?? '').trim())
+    && (Constants.expoConfig?.android as { usesCleartextTraffic?: boolean } | undefined)?.usesCleartextTraffic !== true;
 
   // A logo configurada em Aparência pertence exclusivamente ao aplicativo.
   const logoSource = branding.logoDataUrl ? { uri: branding.logoDataUrl } : BRAND_LOGO;
@@ -138,6 +143,19 @@ export function LoginScreen({
           </Pressable>
         </View>
 
+        {/* Servidor sem TLS num build que bloqueia tráfego em claro: o Android
+            recusa a conexão no nível do sistema e o usuário só veria um erro
+            genérico de rede, sem pista da causa. Avisar ANTES de tentar. */}
+        {avisoDeCleartext ? (
+          <View style={[styles.aviso, { borderColor: theme.warning, backgroundColor: theme.surface }]}>
+            <Icon name="alert" size={15} color={theme.warning} />
+            <Text style={[styles.avisoTexto, { color: theme.textSub }]}>
+              Este endereço usa <Text style={{ fontWeight: '700' }}>http://</Text> e esta versão do app
+              só aceita conexões seguras (https). Use o endereço https do servidor.
+            </Text>
+          </View>
+        ) : null}
+
         <Pressable
           onPress={onSubmit}
           disabled={loading}
@@ -189,6 +207,8 @@ const styles = StyleSheet.create({
   input: { fontSize: 15, fontWeight: '600', padding: 0, marginTop: 1 },
   linksRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   smallLink: { fontSize: 12.5, fontWeight: '700' },
+  aviso: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, borderWidth: 1, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 12 },
+  avisoTexto: { flex: 1, fontSize: 12, lineHeight: 17 },
   forgot: { textAlign: 'right', fontSize: 12.5, fontWeight: '700' },
   cta: { borderRadius: 15, paddingVertical: 16, alignItems: 'center', marginTop: 4 },
   ctaText: { color: '#fff', fontSize: 16, fontWeight: '800' },

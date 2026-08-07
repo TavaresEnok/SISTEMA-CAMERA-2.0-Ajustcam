@@ -36,7 +36,21 @@ export function BottomTabsRedesign({ active, onChange, alarmCount = 0, reviewCou
           const on = active === tab.id;
           const color = on ? theme.accent : theme.textMuted;
           return (
-            <TouchableOpacity key={tab.id} style={styles.item} activeOpacity={0.7} onPress={() => onChange(tab.id)}>
+            <TouchableOpacity
+              key={tab.id}
+              style={styles.item}
+              activeOpacity={0.7}
+              onPress={() => onChange(tab.id)}
+              // O leitor de tela anunciava só "botão": sem papel de aba, sem
+              // qual está selecionada e sem o contador do badge.
+              accessibilityRole="tab"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={
+                tab.id === 'alarmes' && alarmCount > 0 ? `${tab.label}, ${alarmCount} em aberto`
+                : tab.id === 'revisao' && reviewCount > 0 ? `${tab.label}, ${reviewCount} para revisar`
+                : tab.label
+              }
+            >
               <View>
                 <Icon name={tab.icon} size={21} color={color} />
                 {(tab.id === 'alarmes' && alarmCount > 0) || (tab.id === 'revisao' && reviewCount > 0) ? <View style={[styles.dot, { backgroundColor: theme.danger, borderColor: theme.surface }]} /> : null}

@@ -80,7 +80,7 @@ export function MosaicScreen({
           ) : null}
           <Pressable style={[styles.newBtn, { backgroundColor: theme.accent }]} onPress={openNew} accessibilityRole="button">
             <Icon name="plus" size={16} color="#fff" strokeWidth={2.4} />
-            <Text style={styles.newBtnText}>Grupo</Text>
+            <Text style={[styles.newBtnText, { color: theme.textOnAccent }]}>Grupo</Text>
           </Pressable>
         </View>
       </View>
@@ -96,7 +96,7 @@ export function MosaicScreen({
               accessibilityState={{ selected: on }}
               style={[styles.chip, { backgroundColor: on ? theme.accent : theme.surface, borderColor: on ? theme.accent : theme.border }]}
             >
-              <Text style={[styles.chipText, { color: on ? '#fff' : theme.textSub }]}>{g.name}</Text>
+              <Text style={[styles.chipText, { color: on ? theme.textOnAccent : theme.textSub }]}>{g.name}</Text>
             </Pressable>
           );
         })}
@@ -197,7 +197,9 @@ const styles = StyleSheet.create({
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   title: { fontSize: 27, fontWeight: '800', letterSpacing: -0.5 },
   newBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 40, paddingHorizontal: 14, borderRadius: 13 },
-  newBtnText: { color: '#fff', fontSize: 12.5, fontWeight: '800' },
+  // cor aplicada em linha a partir do tema (ver uso) — `#fff` fixo ficava
+  // ilegível em instalação com marca de cor clara.
+  newBtnText: { fontSize: 12.5, fontWeight: '800' },
   liveToggle: { height: 40, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, borderRadius: 13, borderWidth: StyleSheet.hairlineWidth },
   liveToggleDot: { width: 7, height: 7, borderRadius: 4 },
   liveToggleText: { fontSize: 11.5, fontWeight: '800' },

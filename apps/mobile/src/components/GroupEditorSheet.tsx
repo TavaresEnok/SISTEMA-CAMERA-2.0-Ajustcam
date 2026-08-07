@@ -112,7 +112,7 @@ export function GroupEditorSheet({ visible, cameras, group, onClose }: GroupEdit
             ) : null}
             <Pressable style={{ flex: 1 }} onPress={save}>
               <LinearGradient colors={[theme.accent, theme.accentDark]} style={styles.saveBtn}>
-                <Text style={styles.saveText}>{editing ? 'Salvar alterações' : 'Criar grupo'}</Text>
+                <Text style={[styles.saveText, { color: theme.textOnAccent }]}>{editing ? 'Salvar alterações' : 'Criar grupo'}</Text>
               </LinearGradient>
             </Pressable>
           </View>
@@ -143,5 +143,7 @@ const styles = StyleSheet.create({
   footer: { flexDirection: 'row', gap: 10, marginTop: 16 },
   deleteBtn: { width: 50, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   saveBtn: { borderRadius: 14, paddingVertical: 15, alignItems: 'center' },
-  saveText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  // cor vem do tema no uso (`textOnAccent`): branco fixo sobre a cor da marca
+  // fica ilegível quando o cliente usa uma primária clara.
+  saveText: { fontSize: 15, fontWeight: '800' },
 });

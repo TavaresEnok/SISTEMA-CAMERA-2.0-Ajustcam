@@ -35,6 +35,8 @@ interface PlaybackScreenProps {
   onOpenPlayback: (recording: Recording) => void;
   onClosePlayback: () => void;
   onRetryPlayback: () => void;
+  /** Gravação cujo token está sendo emitido (retorno imediato ao toque). */
+  abrindoGravacaoId?: string | null;
   /** Degrau de codec: pede a versão compatível quando o original não decodifica. */
   onNaoDecodificou: () => boolean;
   /** Posição corrente, para retomar o ponto ao trocar a URL. */
@@ -51,8 +53,7 @@ export function PlaybackScreen({
   cameras, selectedCamera, recordings, recordingsTotal, loading, loadingMore, error,
   activePlayback, recordingDate, canPlayback, canDownload, downloadingIds,
   onSelectCamera, onOpenPlayback, onClosePlayback, onRetryPlayback, onNaoDecodificou, onProgressoPlayback, onDownloadRecording,
-  onPreviousDate, onNextDate, onLoadMore, onRetry, onThumbnailError,
-}: PlaybackScreenProps) {
+  onPreviousDate, onNextDate, onLoadMore, onRetry, onThumbnailError, abrindoGravacaoId }: PlaybackScreenProps) {
   const { theme } = useTheme();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [filter, setFilter] = useState<PlaybackFilter>('all');
@@ -237,10 +238,12 @@ export function PlaybackScreen({
           const active = activePlayback?.recording.id === rec.id;
           const usable = rec.fileUsable !== false && rec.fileExists !== false;
           const downloading = downloadingIds.includes(rec.id);
+          // Abrindo: o token leva 2–4s em 3G e a linha não dava sinal nenhum.
+          const abrindo = abrindoGravacaoId === rec.id;
           return (
             <Pressable
-              onPress={() => usable && onOpenPlayback(rec)}
-              disabled={!usable}
+              onPress={() => usable && !abrindo && onOpenPlayback(rec)}
+              disabled={!usable || abrindo}
               accessibilityRole="button"
               accessibilityLabel={`Gravação de ${formatTime(rec.startedAt)}`}
               accessibilityState={{ disabled: !usable, selected: active }}
@@ -253,7 +256,7 @@ export function PlaybackScreen({
                   <LinearGradient colors={selectedCamera ? tintFor(selectedCamera) : ['#243044', '#101826']} style={StyleSheet.absoluteFill} />
                 )}
                 <View style={styles.recThumbShade} />
-                <Icon name="play" size={16} color="#fff" fill />
+                {abrindo ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="play" size={16} color="#fff" fill />}
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[styles.recRange, { color: theme.text }]}>
